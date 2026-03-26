@@ -31,6 +31,7 @@ class Config:
     NOTION_COL_CATEGORY: str = os.getenv("NOTION_COL_CATEGORY", "Categories")
     NOTION_COL_NAME: str = os.getenv("NOTION_COL_NAME", "Name")
     NOTION_COL_AMOUNT: str = os.getenv("NOTION_COL_AMOUNT", "Amount")
+    NOTION_COL_ACCOUNT: str = os.getenv("NOTION_COL_ACCOUNT", "Accounts")
     # Nomi colonne database Accounts
     NOTION_ACCOUNTS_COL_NAME: str = os.getenv("NOTION_ACCOUNTS_COL_NAME", "Name")
     NOTION_ACCOUNTS_COL_BALANCE: str = os.getenv("NOTION_ACCOUNTS_COL_BALANCE", "Current Balance")
@@ -43,9 +44,16 @@ class Config:
     NOTION_MB_DATE: str = os.getenv("NOTION_MB_DATE", "Month")
     NOTION_MB_NET_SAVINGS: str = os.getenv("NOTION_MB_NET_SAVINGS", "Risparmio Netto")
 
+    # --- LLM PROVIDER ---
+    LLM_PROVIDER: str = os.getenv("LLM_PROVIDER", "gemini")  # "gemini" o "ollama"
+
     # --- GEMINI ---
     GEMINI_API_KEY: str = os.getenv("GEMINI_API_KEY", "")
     GEMINI_MODEL: str = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
+
+    # --- OLLAMA ---
+    OLLAMA_BASE_URL: str = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
+    OLLAMA_MODEL: str = os.getenv("OLLAMA_MODEL", "qwen2.5:7b")
 
     # --- TELEGRAM ---
     TELEGRAM_BOT_TOKEN: str = os.getenv("TELEGRAM_BOT_TOKEN", "")
@@ -69,10 +77,12 @@ class Config:
             "NOTION_EXPENSE_DATABASE_ID": cls.NOTION_EXPENSE_DATABASE_ID,
             "NOTION_INCOME_DATABASE_ID": cls.NOTION_INCOME_DATABASE_ID,
             "NOTION_ACCOUNTS_DATABASE_ID": cls.NOTION_ACCOUNTS_DATABASE_ID,
-            "GEMINI_API_KEY": cls.GEMINI_API_KEY,
             "TELEGRAM_BOT_TOKEN": cls.TELEGRAM_BOT_TOKEN,
             "TELEGRAM_CHAT_ID": cls.TELEGRAM_CHAT_ID,
         }
+        # GEMINI_API_KEY è richiesta solo se il provider è Gemini
+        if cls.LLM_PROVIDER == "gemini":
+            required["GEMINI_API_KEY"] = cls.GEMINI_API_KEY
         missing = [k for k, v in required.items() if not v]
         if missing:
             raise EnvironmentError(

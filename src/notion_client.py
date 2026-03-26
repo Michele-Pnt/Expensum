@@ -347,11 +347,19 @@ class NotionExpenseClient:
         label = f"{month_name[mb_date.month]} {mb_date.year}"
 
         return {
+            "id": page.get("id", ""),
             "year": mb_date.year,
             "month": mb_date.month,
             "net_savings": float(net_savings),
             "label": label,
         }
+
+    def _resolve_monthly_balance(self, target_date: date) -> Optional[str]:
+        """Trova il page_id del record Monthly Balance corrispondente per mese e anno."""
+        for b in self.fetch_monthly_balances():
+            if b["year"] == target_date.year and b["month"] == target_date.month:
+                return b["id"]
+        return None
 
     # ------------------------------------------------------------------
     # Fetch Income
@@ -536,7 +544,11 @@ class NotionExpenseClient:
             total_transfer_out,
         )
 
-        return {"name": name, "current_balance": float(current_balance)}
+        return {
+            "id": page_id,
+            "name": name,
+            "current_balance": float(current_balance)
+        }
 
     def _read_account_component(
         self,
@@ -557,16 +569,14 @@ class NotionExpenseClient:
                 "(es. NOTION_ACCOUNTS_COL_INITIAL_AMOUNT)."
             )
 
-        prop_value = None
-        if page_id and prop.get("id"):
+        numeric = self._extract_numeric_from_notion_property(prop)
+        
+        if numeric is None and page_id and prop.get("id"):
             prop_value = self._retrieve_page_property_with_retry(
                 page_id=page_id,
                 property_id=prop["id"],
             )
-
-        numeric = self._extract_numeric_from_notion_property(prop_value)
-        if numeric is None:
-            numeric = self._extract_numeric_from_notion_property(prop)
+            numeric = self._extract_numeric_from_notion_property(prop_value)
 
         return float(numeric) if numeric is not None else 0.0
 
@@ -591,12 +601,16 @@ class NotionExpenseClient:
 
         if ptype == "number":
             val = prop.get("number")
+            if val is None:
+                return 0.0
             return float(val) if isinstance(val, (int, float)) else None
 
         if ptype == "rollup":
             rollup_val = prop.get("rollup", {})
             if rollup_val.get("type") == "number":
                 val = rollup_val.get("number")
+                if val is None:
+                    return 0.0
                 return float(val) if isinstance(val, (int, float)) else None
             return None
 
@@ -608,6 +622,8 @@ class NotionExpenseClient:
 
         if ftype == "number":
             val = formula_val.get("number")
+            if val is None:
+                return 0.0
             return float(val) if isinstance(val, (int, float)) else None
 
         # Supporta formule che restituiscono stringhe tipo "€1,200.00" o "1.200,00 €"
@@ -711,6 +727,103 @@ class NotionExpenseClient:
         return conditions[0] if len(conditions) == 1 else {"and": conditions}
 
     # ------------------------------------------------------------------
+    # Write: creazione nuova spesa
+    # ------------------------------------------------------------------
+    def get_category_names(self) -> list[str]:
+        """Restituisce la lista dei nomi delle categorie disponibili (per il prompt LLM)."""
+        self._load_categories()
+        return [info["name"] for info in self._category_map.values()]
+
+    def _resolve_category_by_name(self, category_name: str) -> Optional[str]:
+        """Risolve un nome di categoria nel page_id corrispondente."""
+        self._load_categories()
+        for page_id, info in self._category_map.items():
+            if info["name"].lower() == category_name.lower():
+                return page_id
+        # Fallback: ricerca parziale
+        for page_id, info in self._category_map.items():
+            if category_name.lower() in info["name"].lower() or info["name"].lower() in category_name.lower():
+                return page_id
+        return None
+
+    def create_expense(
+        self,
+        expense_date: date,
+        amount: float,
+        name: str,
+        category_name: Optional[str] = None,
+        account_id: Optional[str] = None,
+    ) -> dict:
+        """
+        Crea una nuova page nel database Expense.
+
+        Args:
+            expense_date: Data della spesa
+            amount: Importo (positivo)
+            name: Descrizione della spesa
+            category_name: Nome della categoria (verrà risolta in page_id)
+            account_id: Page ID del conto corrente (opzionale)
+
+        Returns:
+            dict con i dati della page creata
+        """
+        properties = {
+            Config.NOTION_COL_DATE: {
+                "date": {"start": expense_date.isoformat()}
+            },
+            Config.NOTION_COL_AMOUNT: {
+                "number": abs(float(amount))
+            },
+            Config.NOTION_COL_NAME: {
+                "title": [
+                    {
+                        "text": {"content": name}
+                    }
+                ]
+            },
+        }
+
+        # Risolvi la categoria in un page_id per la relation
+        if category_name:
+            cat_page_id = self._resolve_category_by_name(category_name)
+            if cat_page_id:
+                properties[Config.NOTION_COL_CATEGORY] = {
+                    "relation": [{"id": cat_page_id}]
+                }
+                logger.info(f"Categoria '{category_name}' risolta in page_id {cat_page_id[:8]}...")
+            else:
+                logger.warning(f"Categoria '{category_name}' non trovata nel database Categories.")
+
+        # Risolvi il conto 
+        if account_id and hasattr(Config, "NOTION_COL_ACCOUNT"):
+            properties[Config.NOTION_COL_ACCOUNT] = {
+                "relation": [{"id": account_id}]
+            }
+
+        # Risolvi Monthly Balance
+        mb_id = self._resolve_monthly_balance(expense_date)
+        if mb_id:
+            properties["Monthly Balance"] = {
+                "relation": [{"id": mb_id}]
+            }
+            logger.info(f"Relazione Monthly Balance ({expense_date.strftime('%m/%Y')}) risolta in page_id {mb_id[:8]}...")
+        else:
+            logger.warning(f"Attenzione: nessun Monthly Balance trovato per {expense_date.strftime('%m/%Y')}")
+
+        logger.info(
+            f"Creazione spesa su Notion: {name} — €{amount:.2f} — "
+            f"{expense_date.isoformat()} — cat: {category_name or 'nessuna'} — conto_id: {account_id or 'nessuno'}"
+        )
+
+        result = self._client.pages.create(
+            parent={"database_id": Config.NOTION_EXPENSE_DATABASE_ID},
+            properties=properties,
+        )
+
+        logger.info(f"Spesa creata con successo: page_id={result['id'][:8]}...")
+        return result
+
+    # ------------------------------------------------------------------
     # Test connessione
     # ------------------------------------------------------------------
     def test_connection(self) -> str:
@@ -736,3 +849,4 @@ class NotionExpenseClient:
             except Exception as e:
                 lines.append(f"❌ {label}: {str(e)[:80]}")
         return "\n".join(lines)
+

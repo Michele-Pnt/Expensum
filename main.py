@@ -23,6 +23,7 @@ import asyncio
 import logging
 import sys
 import os
+import time
 from calendar import monthrange
 from datetime import date, datetime
 
@@ -31,6 +32,7 @@ from src.notion_client import NotionExpenseClient
 from src.data_processor import DataProcessor
 from src.forecaster import Forecaster
 from src.gemini_client import GeminiClient
+from src.ollama_client import OllamaClient
 from src.telegram_client import TelegramClient
 from src.report_builder import ReportBuilder
 from src.chart_generator import ChartGenerator
@@ -251,16 +253,24 @@ async def run_agent(target_year: int, target_month: int, dry_run: bool, debug_da
     else:
         accounts_text += "Nessun conto trovato.\n"
 
-    # 4. ANALISI AI CON GEMINI
-    logger.info("▶ Step 4/7: Analisi AI con Gemini 2.5 Flash")
+    # 4. ANALISI AI
+    llm_provider = Config.LLM_PROVIDER
+    logger.info(f"▶ Step 4/7: Analisi AI con provider '{llm_provider}'")
     net_savings_str = f"€{current_mb['net_savings']:.2f}" if current_mb else "n/d"
     if dry_run:
-        logger.info("  [DRY-RUN] Salto Gemini, uso report statistico locale")
+        logger.info(f"  [DRY-RUN] Salto {llm_provider}, uso report statistico locale")
         final_report = ReportBuilder.build_fallback_report(report, forecast, accounts=accounts)
     else:
         try:
-            gemini = GeminiClient()
-            final_report = gemini.analyze_and_generate_report(
+            if llm_provider == "ollama":
+                llm_client = OllamaClient()
+                logger.info(f"  Usando Ollama con modello {Config.OLLAMA_MODEL}")
+            else:
+                llm_client = GeminiClient()
+                logger.info(f"  Usando Gemini con modello {Config.GEMINI_MODEL}")
+
+            llm_start = time.time()
+            final_report = llm_client.analyze_and_generate_report(
                 data_text=data_text,
                 accounts_text=accounts_text,
                 forecast_text=forecast_text,
@@ -271,8 +281,10 @@ async def run_agent(target_year: int, target_month: int, dry_run: bool, debug_da
                 total_accounts_balance=f"{total_accounts_balance:.2f}",
                 net_savings=net_savings_str,
             )
+            llm_elapsed = time.time() - llm_start
+            logger.info(f"  ⏱️ Tempo inferenza {llm_provider}: {llm_elapsed:.1f}s")
         except Exception as e:
-            logger.error(f"Errore Gemini: {e}. Uso fallback statistico.")
+            logger.error(f"Errore {llm_provider}: {e}. Uso fallback statistico.")
             final_report = ReportBuilder.build_fallback_report(report, forecast, accounts=accounts)
 
     final_report = _insert_accounts_section_near_summary(final_report, accounts)
