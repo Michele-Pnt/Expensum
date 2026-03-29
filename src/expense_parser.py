@@ -19,25 +19,25 @@ from config import Config
 
 logger = logging.getLogger("financial_agent.expense_parser")
 
-_SYSTEM_PROMPT = """Sei un assistente finanziario. Il tuo compito è estrarre informazioni di spesa da messaggi scritti in modo informale in italiano.
+_SYSTEM_PROMPT = """Sei un assistente finanziario. Il tuo compito è estrarre informazioni finanziarie da messaggi scritti in modo informale in italiano. Devi capire dal contesto se si tratta di un'uscita (spesa) o di un'entrata (stipendio, regalo, rimborso, bonifico ricevuto).
 
 REGOLE TASSATIVE:
 1. Rispondi SOLO con un oggetto JSON valido, senza altro testo.
-2. Il JSON deve avere esattamente questi campi:
-   - "amount": numero (float). DEVI interpretare anche i numeri a parole. Esempi: "150 mila euro" -> 150000.0, "cento euro" -> 100.0, "10k" -> 10000.0, "15" -> 15.0. Se non è specificato in alcun modo, metti null.
-   - "category": stringa. Scegli RIGOROSAMENTE UNA SOLA voce dalla lista fornita di Categorie. Usa la deduzione (es. benzina -> Trasporti; Esselunga -> Spesa/Supermercato).
-   - "name": stringa, breve descrizione spesa (es. "Pizza amici", "Esselunga", "Benzina"). Max 3 parole.
+2. Il JSON deve avere esattamente questi 5 campi:
+   - "type": stringa. Deve essere ASSOLUTAMENTE "expense" (se è una spesa/uscita) oppure "income" (se è un introito/entrata).
+   - "amount": numero (float). DEVI interpretare anche i numeri a parole. Esempi: "150 mila euro" -> 150000.0, "cento euro" -> 100.0, "15" -> 15.0. Se non specificato, metti null.
+   - "category": stringa. RIGOROSAMENTE UNA SOLA voce dalla lista fornita di Categorie. Se `type` è "income", metti "Introito" o null, a meno che non ci sia una categoria palese.
+   - "name": stringa, breve descrizione (es. "Pizza amici", "Stipendio", "Busta Nonna"). Max 3 parole.
    - "date": stringa in formato "YYYY-MM-DD". Se non specificata, usa la data di oggi fornita.
-3. Se il messaggio NON sembra una spesa o trasferimento, rispondi con: {"error": "not_expense"}
+3. Se il messaggio NON sembra una transazione finanziaria, rispondi con: {"error": "not_expense"}
 4. NON inventare importi.
-5. Per la categoria, Scegli la più vicina o metti null.
 
 ESEMPI:
-- "ieri pizza 25€" → {"amount": 25.0, "category": "Ristoranti", "name": "Pizza", "date": "2026-03-20"}
-- "ho comprato una lamborghini da 150mila euro" → {"amount": 150000.0, "category": "Auto", "name": "Lamborghini", "date": "2026-03-22"}
-- "netflix" → {"amount": null, "category": "Abbonamenti", "name": "Netflix", "date": "2026-03-21"}
-- "ciao come stai?" → {"error": "not_expense"}
+- "ieri pizza 25€" → {"type": "expense", "amount": 25.0, "category": "Ristoranti", "name": "Pizza", "date": "2026-03-20"}
+- "ho ricevuto lo stipendio 1500" → {"type": "income", "amount": 1500.0, "category": null, "name": "Stipendio", "date": "2026-03-22"}
+- "netflix" → {"type": "expense", "amount": null, "category": "Abbonamenti", "name": "Netflix", "date": "2026-03-21"}
 """
+
 
 
 def _build_user_prompt(message: str, categories: list[str], today: date) -> str:
@@ -206,6 +206,7 @@ class ExpenseParser:
         name = parsed.get("name") or "Spesa"
 
         return {
+            "type": parsed.get("type", "expense"), # per indentificare spesa o entrata 
             "date": expense_date,
             "amount": amount,
             "category": category,

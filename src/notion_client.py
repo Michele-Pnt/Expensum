@@ -37,14 +37,37 @@ from config import Config
 logger = logging.getLogger("financial_agent.notion")
 
 
-class NotionExpenseClient:
+class NotionFinanceClient:
     """Client per l'estrazione dati da tutti i database Notion necessari."""
 
-    def __init__(self):
-        self._client = Client(auth=Config.NOTION_API_KEY)
-        # Caches
-        self._data_source_cache: dict[str, str] = {}   # db_id → data_source_id
-        self._category_map: dict[str, dict] = {}       # page_id → {"name": str, "average": float}
+    def __init__(self, 
+                 api_key: Optional[str] = None,
+                 expense_db_id: Optional[str] = None,
+                 income_db_id: Optional[str] = None,
+                 categories_db_id: Optional[str] = None,
+                 monthly_balance_db_id: Optional[str] = None,
+                 accounts_db_id: Optional[str] = None,
+                 subscriptions_db_id: Optional[str] = None,
+                 pay_transfer_db_id: Optional[str] = None):
+    
+        # Logica del "Fallback": 
+        # Se passo un ID (es. dal DB), uso quello. 
+        # Se passo None, vado a pescare quello di default nel .env (Config).
+        self.notion_api_key = api_key or Config.NOTION_API_KEY
+        self.expense_db_id = expense_db_id or Config.NOTION_EXPENSE_DATABASE_ID
+        self.income_db_id = income_db_id or Config.NOTION_INCOME_DATABASE_ID
+        self.categories_db_id = categories_db_id or Config.NOTION_CATEGORIES_DATABASE_ID
+        self.monthly_balance_db_id = monthly_balance_db_id or Config.NOTION_MONTHLY_BALANCE_DATABASE_ID
+        self.accounts_db_id = accounts_db_id or Config.NOTION_ACCOUNTS_DATABASE_ID
+        self.subscriptions_db_id = subscriptions_db_id or Config.NOTION_SUBSCRIPTIONS_DATABASE_ID
+        self.pay_transfer_db_id = pay_transfer_db_id or Config.NOTION_PAY_TRANSFER_DATABASE_ID
+
+        # Inizializziamo il client ufficiale Notion con la chiave specifica di QUESTA istanza
+        self._client = Client(auth=self.notion_api_key)
+        
+        # Caches (queste sono vuote all'inizio per ogni nuovo utente)
+        self._data_source_cache: dict[str, str] = {}
+        self._category_map: dict[str, dict] = {}
         self._categories_loaded = False
 
     # ------------------------------------------------------------------
@@ -78,9 +101,9 @@ class NotionExpenseClient:
         if self._categories_loaded:
             return
 
-        db_id = Config.NOTION_CATEGORIES_DATABASE_ID
+        db_id = self.categories_db_id
         if not db_id:
-            logger.warning("NOTION_CATEGORIES_DATABASE_ID non configurato.")
+            logger.warning("Categories Database ID non configurato.")
             self._categories_loaded = True
             return
 
@@ -213,7 +236,7 @@ class NotionExpenseClient:
         self._load_categories()
 
         # 2. Risolvi data_source_id
-        ds_id = self._get_data_source_id(Config.NOTION_EXPENSE_DATABASE_ID)
+        ds_id = self._get_data_source_id(self.expense_db_id)
 
         # 3. Query paginata
         filters = self._build_date_filter(start_date, end_date)
@@ -258,9 +281,9 @@ class NotionExpenseClient:
             net_savings = valore del campo "Risparmio Netto" (formula Notion),
             dato certo al 100% (incassi - spese).
         """
-        db_id = Config.NOTION_MONTHLY_BALANCE_DATABASE_ID
+        db_id = self.monthly_balance_db_id
         if not db_id:
-            logger.warning("NOTION_MONTHLY_BALANCE_DATABASE_ID non configurato.")
+            logger.warning("Monthly Balance Database ID non configurato.")
             return []
 
         try:
@@ -375,9 +398,9 @@ class NotionExpenseClient:
         Returns:
             Lista di dict {date, name, amount} ordinata per data.
         """
-        db_id = Config.NOTION_INCOME_DATABASE_ID
+        db_id = self.income_db_id
         if not db_id:
-            logger.warning("NOTION_INCOME_DATABASE_ID non configurato.")
+            logger.warning("Income Database ID non configurato.")
             return []
 
         try:
@@ -450,9 +473,9 @@ class NotionExpenseClient:
         Returns:
             Lista di dict {name, current_balance}.
         """
-        db_id = Config.NOTION_ACCOUNTS_DATABASE_ID
+        db_id = self.accounts_db_id
         if not db_id:
-            logger.warning("NOTION_ACCOUNTS_DATABASE_ID non configurato.")
+            logger.warning("Accounts Database ID non configurato.")
             return []
 
         try:
@@ -816,12 +839,81 @@ class NotionExpenseClient:
         )
 
         result = self._client.pages.create(
-            parent={"database_id": Config.NOTION_EXPENSE_DATABASE_ID},
+            parent={"database_id": self.expense_db_id},
             properties=properties,
         )
 
         logger.info(f"Spesa creata con successo: page_id={result['id'][:8]}...")
         return result
+
+
+    # ------------------------------------------------------------------
+    # Write: creazione nuova entrata
+    # ------------------------------------------------------------------
+    def create_income(
+        self,
+        income_date: date,
+        amount: float,
+        name: str,
+        account_id: Optional[str] = None,
+    ) -> dict:
+        """
+        Crea una nuova page nel database Income.
+
+        Args:
+            income_date: Data dell'entrata
+            amount: Importo (positivo)
+            name: Descrizione dell'entrata
+            account_id: Page ID del conto corrente (opzionale)
+
+        Returns:
+            dict con i dati della page creata
+        """
+        properties = {
+            Config.NOTION_COL_DATE: {
+                "date": {"start": income_date.isoformat()}
+            },
+            Config.NOTION_COL_AMOUNT: {
+                "number": abs(float(amount))
+            },
+            Config.NOTION_COL_NAME: {
+                "title": [
+                    {
+                        "text": {"content": name}
+                    }
+                ]
+            },
+        }
+
+        # Risolvi il conto 
+        if account_id and hasattr(Config, "NOTION_COL_ACCOUNT"):
+            properties[Config.NOTION_COL_ACCOUNT] = {
+                "relation": [{"id": account_id}]
+            }
+
+        # Risolvi Monthly Balance
+        mb_id = self._resolve_monthly_balance(income_date)
+        if mb_id:
+            properties["Monthly Balance"] = {
+                "relation": [{"id": mb_id}]
+            }
+        else:
+            logger.warning(f"Attenzione: nessun Monthly Balance trovato per {income_date.strftime('%m/%Y')}")
+
+        logger.info(
+            f"Creazione introito su Notion: {name} — €{amount:.2f} — "
+            f"{income_date.isoformat()} — conto_id: {account_id or 'nessuno'}"
+        )
+
+        # Spediamo la entry al db
+        result = self._client.pages.create(
+            parent={"database_id": self.income_db_id},
+            properties=properties,
+        )
+
+        logger.info(f"Introito creato con successo: page_id={result['id'][:8]}...")
+        return result
+
 
     # ------------------------------------------------------------------
     # Test connessione
@@ -830,13 +922,13 @@ class NotionExpenseClient:
         """Verifica la connessione e lo stato di accesso a tutti i database."""
         lines = []
         databases = [
-            ("Expense", Config.NOTION_EXPENSE_DATABASE_ID),
-            ("Categories", Config.NOTION_CATEGORIES_DATABASE_ID),
-            ("Monthly Balance", Config.NOTION_MONTHLY_BALANCE_DATABASE_ID),
-            ("Income", Config.NOTION_INCOME_DATABASE_ID),
-            ("Accounts", Config.NOTION_ACCOUNTS_DATABASE_ID),
-            ("Subscriptions", Config.NOTION_SUBSCRIPTIONS_DATABASE_ID),
-            ("Pay/Transfer", Config.NOTION_PAY_TRANSFER_DATABASE_ID),
+            ("Expense", self.expense_db_id),
+            ("Categories", self.categories_db_id),
+            ("Monthly Balance", self.monthly_balance_db_id),
+            ("Income", self.income_db_id),
+            ("Accounts", self.accounts_db_id),
+            ("Subscriptions", self.subscriptions_db_id),
+            ("Pay/Transfer", self.pay_transfer_db_id),
         ]
         for label, db_id in databases:
             if not db_id:

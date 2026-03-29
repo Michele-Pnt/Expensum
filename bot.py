@@ -33,38 +33,87 @@ from telegram.ext import (
     filters,
 )
 
+import os
+
 from config import Config, setup_logging
 from src.expense_parser import ExpenseParser
-from src.notion_client import NotionExpenseClient
+from src.notion_client import NotionFinanceClient
+from src.rate_limiter import is_rate_limited
+from src.user_store import UserStore
 
 logger = logging.getLogger("financial_agent.bot")
 
+# ---------------------------------------------------------------------------
+# Stati della conversazione
+# ---------------------------------------------------------------------------
+WAITING_INVITE_CODE, WAITING_API_KEY, WAITING_EXPENSE_DB, WAITING_INCOME_DB = range(4)
+
 # Cache globali (inizializzate al primo messaggio)
-_notion: NotionExpenseClient | None = None
+_notion: NotionFinanceClient | None = None
 _parser: ExpenseParser | None = None
 
-def _get_notion() -> NotionExpenseClient:
-    """Lazy-init del client Notion."""
-    global _notion
-    if _notion is None:
-        _notion = NotionExpenseClient()
-    return _notion
+# Inizializziamo il database utenti (usando l'URL che abbiamo messo in Config)
+_user_store = UserStore(db_url=Config.DATABASE_URL)
+
+# Questi dizionari terranno in memoria i client degli utenti attivi
+# Formato: { "chat_id": OggettoClient }
+_notion_clients: dict[str, NotionFinanceClient] = {}
+_parsers: dict[str, ExpenseParser] = {}
+
+def _get_notion(chat_id: str) -> NotionFinanceClient:
+    """Ritorna il client Notion specifico per l'utente, creandolo se manca."""
+    chat_id = str(chat_id)  # Convertiamo in stringa per sicurezza (le chiavi dei dizionari sono stringhe)
+
+    # 1. Se abbiamo già il client in memoria, restituiamolo subito 
+    if chat_id in _notion_clients:
+        return _notion_clients[chat_id]
+    
+    # 2. Se non c'è, dobbiamo andare a chiederlo al database
+    user = _user_store.get_user(chat_id)
+    if not user:
+        raise ValueError(f"Utente {chat_id} non autorizzato, devi registrati per poter accedere al servizio")
+
+    # 3. Creiamo un NUOVO client personalizzato con le chiavi di quell'utente
+    client = NotionFinanceClient(
+        api_key=user.notion_api_key,
+        expense_db_id=user.expense_db_id,
+        income_db_id=user.income_db_id,
+        categories_db_id=user.categories_db_id,
+        monthly_balance_db_id=user.monthly_balance_db_id,
+        accounts_db_id=user.accounts_db_id
+    )
+
+    #salviamo il client
+    _notion_clients[chat_id] = client
+    return client
+    
+def _get_parser(chat_id: str) -> ExpenseParser:
+    """Ritorna il parser con categorie da Notion specifico per l'utente, creandolo se manca."""
+    chat_id = str(chat_id)  # Convertiamo in stringa per sicurezza (le chiavi dei dizionari sono stringhe)
 
 
-def _get_parser() -> ExpenseParser:
-    """Lazy-init del parser con categorie da Notion."""
-    global _parser
-    if _parser is None:
-        notion = _get_notion()
-        categories = notion.get_category_names()
-        _parser = ExpenseParser(categories=categories)
-        logger.info(f"Parser inizializzato con {len(categories)} categorie: {categories}")
-    return _parser
+    # 1. Se abbiamo già il client in memoria, restituiamolo subito 
+    if chat_id in _parsers:
+        return _parsers[chat_id]
+    
+    # 2. Creiamo un NUOVO parser personalizzato con le chiavi di quell'utente
+    notion = _get_notion(chat_id)
+    categories = notion.get_category_names()
+    parser = ExpenseParser(categories=categories)
+    #3. salvo il parser
+    _parsers[chat_id] = parser
+    logger.info(f"Parser inizializzato con {len(categories)} categorie: {categories}")
+    return parser
+
 
 def _is_authorized(update: Update) -> bool:
-    """Verifica che il messaggio arrivi dall'utente autorizzato."""
+    """Verifica che il messaggio arrivi dall'utente autorizzato (presente nel database) e attivo."""
+    if not update.effective_chat:
+        return False
+    
     chat_id = str(update.effective_chat.id)
-    return chat_id == Config.TELEGRAM_CHAT_ID
+    user = _user_store.get_user(chat_id)
+    return user is not None
 
 
 # ---------------------------------------------------------------------------
@@ -74,10 +123,16 @@ def _is_authorized(update: Update) -> bool:
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handler per /start — messaggio di benvenuto."""
     if not _is_authorized(update):
+        await update.message.reply_text(
+            "👋 *Benvenuto!*\n\n"
+            "Questo bot è privato. Per usarlo, devi prima configurare le tue credenziali Notion.\n\n"
+            "Digita /registra per iniziare! 🚀",
+            parse_mode=ParseMode.MARKDOWN
+        )
         return
 
     await update.message.reply_text(
-        "👋 *Ciao!* Sono il tuo assistente finanziario.\n\n"
+        "👋 *Bentornato!* Sono il tuo assistente finanziario.\n\n"
         "Scrivimi una spesa in modo naturale, come a un amico:\n"
         "• _\"ieri pizza con amici 25€\"_\n"
         "• _\"ho speso 67 euro al supermercato\"_\n"
@@ -86,24 +141,98 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         parse_mode=ParseMode.MARKDOWN,
     )
 
+async def cmd_registra(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """PUNTO DI INIZIO: Chiede il codice invito."""
+    await update.message.reply_text(
+        "🔐 *Accesso Riservato*\n\n"
+        "Questo bot è privato. Inserisci il tuo **Codice d'Invito** per procedere:",
+        parse_mode=ParseMode.MARKDOWN
+    )
+    return WAITING_INVITE_CODE
+
+async def process_invite_code(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Fase 1: Verifica il codice e chiede la API Key."""
+    text = update.message.text.strip()
+    if text != Config.INVITE_CODE:
+        await update.message.reply_text("❌ Codice errato! Riprova o scrivi /cancel.")
+        return WAITING_INVITE_CODE
+        
+    await update.message.reply_text("✅ Codice accettato! Ora incolla la tua **Notion API Key**:")
+    return WAITING_API_KEY
+
+async def process_api_key(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Fase 2: Riceve la API Key e chiede l'ID database Spese."""
+    api_key = update.message.text.strip()
+    if not api_key.startswith("ntn_"):
+        await update.message.reply_text("⚠️ Chiave non valida. Inserisci la tua Notion API Key (inizia con `ntn_`):")
+        return WAITING_API_KEY
+        
+    context.user_data["notion_api_key"] = api_key
+    await update.message.reply_text("Ottimo! Ora incolla l'**ID del Database Spese** (Expense):")
+    return WAITING_EXPENSE_DB
+
+async def process_expense_db(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Fase 3: Riceve ID Spese e chiede ID Entrate."""
+    context.user_data["expense_db_id"] = update.message.text.strip()
+    await update.message.reply_text("Ricevuto. Infine, incolla l'**ID del Database Entrate** (Income):")
+    return WAITING_INCOME_DB
+
+async def process_income_db(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Fase Finale: Salva tutto nel database utenti."""
+    income_id = update.message.text.strip()
+    chat_id = str(update.effective_chat.id)
+    username = update.effective_user.username
+    
+    _user_store.add_user(
+        chat_id=chat_id,
+        username=username,
+        notion_api_key=context.user_data["notion_api_key"],
+        expense_db_id=context.user_data["expense_db_id"],
+        income_db_id=income_id
+    )
+    
+    context.user_data.clear()
+    logger.info(f"[User {chat_id}] Registrazione completata.")
+    await update.message.reply_text("🎊 *Configurazione completata!* Ora puoi usare il bot per tracciare le tue finanze.")
+    return ConversationHandler.END
+
+async def cancel_registra(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Annulla la registrazione."""
+    context.user_data.clear()
+    await update.message.reply_text("❌ Registrazione annullata.")
+    return ConversationHandler.END
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handler per messaggi di testo — parsing spesa con LLM."""
+    
+    chat_id = str(update.effective_chat.id) #recupero id chat utente che ha fatto richiesta
+
     if not _is_authorized(update):
+        await update.message.reply_text("⚠️ *Non sei ancora registrato!*\nUsa /registra per configurare il bot.", parse_mode=ParseMode.MARKDOWN)
+        return
+
+    # 🛡️ DIFESA 1: Rate Limiting (Anti-DoS)
+    if is_rate_limited(chat_id, max_messages=Config.MAX_MESSAGES_PER_MINUTE):
+        await update.message.reply_text("⏳ Stai inviando troppi messaggi. Aspetta un momento e riprova.")
         return
 
     message_text = update.message.text.strip()
     if not message_text:
         return
 
-    logger.info(f"Messaggio ricevuto: '{message_text}'")
+    # 🛡️ DIFESA 3: Lunghezza massima (Anti-Token Flooding / Injection)
+    if len(message_text) > Config.MAX_MESSAGE_LEN:
+        await update.message.reply_text(f"⚠️ Messaggio troppo lungo! Massimo {Config.MAX_MESSAGE_LEN} caratteri.")
+        return
+
+    logger.info(f"[User {chat_id}] Messaggio ricevuto: '{message_text}'")
  
     # Mostra "sta scrivendo..."
     await update.message.chat.send_action("typing")
 
     # Controlla se siamo in attesa dell'importo
     if context.user_data.get("waiting_for_amount"):
-        parser = _get_parser()
+        parser = _get_parser(chat_id)
         amount_res = parser.parse(message_text)
         
         amt = None
@@ -149,52 +278,70 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         return
 
     # Passa la palla alla nuova funzione condivisa
-    await _process_expense_text(update, context, message_text)
+    await _process_expense_text(update, context, message_text, chat_id)
 
+async def _process_expense_text(update: Update, context: ContextTypes.DEFAULT_TYPE, message_text: str, chat_id: str) -> None:
+    # 🛡️ DIFESA 3: Wrapping sicuro dell'input — isoliamo il contenuto utente dal prompt di sistema
+    # Questo rende molto più difficile la Prompt Injection
+    safe_input = f"[INIZIO INPUT UTENTE]\n{message_text}\n[FINE INPUT UTENTE]"
 
-async def _process_expense_text(update: Update, context: ContextTypes.DEFAULT_TYPE, message_text: str) -> None:
-    # Parsa con LLM (nuovo messaggio)
-    parser = _get_parser()
-    result = parser.parse(message_text)
+    # 1. Recuperiamo il parser specifico per l'utente
+    parser = _get_parser(chat_id)
+    # 2. Parsa con LLM (input sanificato)
+    result = parser.parse(safe_input)
+    
+    logger.info(f"[User {chat_id}] Risultato parser: {result['type']} - {result['name']} (€{result['amount']})")
 
     if result is None:
         await update.message.reply_text(
             "🤔 Non ho capito che spesa intendi. "
             "Prova a scrivermi qualcosa come:\n"
-            "• _\"45€ esselunga\"_\n"
-            "• _\"ieri cena 80 euro\"_",
+            "• _\"Ho speso 45 euro di spesa\"_\n"
+            "• _\"Ho ricevuto 20 euro di bonifico\"_",
             parse_mode=ParseMode.MARKDOWN,
         )
         return
 
     # Salva i dati nel contesto utente (evita il limite 64 byte di callback_data)
     context.user_data["pending_expense"] = {
+        "type": result["type"],
         "date": result["date"].isoformat(),
         "amount": result["amount"],
         "category": result["category"],
         "name": result["name"],
     }
-
+    
     # Se manca l'importo, chiedi chiarimento e metti in attesa
     if result["amount"] is None:
         context.user_data["waiting_for_amount"] = True
         cat_info = f" ({result['category']})" if result["category"] else ""
         await update.message.reply_text(
-            f"📝 Ho capito: *{result['name']}*{cat_info}\n\n"
-            "Ma quanto hai speso? Scrivimi l'importo.",
+            f"📝 Non ho Capito l'importo. Prova a ridirmelo, grazie!❤️\n",
             parse_mode=ParseMode.MARKDOWN,
         )
         return
-
-    # Se abbiamo già tutto, formatta
     date_str = result["date"].strftime("%d/%m/%Y")
-    summary = (
-        f"📝 *Nuova spesa riconosciuta:*\n\n"
-        f"📅 Data: *{date_str}*\n"
-        f"💰 Importo: *€{result['amount']:.2f}*\n"
-        f"📂 Categoria: *{result['category'] or 'Non determinata'}*\n"
-        f"📝 Descrizione: *{result['name']}*"
-    )
+
+    # Scegliamo l'etichetta giusta in base al tipo
+    if result.get("type") == "income":
+        # Se abbiamo già tutto, formatta l'entrata
+        
+        summary = (
+            f"📝 *Nuova Entrata riconosciuta:*\n\n"
+            f"📅 Data: *{date_str}*\n"
+            f"💰 Importo: *€{result['amount']:.2f}*\n"
+            f"📝 Descrizione: *{result['name']}*"
+        )
+
+    else:
+        # Se abbiamo già tutto, formatta la spesa
+        summary = (
+            f"📝 *Nuova spesa riconosciuta:*\n\n"
+            f"📅 Data: *{date_str}*\n"
+            f"💰 Importo: *€{result['amount']:.2f}*\n"
+            f"📂 Categoria: *{result['category'] or 'Non determinata'}*\n"
+            f"📝 Descrizione: *{result['name']}*"
+        )
 
     # Bottoni inline
     keyboard = InlineKeyboardMarkup([
@@ -208,87 +355,117 @@ async def _process_expense_text(update: Update, context: ContextTypes.DEFAULT_TY
 
 async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handler per messaggi vocali — trascrizione e parsing spesa con LLM."""
+
+    chat_id = str(update.effective_chat.id) #recupero id chat utente che ha fatto richiesta
+
+
     if not _is_authorized(update):
         return
 
-    file_info = await update.message.voice.get_file()
+    # 🛡️ DIFESA 1: Rate Limiting
+    if is_rate_limited(chat_id, max_messages=Config.MAX_MESSAGES_PER_MINUTE):
+        await update.message.reply_text("⏳ Stai inviando troppi messaggi. Aspetta un momento.")
+        return
 
+    # 🛡️ DIFESA 2: Validazione dimensione PRIMA del download
+    voice = update.message.voice
+    if voice.file_size and voice.file_size > Config.MAX_FILE_SIZE_MB * 1024 * 1024:
+        await update.message.reply_text(f"⚠️ Audio troppo grande! Limite: {Config.MAX_FILE_SIZE_MB}MB.")
+        return
+
+    file_info = await voice.get_file()
     await update.message.chat.send_action("record_voice")
+    logger.info(f"[User {chat_id}] Vocale ricevuto: '{file_info.file_id}' ({voice.file_size} bytes)")
 
-    logger.info(f"Messaggio ricevuto: '{file_info}'")
+    # 🛡️ Nome file unico per chat_id (evita race condition tra utenti)
+    temp_path = f"temp_voice_{chat_id}.ogg"
 
-    await file_info.download_to_drive("temp_voice.ogg")
+    # 🛡️ try/finally garantisce la pulizia del file anche in caso di errore
+    try:
+        await file_info.download_to_drive(temp_path)
 
-    #Trascrizione via Gemini
-    from google.genai import types
-    
-    #collegamento con la chiave API
-    client = genai.Client(api_key=Config.GEMINI_API_KEY)
-    
-    #leggo file audio
-    with open("temp_voice.ogg", "rb") as f:
-        audio_bytes = f.read()
+        client = genai.Client(api_key=Config.GEMINI_API_KEY)
+        with open(temp_path, "rb") as f:
+            audio_bytes = f.read()
 
-    #creo pacchetto audio compatibile con Gemini
-    audio_part = types.Part.from_bytes(data=audio_bytes, mime_type="audio/ogg")
+        audio_part = types.Part.from_bytes(data=audio_bytes, mime_type="audio/ogg")
+        response = client.models.generate_content(
+            model=Config.GEMINI_MODEL,
+            contents=[
+                "Trascrivi esattamente e parola per parola questo audio in italiano. "
+                "Restituisci SOLO ed esclusivamente il testo trascritto, nient'altro.",
+                audio_part
+            ]
+        )
+        message_trascribed = response.text.strip()
+        logger.info(f"[User {chat_id}] Trascrizione Audio: {message_trascribed}")
+        await update.message.reply_text("🎙️ Ho ascoltato! Sto elaborando...")
+        await _process_expense_text(update, context, message_trascribed, chat_id)
 
-    #prompt per la trascrizione
-    response=client.models.generate_content(
-        model=Config.GEMINI_MODEL,
-        contents=["Trascrivi esattamente e parola per parola questo audio in italiano. "
-            "Restituisci SOLO ed esclusivamente il testo trascritto, nient'altro.", 
-            audio_part]
-    )
-    message_trascribed = response.text.strip()
-    logger.info(f"Trascrizione Cloud: {message_trascribed}")
-    await update.message.reply_text("Sto elaborando la tua spesa... 🧠")
-    
-    # Passa il testo trascritto alla funzione condivisa
-    await _process_expense_text(update, context, message_trascribed)
+    finally:
+        # 🛡️ Auto-cleanup: il file viene cancellato SEMPRE, anche se c'è un errore
+        if os.path.exists(temp_path):
+            os.remove(temp_path)
+            logger.info(f"[User {chat_id}] File temporaneo eliminato: {temp_path}")
 
 async def handle_photos(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handler per le foto (scontrini e screenshot) — estrae il contesto con Gemini Vision."""
+    chat_id = str(update.effective_chat.id)
+
     if not _is_authorized(update):
         return
 
-    # 1. Telegram invia la foto in varie risoluzioni. Noi prendiamo la migliore (l'ultima della lista: [-1])
+    # 🛡️ DIFESA 1: Rate Limiting
+    if is_rate_limited(chat_id, max_messages=Config.MAX_MESSAGES_PER_MINUTE):
+        await update.message.reply_text("⏳ Stai inviando troppi messaggi. Aspetta un momento.")
+        return
+
+    # Telegram invia la foto in varie risoluzioni → prendiamo la migliore ([-1])
     foto_hd = update.message.photo[-1]
 
-    # 2. Otteniamo le info del file dai server di Telegram
+    # 🛡️ DIFESA 2: Validazione dimensione PRIMA del download
+    if foto_hd.file_size and foto_hd.file_size > Config.MAX_FILE_SIZE_MB * 1024 * 1024:
+        await update.message.reply_text(f"⚠️ Foto troppo grande! Limite: {Config.MAX_FILE_SIZE_MB}MB.")
+        return
+
     file_info = await foto_hd.get_file()
-
     await update.message.chat.send_action("upload_photo")
+    logger.info(f"[User {chat_id}] Foto ricevuta: '{file_info.file_id}' ({foto_hd.file_size} bytes)")
 
-    logger.info(f"Foto ricevuta: '{file_info.file_id}'")
+    # 🛡️ Nome file unico per chat_id (evita race condition tra utenti)
+    temp_path = f"temp_photo_{chat_id}.jpg"
 
-    await file_info.download_to_drive("temp_photo.jpg")
+    # 🛡️ try/finally garantisce la pulizia del file anche in caso di errore
+    try:
+        await file_info.download_to_drive(temp_path)
+        await update.message.reply_text("Immagine ricevuta! Sto accendendo gli occhi bionici... 👁️📸")
 
-    await update.message.reply_text("Immagine ricevuta! Sto accendendo gli occhi bionici... 👁️📸")
-    
-    #collegamento con la chiave API
-    client = genai.Client(api_key=Config.GEMINI_API_KEY)
+        client = genai.Client(api_key=Config.GEMINI_API_KEY)
+        with open(temp_path, "rb") as f:
+            photo_bytes = f.read()
 
-    # 1. LEGGIAMO IL FILE DAL DISCO
-    with open("temp_photo.jpg", "rb") as f:
-        photo_bytes = f.read()
+        photo_part = types.Part.from_bytes(data=photo_bytes, mime_type="image/jpeg")
+        response = client.models.generate_content(
+            model=Config.GEMINI_MODEL,
+            contents=[
+                "Tu sei un parser di spese. Guarda questa foto (può essere scontrino o notifica), "
+                "estrai l'importo esatto, la data e il commerciante, e riassumi tutto in una singola "
+                "frase di testo come se fossi io a dirlo",
+                photo_part
+            ]
+        )
+        message_trascribed = response.text.strip()
+        logger.info(f"[User {chat_id}] Analisi Foto: {message_trascribed}")
+        await update.message.reply_text("📸 Foto analizzata! Sto elaborando...")
+        await _process_expense_text(update, context, message_trascribed, chat_id)
 
-    #creo pacchetto foto compatibile con Gemini
-    photo_part = types.Part.from_bytes(data=photo_bytes, mime_type="image/jpeg")
+    finally:
+        # 🛡️ Auto-cleanup: il file viene cancellato SEMPRE, anche se c'è un errore
+        if os.path.exists(temp_path):
+            os.remove(temp_path)
+            logger.info(f"[User {chat_id}] File temporaneo eliminato: {temp_path}")
 
-    #prompt per la trascrizione
-    response=client.models.generate_content(
-        model=Config.GEMINI_MODEL,
-        contents=["Tu sei un parser di spese. Guarda questa foto (può essere scontrino o notifica), estrai l'importo esatto, la data e il commerciante, e riassumi tutto in una singola frase di testo come se fossi io a dirlo", 
-            photo_part]
-    )
-    message_trascribed = response.text.strip()
-    logger.info(f"Trascrizione Cloud: {message_trascribed}")
-    await update.message.reply_text("Sto elaborando la tua spesa... 🧠")
-    
-    # Passa il testo trascritto alla funzione condivisa
-    await _process_expense_text(update, context, message_trascribed)
-
-async def _save_to_notion(query, context, account_id: str | None = None):
+async def _save_to_notion(query, context, chat_id: str, account_id: str | None = None):
     data = context.user_data.pop("pending_expense", None)
     context.user_data.pop("waiting_for_amount", None)
     
@@ -298,24 +475,38 @@ async def _save_to_notion(query, context, account_id: str | None = None):
         
     try:
         from datetime import datetime
-        expense_date = datetime.strptime(data["date"].split("T")[0], "%Y-%m-%d").date()
+        date = datetime.strptime(data["date"].split("T")[0], "%Y-%m-%d").date()
 
-        notion = _get_notion()
-        notion.create_expense(
-            expense_date=expense_date,
-            amount=data["amount"],
-            name=data["name"],
-            category_name=data.get("category"),
-            account_id=account_id
-        )
-
-        date_str = expense_date.strftime("%d/%m/%Y")
-        await query.edit_message_text(
-            f"✅ *Spesa salvata su Notion!*\n\n"
-            f"📅 {date_str} — *€{data['amount']:.2f}* — {data['name']}",
-            parse_mode=ParseMode.MARKDOWN,
-        )
-        logger.info(f"Spesa salvata: {data['name']} €{data['amount']:.2f}")
+        notion = _get_notion(chat_id)
+        if data["type"] == "income":
+            notion.create_income(
+                income_date=date,
+                amount=data["amount"],
+                name=data["name"],
+                account_id=account_id
+            )
+            date_str = date.strftime("%d/%m/%Y")
+            await query.edit_message_text(
+                f"✅ *Entrata salvata su Notion!*\n\n"
+                f"📅 {date_str} — *€{data['amount']:.2f}* — {data['name']}",
+                parse_mode=ParseMode.MARKDOWN,
+            )
+            logger.info(f"[User {chat_id}] Entrata salvata: {data['name']} €{data['amount']:.2f}")
+        else:
+            notion.create_expense(
+                expense_date=date,
+                amount=data["amount"],
+                name=data["name"],
+                category_name=data.get("category"),
+                account_id=account_id
+            )
+            date_str = date.strftime("%d/%m/%Y")
+            await query.edit_message_text(
+                f"✅ *Spesa salvata su Notion!*\n\n"
+                f"📅 {date_str} — *€{data['amount']:.2f}* — {data['name']}",
+                parse_mode=ParseMode.MARKDOWN,
+            )
+            logger.info(f"Spesa salvata: {data['name']} €{data['amount']:.2f}")
 
     except Exception as e:
         logger.error(f"Errore salvataggio Notion: {e}")
@@ -324,11 +515,12 @@ async def _save_to_notion(query, context, account_id: str | None = None):
             parse_mode=ParseMode.MARKDOWN,
         )
 
-
 async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handler per i bottoni inline (conferma/annulla/conti)."""
     query = update.callback_query
     await query.answer()
+
+    chat_id = str(update.effective_chat.id)
 
     if not _is_authorized(update):
         return
@@ -336,7 +528,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     if query.data == "cancel":
         context.user_data.pop("pending_expense", None)
         context.user_data.pop("waiting_for_amount", None)
-        await query.edit_message_text("❌ Spesa annullata.")
+        await query.edit_message_text("❌ Operazione annullata.")
         return
 
     if query.data == "confirm":
@@ -347,15 +539,15 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
         # Recupera accounts da Notion per far selezionare il conto
         try:
-            notion = _get_notion()
+            notion = _get_notion(chat_id)
             accounts = notion.fetch_accounts()
         except Exception as e:
-            logger.error("Errore fetch accounts. Bypass...")
+            logger.error(f"[User {chat_id}] Errore fetch accounts: {e}")
             accounts = []
             
         if not accounts:
             # Fallback salva subito
-            await _save_to_notion(query, context)
+            await _save_to_notion(query, context, chat_id)
             return
 
         # Disegna bottoni
@@ -369,7 +561,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
     if query.data.startswith("account:"):
         account_id = query.data.split(":", 1)[1]
-        await _save_to_notion(query, context, account_id=account_id)
+        await _save_to_notion(query, context, chat_id, account_id=account_id)
         return
 
 
@@ -406,7 +598,22 @@ def main():
     # Crea l'applicazione
     app = Application.builder().token(Config.TELEGRAM_BOT_TOKEN).build()
 
-    # Registra handlers
+    # --- Handlers ---
+    
+    # 1. Registrazione (deve stare prima per gestire i messaggi di testo dedicati)
+    conv_handler = ConversationHandler(
+        entry_points=[CommandHandler("registra", cmd_registra)],
+        states={
+            WAITING_INVITE_CODE: [MessageHandler(filters.TEXT & ~filters.COMMAND, process_invite_code)],
+            WAITING_API_KEY: [MessageHandler(filters.TEXT & ~filters.COMMAND, process_api_key)],
+            WAITING_EXPENSE_DB: [MessageHandler(filters.TEXT & ~filters.COMMAND, process_expense_db)],
+            WAITING_INCOME_DB: [MessageHandler(filters.TEXT & ~filters.COMMAND, process_income_db)],
+        },
+        fallbacks=[CommandHandler("cancel", cancel_registra)],
+    )
+    app.add_handler(conv_handler)
+
+    # 2. Altri comandi e messaggi
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CallbackQueryHandler(handle_callback))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))

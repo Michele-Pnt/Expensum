@@ -15,7 +15,6 @@ load_dotenv(dotenv_path=Path(__file__).parent / ".env")
 
 class Config:
     """Configurazione centralizzata dell'agente finanziario."""
-
     # --- NOTION ---
     NOTION_API_KEY: str = os.getenv("NOTION_API_KEY", "")
     # Database IDs
@@ -58,6 +57,20 @@ class Config:
     # --- TELEGRAM ---
     TELEGRAM_BOT_TOKEN: str = os.getenv("TELEGRAM_BOT_TOKEN", "")
     TELEGRAM_CHAT_ID: str = os.getenv("TELEGRAM_CHAT_ID", "")
+    INVITE_CODE: str = os.getenv("INVITE_CODE", "")
+    
+    # --- DATABASE ---
+    # Default: SQLite locale. Per PostgreSQL/Oracle: "postgresql://user:pass@host/dbname"
+    DATABASE_URL: str = os.getenv("DATABASE_URL", "sqlite:///users.db")
+
+    # --- SICUREZZA ---
+    # Rate Limiting: max messaggi per utente per finestra di 60 secondi
+    # Motivazione: un utente legittimo non inserisce più di 2-3 spese al minuto
+    MAX_MESSAGES_PER_MINUTE: int = int(os.getenv("MAX_MESSAGES_PER_MINUTE", "10"))
+    # Validazione file: uno scontrino pesa 1-3MB, un vocale da 30s ~500KB → 5MB è sicuro
+    MAX_FILE_SIZE_MB: int = int(os.getenv("MAX_FILE_SIZE_MB", "5"))
+    # Sanitizzazione LLM: "ho speso 45 euro di cena" = ~40 char, 300 è ampiamente sufficiente
+    MAX_MESSAGE_LEN: int = int(os.getenv("MAX_MESSAGE_LEN", "300"))
 
     # --- OPZIONI AGENTE ---
     HISTORY_MONTHS: int = int(os.getenv("HISTORY_MONTHS", "6"))

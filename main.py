@@ -28,7 +28,7 @@ from calendar import monthrange
 from datetime import date, datetime
 
 from config import Config, setup_logging
-from src.notion_client import NotionExpenseClient
+from src.notion_client import NotionFinanceClient
 from src.data_processor import DataProcessor
 from src.forecaster import Forecaster
 from src.gemini_client import GeminiClient
@@ -135,7 +135,7 @@ async def run_agent(target_year: int, target_month: int, dry_run: bool, debug_da
         accounts = [{"name": "Mock Bank", "current_balance": 1500.0}]
         logger.info(f"  [DRY-RUN] Usando {len(transactions)} transazioni mock")
     else:
-        notion = NotionExpenseClient()
+        notion = NotionFinanceClient()
         months_back = Config.HISTORY_MONTHS + 1
         start_year = target_year
         start_month = target_month - months_back
