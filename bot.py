@@ -31,6 +31,7 @@ from telegram.ext import (
     MessageHandler,
     ContextTypes,
     filters,
+    ConversationHandler,
 )
 
 import os
@@ -46,7 +47,7 @@ logger = logging.getLogger("financial_agent.bot")
 # ---------------------------------------------------------------------------
 # Stati della conversazione
 # ---------------------------------------------------------------------------
-WAITING_INVITE_CODE, WAITING_API_KEY, WAITING_EXPENSE_DB, WAITING_INCOME_DB = range(4)
+WAITING_INVITE_CODE, WAITING_API_KEY, WAITING_EXPENSE_DB, WAITING_INCOME_DB, WAITING_CATEGORIES_DB, WAITING_MONTHLY_DB, WAITING_ACCOUNTS_DB = range(7)
 
 # Cache globali (inizializzate al primo messaggio)
 _notion: NotionFinanceClient | None = None
@@ -105,7 +106,6 @@ def _get_parser(chat_id: str) -> ExpenseParser:
     logger.info(f"Parser inizializzato con {len(categories)} categorie: {categories}")
     return parser
 
-
 def _is_authorized(update: Update) -> bool:
     """Verifica che il messaggio arrivi dall'utente autorizzato (presente nel database) e attivo."""
     if not update.effective_chat:
@@ -145,7 +145,7 @@ async def cmd_registra(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
     """PUNTO DI INIZIO: Chiede il codice invito."""
     await update.message.reply_text(
         "🔐 *Accesso Riservato*\n\n"
-        "Questo bot è privato. Inserisci il tuo **Codice d'Invito** per procedere:",
+        "Questo bot è privato. Inserisci il tuo *Codice d'Invito* per procedere:",
         parse_mode=ParseMode.MARKDOWN
     )
     return WAITING_INVITE_CODE
@@ -157,14 +157,14 @@ async def process_invite_code(update: Update, context: ContextTypes.DEFAULT_TYPE
         await update.message.reply_text("❌ Codice errato! Riprova o scrivi /cancel.")
         return WAITING_INVITE_CODE
         
-    await update.message.reply_text("✅ Codice accettato! Ora incolla la tua **Notion API Key**:")
+    await update.message.reply_text("✅ Codice accettato! Ora incolla la tua *Notion API Key*:", parse_mode=ParseMode.MARKDOWN)
     return WAITING_API_KEY
 
 async def process_api_key(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Fase 2: Riceve la API Key e chiede l'ID database Spese."""
     api_key = update.message.text.strip()
     if not api_key.startswith("ntn_"):
-        await update.message.reply_text("⚠️ Chiave non valida. Inserisci la tua Notion API Key (inizia con `ntn_`):")
+        await update.message.reply_text("⚠️ Chiave non valida. Inserisci la tua *Notion API Key* (inizia con `ntn_`):", parse_mode=ParseMode.MARKDOWN)
         return WAITING_API_KEY
         
     context.user_data["notion_api_key"] = api_key
@@ -174,26 +174,50 @@ async def process_api_key(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 async def process_expense_db(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Fase 3: Riceve ID Spese e chiede ID Entrate."""
     context.user_data["expense_db_id"] = update.message.text.strip()
-    await update.message.reply_text("Ricevuto. Infine, incolla l'**ID del Database Entrate** (Income):")
+    await update.message.reply_text("Ricevuto! Ora incolla l'*ID del Database Entrate* (Income):", parse_mode=ParseMode.MARKDOWN)
     return WAITING_INCOME_DB
 
 async def process_income_db(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Fase Finale: Salva tutto nel database utenti."""
-    income_id = update.message.text.strip()
+    """Fase 4: Riceve ID Entrate e chiede ID Categorie."""
+    context.user_data["income_db_id"] = update.message.text.strip()
+    await update.message.reply_text("Ottimo! Ora incolla l'*ID del Database Categorie* (Categories):", parse_mode=ParseMode.MARKDOWN)
+    return WAITING_CATEGORIES_DB
+
+async def process_categories_db(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Fase 5: Riceve ID Categorie e chiede ID Monthly Balance."""
+    context.user_data["categories_db_id"] = update.message.text.strip()
+    await update.message.reply_text("Perfetto! Ora incolla l'*ID del Database Bilancio Mensile* (Monthly Balance):", parse_mode=ParseMode.MARKDOWN)
+    return WAITING_MONTHLY_DB
+
+async def process_monthly_db(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Fase 6: Riceve ID Monthly Balance e chiede ID Accounts."""
+    context.user_data["monthly_balance_db_id"] = update.message.text.strip()
+    await update.message.reply_text("Quasi fatto! Infine, incolla l'*ID del Database Conti* (Accounts):", parse_mode=ParseMode.MARKDOWN)
+    return WAITING_ACCOUNTS_DB
+
+async def process_accounts_db(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Fase Finale: Raccoglie ID Accounts e salva tutto nel database utenti."""
     chat_id = str(update.effective_chat.id)
     username = update.effective_user.username
-    
+
     _user_store.add_user(
         chat_id=chat_id,
         username=username,
         notion_api_key=context.user_data["notion_api_key"],
         expense_db_id=context.user_data["expense_db_id"],
-        income_db_id=income_id
+        income_db_id=context.user_data["income_db_id"],
+        categories_db_id=context.user_data["categories_db_id"],
+        monthly_balance_db_id=context.user_data["monthly_balance_db_id"],
+        accounts_db_id=update.message.text.strip(),
     )
-    
+
     context.user_data.clear()
-    logger.info(f"[User {chat_id}] Registrazione completata.")
-    await update.message.reply_text("🎊 *Configurazione completata!* Ora puoi usare il bot per tracciare le tue finanze.")
+    logger.info(f"[User {chat_id}] Registrazione completata con tutti i DB.")
+    await update.message.reply_text(
+        "🎊 *Configurazione completata!*\n\n"
+        "Ora puoi usare il bot per tracciare le tue finanze. Scrivi una spesa in modo naturale!",
+        parse_mode=ParseMode.MARKDOWN
+    )
     return ConversationHandler.END
 
 async def cancel_registra(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -608,6 +632,9 @@ def main():
             WAITING_API_KEY: [MessageHandler(filters.TEXT & ~filters.COMMAND, process_api_key)],
             WAITING_EXPENSE_DB: [MessageHandler(filters.TEXT & ~filters.COMMAND, process_expense_db)],
             WAITING_INCOME_DB: [MessageHandler(filters.TEXT & ~filters.COMMAND, process_income_db)],
+            WAITING_CATEGORIES_DB: [MessageHandler(filters.TEXT & ~filters.COMMAND, process_categories_db)],
+            WAITING_MONTHLY_DB: [MessageHandler(filters.TEXT & ~filters.COMMAND, process_monthly_db)],
+            WAITING_ACCOUNTS_DB: [MessageHandler(filters.TEXT & ~filters.COMMAND, process_accounts_db)],
         },
         fallbacks=[CommandHandler("cancel", cancel_registra)],
     )

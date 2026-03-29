@@ -22,14 +22,13 @@ class User(Base):
     chat_id = Column(String, primary_key=True)
     username = Column(String, nullable=True)
     
-    # Credenziali Notion specifiche per questo utente
+    # Credenziali Notion — TUTTI OBBLIGATORI per evitare errori a runtime
     notion_api_key = Column(String, nullable=False)
     expense_db_id = Column(String, nullable=False)
     income_db_id = Column(String, nullable=False)
-    
-    # Campi opzionali (alcuni utenti potrebbero non averli)
-    accounts_db_id = Column(String, nullable=True)
-    categories_db_id = Column(String, nullable=True)
+    categories_db_id = Column(String, nullable=False)
+    monthly_balance_db_id = Column(String, nullable=False)
+    accounts_db_id = Column(String, nullable=False)
     
     # Metadati per sapere quando si sono registrati
     created_at = Column(DateTime, default=datetime.utcnow)

@@ -8,3 +8,4 @@ tenacity>=8.2.3
 matplotlib>=3.7.1
 seaborn>=0.12.2
 ollama>=0.4.0
+sqlalchemy>=2.0.0
