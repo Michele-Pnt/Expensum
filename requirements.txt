@@ -9,3 +9,14 @@ matplotlib>=3.7.1
 seaborn>=0.12.2
 ollama>=0.4.0
 sqlalchemy>=2.0.0
+Flask>=3.0.0
+psutil>=5.9.0
+boto3>=1.28.0
+psycopg2-binary>=2.9.9
+requests>=2.31.0
+
+# Testing Suite
+pytest
+pytest-mock
+pytest-flask
+pytest-cov

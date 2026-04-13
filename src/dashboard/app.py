@@ -1,0 +1,651 @@
+import os
+import sys
+import json
+from pathlib import Path
+from functools import wraps
+from flask import Flask, render_template, request, redirect, url_for, session, flash, jsonify
+import psutil
+from datetime import datetime, timedelta
+import boto3
+import uuid
+import requests
+from botocore.exceptions import ClientError
+from notion_client import Client as NotionClient
+
+ROOT_DIR = Path(__file__).resolve().parents[2]
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
+
+from src.dashboard.aws_monitor import AWSCostMonitor
+
+from config import Config
+from src.user_store import UserStore, User, DailyUsage, Feedback
+import sqlalchemy as sa
+from src.notion_client import NotionFinanceClient
+
+# Inizializza l'app Flask
+app = Flask(__name__)
+app.secret_key = os.urandom(24)  # Per le sessioni crittografate
+
+# Inizializza la connessione allo storage SQLite
+store = UserStore(db_url=Config.DATABASE_URL)
+
+def login_required(f):
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        if not session.get("logged_in"):
+            return redirect(url_for("login"))
+        return f(*args, **kwargs)
+    return decorated_function
+
+# --- API e Utilità ---
+def get_system_metrics():
+    """Recupera l'utilizzo di risorse della macchina."""
+    # RAM
+    vmem = psutil.virtual_memory()
+    # CPU (interval=None è essenziale per non causare blocchi o lag del processo su alcuni OS)
+    cpu = psutil.cpu_percent(interval=None)
+    
+    # DB Size
+    db_path = Config.DATABASE_URL.replace("sqlite:///", "")
+    db_size = 0
+    if os.path.exists(db_path):
+        db_size = os.path.getsize(db_path) / (1024 * 1024) # MB
+        
+    return {
+        "cpu_percent": cpu,
+        "ram_percent": vmem.percent,
+        "ram_used_gb": round(vmem.used / (1024**3), 2),
+        "db_size_mb": round(db_size, 2)
+    }
+
+# Cache globale per l'istanza del monitor
+_aws_monitor = None
+
+def get_aws_dashboard_data() -> dict:
+    """Recupera tutti i dati AWS (Costi, EC2, RDS) per la dashboard."""
+    global _aws_monitor
+    
+    # Se mancano le chiavi, restituiamo un mock sicuro
+    if not Config.AWS_ACCESS_KEY_ID or not Config.AWS_SECRET_ACCESS_KEY:
+        return {
+            "error": "Chiavi AWS non configurate",
+            "total_cost": "N/D"
+        }
+        
+    try:
+        if _aws_monitor is None:
+            _aws_monitor = AWSCostMonitor(
+                aws_access_key_id=Config.AWS_ACCESS_KEY_ID,
+                aws_secret_access_key=Config.AWS_SECRET_ACCESS_KEY
+            )
+            
+        report = _aws_monitor.generate_dashboard_report()
+        # formatta per il template
+        report["total_cost_formatted"] = f"$ {report.get('total_cost', 0):.2f}"
+        return report
+    except Exception as e:
+        return {
+            "error": str(e),
+            "total_cost": "N/D"
+        }
+
+# --- Rotte Web (UI) ---
+
+@app.route("/login", methods=["GET", "POST"])
+def login():
+    if request.method == "POST":
+        password = request.form.get("password")
+        if password == Config.DASHBOARD_PASSWORD:
+            session["logged_in"] = True
+            return redirect(url_for("index"))
+        else:
+            flash("Password errata!", "error")
+    return render_template("login.html")
+
+@app.route("/logout")
+def logout():
+    session.clear()
+    return redirect(url_for("login"))
+
+@app.route("/")
+@login_required
+def index():
+    sys_metrics = get_system_metrics()
+    aws_data = get_aws_dashboard_data()
+    
+    with store.Session() as s:
+        # Statistiche utenti
+        users_count = s.query(User).count()
+        active_users = s.query(User).filter(User.is_active == True).count()
+        
+        # Statistiche feedback
+        unread_feedback = s.query(Feedback).filter(Feedback.status == "unread").count()
+        
+        # Recupera daily usage degli ultimi 10 giorni
+        ten_days_ago = datetime.utcnow().date() - timedelta(days=10)
+        daily_stats = s.query(DailyUsage).filter(DailyUsage.usage_date >= ten_days_ago).all()
+        
+        # Aggrega dati per il grafico (Date -> totali)
+        chart_data = {}
+        for x in range(10):
+            d = ten_days_ago + timedelta(days=x)
+            chart_data[d.isoformat()] = {"text": 0, "voice": 0, "photo": 0}
+            
+        for stat in daily_stats:
+            d_str = stat.usage_date.isoformat()
+            if d_str in chart_data:
+                chart_data[d_str]["text"] += stat.text_count
+                chart_data[d_str]["voice"] += stat.voice_count
+                chart_data[d_str]["photo"] += stat.photo_count
+            
+        labels = list(chart_data.keys())
+        data_text = [v["text"] for v in chart_data.values()]
+        data_voice = [v["voice"] for v in chart_data.values()]
+        data_photo = [v["photo"] for v in chart_data.values()]
+
+    return render_template(
+        "index.html", 
+        sys=sys_metrics,
+        aws_data=aws_data,
+        users_count=users_count,
+        active_users=active_users,
+        unread_feedback=unread_feedback,
+        chart_labels=labels,
+        chart_text=data_text,
+        chart_voice=data_voice,
+        chart_photo=data_photo
+    )
+
+@app.route("/users")
+@login_required
+def users_list():
+    with store.Session() as s:
+        users = s.query(User).order_by(User.created_at.desc()).all()
+    return render_template("users.html", users=users)
+
+@app.route("/api/toggle-user/<chat_id>", methods=["POST"])
+@login_required
+def toggle_user(chat_id):
+    with store.Session() as s:
+        user = s.query(User).filter(User.chat_id == chat_id).first()
+        if user:
+            user.is_active = not user.is_active
+            s.commit()
+            return jsonify({"status": "ok", "new_state": user.is_active})
+    return jsonify({"error": "User not found"}), 404
+
+@app.route("/feedbacks")
+@login_required
+def feedbacks_list():
+    with store.Session() as s:
+        fbs = s.query(Feedback).order_by(Feedback.created_at.desc()).all()
+    return render_template("feedbacks.html", feedbacks=fbs)
+
+@app.route("/api/resolve-feedback/<int:fb_id>", methods=["POST"])
+@login_required
+def resolve_feedback(fb_id):
+    with store.Session() as s:
+        fb = s.query(Feedback).filter(Feedback.id == fb_id).first()
+        if fb:
+            fb.status = "resolved" if fb.status == "unread" else "unread"
+            s.commit()
+            return jsonify({"status": "ok", "new_state": fb.status})
+    return jsonify({"error": "Feedback not found"}), 404
+
+@app.route("/logs")
+@login_required
+def logs_viewer():
+    log_file = Config.LOG_DIR / "agent.log"
+    log_lines = []
+    if os.path.exists(log_file):
+        with open(log_file, "r") as f:
+            # Raccogli le ultime 100 righe
+            lines = f.readlines()
+            log_lines = lines[-100:]
+            
+    return render_template("logs.html", log_lines=log_lines)
+
+# --- ROTTE OAUTH (Fase 2) ---
+
+@app.route("/auth/notion")
+def auth_notion_start():
+    """Riceve il registration token e reindirizza a Notion."""
+    reg_token = request.args.get("reg_token")
+    
+    if not reg_token:
+        return "<h1>Accesso negato</h1><p>Manca il registration token.</p>", 403
+        
+    # Verifichiamo che il token esista nel DB (senza cancellarlo ancora!)
+    with store.Session() as session:
+        from src.user_store import OAuthSession
+        sess = session.query(OAuthSession).filter_by(state=reg_token).first()
+        if not sess:
+            return "<h1>Token non valido o scaduto</h1><p>Riprova la registrazione dal bot.</p>", 403
+            
+    # URL di autorizzazione di Notion (usiamo il reg_token come state)
+    notion_auth_url = (
+        f"https://api.notion.com/v1/oauth/authorize"
+        f"?owner=user"
+        f"&client_id={Config.NOTION_CLIENT_ID}"
+        f"&redirect_uri={Config.NOTION_REDIRECT_URI}"
+        f"&response_type=code"
+        f"&state={reg_token}"
+    )
+    
+    return redirect(notion_auth_url)
+
+@app.route("/auth/notion/callback")
+def auth_notion_callback():
+    """Riceve il codice da Notion e lo scambia per un access_token."""
+    code = request.args.get("code")
+    state = request.args.get("state")
+    error = request.args.get("error")
+    
+    if error:
+        return f"<h1>Errore di autorizzazione Notion</h1><p>{error}</p>"
+        
+    if not code or not state:
+        return "<h1>Parametri mancanti</h1>", 400
+        
+    # 1. Recuperiamo il chat_id e verifichiamo lo state
+    chat_id = store.get_and_delete_oauth_session(state)
+    if not chat_id:
+        return "<h1>Sessione scaduta o non valida</h1><p>Riprova la registrazione dal bot.</p>", 403
+        
+    # 2. Scambio CODE -> ACCESS TOKEN
+    try:
+        response = requests.post(
+            "https://api.notion.com/v1/oauth/token",
+            auth=(Config.NOTION_CLIENT_ID, Config.NOTION_CLIENT_SECRET),
+            json={
+                "grant_type": "authorization_code",
+                "code": code,
+                "redirect_uri": Config.NOTION_REDIRECT_URI,
+            },
+        )
+        
+        if not response.ok:
+            return f"<h1>Errore scambio token</h1><p>{response.text}</p>", 500
+            
+        auth_data = response.json()
+        access_token = auth_data.get("access_token")
+        workspace_id = auth_data.get("workspace_id")
+        # duplicated_template_id è presente quando l'utente ha usato il template Notion
+        template_page_id = auth_data.get("duplicated_template_id")
+
+        # Avviamo la ricerca automatica (Auto-Discovery)
+        discovered, all_candidates = NotionFinanceClient.discover_databases(
+            access_token, template_page_id=template_page_id
+        )
+
+        # Usiamo i risultati 'discovered' direttamente (Trust-Mode)
+        valid_discovered = discovered
+        invalid_discovered = {}
+        
+        # Recuperiamo gli schemi di TUTTI i DB scoperti (tutti e 7), salvandoli in cache
+        discovered_schemas = NotionFinanceClient.discover_db_schemas(access_token, valid_discovered)
+
+        # 3. Salviamo nel DB Principale (Utente + Database IDs)
+        store.add_user(
+            chat_id=chat_id,
+            notion_access_token=access_token,
+            notion_workspace_id=workspace_id,
+            expense_db_id=valid_discovered.get("expense_db_id"),
+            income_db_id=valid_discovered.get("income_db_id"),
+            categories_db_id=valid_discovered.get("categories_db_id"),
+            monthly_balance_db_id=valid_discovered.get("monthly_balance_db_id"),
+            accounts_db_id=valid_discovered.get("accounts_db_id"),
+            subscriptions_db_id=valid_discovered.get("subscriptions_db_id"),
+            pay_transfer_db_id=valid_discovered.get("pay_transfer_db_id"),
+        )
+        
+        # 4. Salviamo gli Schemi per TUTTI i DB scoperti (robustamente)
+        # Questo garantisce che setup_form non debba tornare su Notion
+        for db_key, schema_data in discovered_schemas.items():
+            try:
+                store.save_database_schema(
+                    chat_id=chat_id,
+                    db_key=db_key,
+                    notion_db_id=schema_data.get("database_id"),
+                    properties_json=json.dumps(schema_data.get("properties") or {}),
+                    mapped_properties_json=json.dumps(schema_data.get("mapped") or {})
+                )
+            except Exception as schema_err:
+                print(f"[OAuth] Errore salvataggio schema {db_key}: {schema_err}")
+
+        if len(valid_discovered) != 7:
+
+            report_msg = (
+                "⚠️ <b>Configurazione incompleta</b>\n\n"
+                "Ho trovato alcuni elementi, ma mancano dei Database obbligatori (o alcuni sono Pagine semplici).\n\n"
+                "👉 <b>Cosa fare:</b>\n"
+                "1. Assicurati che nel tuo Notion ci siano <b>Database</b> e non solo pagine.\n"
+                "2. Riapri <b>/registrati</b> e assicurati di autorizzare l'intero template o tutti i database singoli.\n\n"
+                "<b>Stato verifica:</b>\n"
+            )
+            for key in ["expense_db_id", "income_db_id", "categories_db_id", "monthly_balance_db_id", "accounts_db_id", "subscriptions_db_id", "pay_transfer_db_id"]:
+                status = "✅" if key in valid_discovered else "❌"
+                name = key.replace('_db_id', '').capitalize()
+                err = f": {invalid_discovered[key]}" if key in invalid_discovered else ""
+                report_msg += f"{status} {name}{err}\n"
+            
+            if all_candidates:
+                report_msg += "\n<b>Database individuati nel tuo workspace:</b>\n"
+                report_msg += ", ".join([f"<i>{c}</i>" for c in all_candidates[:15]])
+                report_msg += "\n\n<i>Se uno di questi è quello corretto, rinominalo esattamente come richiesto (es. 'Spese' o 'Expense') e riprova.</i>"
+
+            telegram_url = f"https://api.telegram.org/bot{Config.TELEGRAM_BOT_TOKEN}/sendMessage"
+            requests.post(telegram_url, json={
+                "chat_id": chat_id,
+                "text": report_msg,
+                "parse_mode": "HTML"
+            })
+
+            return redirect("https://t.me/NotionFinaceBot")
+
+        # Notiamo che add_user e save_database_schema sono già stati chiamati sopra.
+        
+        report_msg = "🎊 <b>TRAKY È PRONTO ALL'AZIONE!</b>\n\nHo scansionato il tuo Notion e collegato i database:\n"
+        
+        if not discovered:
+            report_msg += "⚠️ <b>Attenzione</b>: Non ho trovato i database standard (Spese, Entrate, ecc.). Assicurati di averli creati o rinominati correttamente nel tuo workspace Notion!"
+        else:
+            for key in discovered:
+                # Esempio: expense_db_id -> Expense
+                db_name = key.replace("_db_id", "").capitalize()
+                report_msg += f"✅ {db_name}\n"
+
+        # INVIAMO IL MESSAGGIO A TELEGRAM (API DIRETTA)
+        telegram_url = f"https://api.telegram.org/bot{Config.TELEGRAM_BOT_TOKEN}/sendMessage"
+        tg_resp = requests.post(telegram_url, json={
+            "chat_id": chat_id,
+            "text": report_msg,
+            "parse_mode": "HTML"
+        })
+        
+        if not tg_resp.ok:
+            print(f"[OAuth] ERRORE INVIO TELEGRAM: {tg_resp.text}")
+        
+        return redirect("https://t.me/NotionFinaceBot")
+    except Exception as e:
+        return f"<h1>Errore imprevisto</h1><p>{str(e)}</p>", 500
+
+# --- SETUP MINI APP (Fase 6) ---
+
+@app.route("/setup")
+def setup_form():
+    """Mostra il form dinamico per il setup iniziale."""
+    reg_token = request.args.get("reg_token")
+    if not reg_token:
+        return "<h1>Accesso negato</h1><p>Manca il token di configurazione.</p>", 403
+        
+    with store.Session() as s:
+        from src.user_store import OAuthSession, User
+        sess = s.query(OAuthSession).filter_by(state=reg_token).first()
+        if not sess:
+             # Fallback: controlliamo se l'utente esiste già ed è in stato setup
+             # Altrimenti diamo errore
+             return "<h1>Sessione scaduta</h1><p>Ricomincia il setup dal bot con /setup.</p>", 403
+        
+        user = s.query(User).filter_by(chat_id=sess.chat_id).first()
+        if not user or not user.notion_access_token:
+            return "<h1>Utente non autorizzato</h1><p>Devi prima connettere Notion con /registrati.</p>", 403
+        
+        # I 3 DB che ci servono per il setup
+        setup_db_keys = ["accounts_db_id", "categories_db_id", "subscriptions_db_id"]
+
+        # Fetchiamo SEMPRE gli schemi live da Notion al momento del setup:
+        # evita problemi di cache con properties vuote o stantie.
+        setup_bindings = {k: getattr(user, k, None) for k in setup_db_keys if getattr(user, k, None)}
+        live_schemas_raw = {}
+        if setup_bindings:
+            try:
+                live_schemas_raw = NotionFinanceClient.discover_db_schemas(
+                    user.notion_access_token, setup_bindings
+                )
+                for db_key, schema_data in live_schemas_raw.items():
+                    store.save_database_schema(
+                        chat_id=user.chat_id,
+                        db_key=db_key,
+                        notion_db_id=schema_data.get("database_id"),
+                        properties_json=json.dumps(schema_data.get("properties", {})),
+                        mapped_properties_json=json.dumps(schema_data.get("mapped", {}))
+                    )
+            except Exception as e:
+                print(f"[Setup] Errore recupero schemi live da Notion: {e}")
+
+        # Se il fetch live è fallito, proviamo con la cache
+        if not live_schemas_raw:
+            stored_schemas = store.get_database_schemas(user.chat_id)
+        else:
+            stored_schemas = {
+                db_key: {
+                    "database_id": sd.get("database_id"),
+                    "properties": json.dumps(sd.get("properties", {})),
+                    "mapped": json.dumps(sd.get("mapped", {}))
+                }
+                for db_key, sd in live_schemas_raw.items()
+            }
+
+        # Prepariamo il dizionario finale con le properties parsate
+        schemas = {}
+        for db_key in setup_db_keys:
+            data = stored_schemas.get(db_key)
+            if not data:
+                continue
+            try:
+                props = data["properties"]
+                mapped = data.get("mapped")
+                schemas[db_key] = {
+                    "database_id": data["database_id"],
+                    "properties": json.loads(props) if isinstance(props, str) else props,
+                    "mapped": json.loads(mapped) if mapped and isinstance(mapped, str) else {}
+                }
+            except Exception as e:
+                print(f"[Setup] Errore parsing schema {db_key}: {e}")
+
+        # Recupera accounts e categories esistenti su Notion per i dropdown relation
+        available_accounts = []
+        available_categories = []
+        try:
+            nc = NotionFinanceClient(
+                api_key=user.notion_access_token,
+                accounts_db_id=user.accounts_db_id,
+                categories_db_id=user.categories_db_id,
+            )
+            available_accounts = nc.fetch_accounts()
+        except Exception as e:
+            print(f"[Setup] fetch_accounts fallito: {e}")
+        try:
+            nc._load_categories()
+            available_categories = [
+                {"id": pid, "name": d["name"]}
+                for pid, d in nc._category_map.items()
+            ]
+        except Exception as e:
+            print(f"[Setup] fetch_categories fallito: {e}")
+
+        return render_template("setup_miniapp.html",
+                               schemas=schemas,
+                               reg_token=reg_token,
+                               user_name=user.username or "Utente",
+                               available_accounts=available_accounts,
+                               available_categories=available_categories,
+                               col_accounts_initial_amount=Config.NOTION_ACCOUNTS_COL_INITIAL_AMOUNT,
+                               col_accounts_type=Config.NOTION_ACCOUNTS_COL_TYPE,
+                               col_sub_type=Config.NOTION_SUB_COL_TYPE,
+                               col_sub_amount=Config.NOTION_SUB_COL_AMOUNT,
+                               col_sub_category=Config.NOTION_SUB_COL_CATEGORY,
+                               col_sub_account=Config.NOTION_SUB_COL_ACCOUNT)
+
+@app.route("/api/setup-complete", methods=["POST"])
+def api_setup_complete():
+    """Riceve i dati dal form Mini App e popola Notion."""
+    payload = request.json
+    reg_token = payload.get("reg_token")
+    items_data = payload.get("items", {}) # { "accounts_db_id": [...], ... }
+    
+    if not reg_token:
+        return jsonify({"error": "Missing token"}), 400
+        
+    with store.Session() as s:
+        from src.user_store import OAuthSession, User
+        sess = s.query(OAuthSession).filter_by(state=reg_token).first()
+        if not sess:
+            return jsonify({"error": "Invalid session"}), 403
+            
+        user = s.query(User).filter_by(chat_id=sess.chat_id).first()
+        if not user:
+            return jsonify({"error": "User not found"}), 404
+
+        # Carichiamo gli schemi dal DB così _get_property_name può risolvere
+        # i nomi reali delle colonne Notion (es. "Type" invece di "Account type")
+        stored_schemas = store.get_database_schemas(user.chat_id)
+        db_schemas = {}
+        for db_key, data in stored_schemas.items():
+            props = data.get("properties")
+            mapped = data.get("mapped")
+            db_schemas[db_key] = {
+                "database_id": data.get("database_id"),
+                "properties": json.loads(props) if isinstance(props, str) else (props or {}),
+                "mapped": json.loads(mapped) if isinstance(mapped, str) else (mapped or {})
+            }
+
+        # DEBUG TEMPORANEO
+        for k, v in db_schemas.items():
+            print(f"[DEBUG] schema {k} → properties keys: {list(v.get('properties', {}).keys())}, mapped: {v.get('mapped')}")
+
+        notion = NotionFinanceClient(
+            api_key=user.notion_access_token,
+            accounts_db_id=user.accounts_db_id,
+            categories_db_id=user.categories_db_id,
+            subscriptions_db_id=user.subscriptions_db_id,
+            db_schemas=db_schemas,
+        )
+
+        errors = []
+        created_count = 0
+
+        # --- Helper: estrazione valori dal payload Notion ---
+
+        def _extract_name(prop_data: dict) -> str:
+            """Estrae il testo dal primo campo title o rich_text trovato."""
+            for _, value in prop_data.items():
+                if isinstance(value, dict):
+                    for notion_type in ('title', 'rich_text'):
+                        if notion_type in value:
+                            items_list = value[notion_type]
+                            if items_list:
+                                return items_list[0].get('text', {}).get('content', '')
+            return ''
+
+        def _extract_number(prop_data: dict, prop_name: str):
+            val = prop_data.get(prop_name, {})
+            if isinstance(val, dict) and 'number' in val:
+                return val['number']
+            return None
+
+        def _extract_select(prop_data: dict, prop_name: str):
+            val = prop_data.get(prop_name, {})
+            if isinstance(val, dict) and 'select' in val:
+                return val['select'].get('name')
+            return None
+
+        def _extract_relation_ref(prop_data: dict, prop_name: str):
+            """Estrae un riferimento relation: può essere un UUID o '__name__:Nome'."""
+            val = prop_data.get(prop_name, {})
+            if isinstance(val, dict) and '__relation_ref' in val:
+                return val['__relation_ref']
+            return None
+
+        def _resolve_ref(ref: str, name_to_id: dict):
+            """Risolve un riferimento: se inizia con '__name__:' cerca nella mappa, altrimenti è già un UUID."""
+            if not ref:
+                return None
+            if ref.startswith('__name__:'):
+                return name_to_id.get(ref[len('__name__:'):])
+            return ref  # già un page_id UUID Notion
+
+        # --- Fase 1: Categorie (devono esistere prima delle subscriptions) ---
+        cat_map = {}  # nome → page_id
+        for prop_data in items_data.get("categories_db_id", []):
+            name = ''
+            try:
+                name = _extract_name(prop_data)
+                if not name:
+                    errors.append("Nome vuoto in categories_db_id, elemento saltato")
+                    continue
+                result = notion.create_category(name)
+                cat_map[name] = result["id"]
+                created_count += 1
+            except Exception as e:
+                errors.append(f"Errore categoria '{name}': {e}")
+
+        # --- Fase 2: Accounts (devono esistere prima delle subscriptions) ---
+        acc_map = {}  # nome → page_id
+        for prop_data in items_data.get("accounts_db_id", []):
+            name = ''
+            try:
+                print(f"[DEBUG] account prop_data keys: {list(prop_data.keys())}")
+                print(f"[DEBUG] account prop_data: {prop_data}")
+                name = _extract_name(prop_data)
+                acc_type = _extract_select(prop_data, Config.NOTION_ACCOUNTS_COL_TYPE)
+                print(f"[DEBUG] account name='{name}', type='{acc_type}' (cercato con chiave '{Config.NOTION_ACCOUNTS_COL_TYPE}')")
+                if not name:
+                    errors.append("Nome vuoto in accounts_db_id, elemento saltato")
+                    continue
+                result = notion.create_account(
+                    name,
+                    initial_amount=_extract_number(prop_data, Config.NOTION_ACCOUNTS_COL_INITIAL_AMOUNT),
+                    account_type=_extract_select(prop_data, Config.NOTION_ACCOUNTS_COL_TYPE),
+                )
+                acc_map[name] = result["id"]
+                created_count += 1
+            except Exception as e:
+                errors.append(f"Errore account '{name}': {e}")
+
+        # --- Fase 3: Subscriptions (risolve relation usando le mappe sopra) ---
+        for prop_data in items_data.get("subscriptions_db_id", []):
+            name = ''
+            try:
+                name = _extract_name(prop_data)
+                if not name:
+                    errors.append("Nome vuoto in subscriptions_db_id, elemento saltato")
+                    continue
+                notion.create_subscription(
+                    name,
+                    sub_type=_extract_select(prop_data, Config.NOTION_SUB_COL_TYPE),
+                    amount=_extract_number(prop_data, Config.NOTION_SUB_COL_AMOUNT),
+                    category_id=_resolve_ref(
+                        _extract_relation_ref(prop_data, Config.NOTION_SUB_COL_CATEGORY), cat_map
+                    ),
+                    account_id=_resolve_ref(
+                        _extract_relation_ref(prop_data, Config.NOTION_SUB_COL_ACCOUNT), acc_map
+                    ),
+                )
+                created_count += 1
+            except Exception as e:
+                errors.append(f"Errore abbonamento '{name}': {e}")
+        
+        if created_count > 0 or not errors:
+            # Segnamo il setup come completato nel DB
+            store.mark_setup_completed(user.chat_id)
+            # Pulizia token
+            s.delete(sess)
+            s.commit()
+            
+            # Notifica via Telegram
+            telegram_url = f"https://api.telegram.org/bot{Config.TELEGRAM_BOT_TOKEN}/sendMessage"
+            requests.post(telegram_url, json={
+                "chat_id": user.chat_id,
+                "text": f"✅ <b>Setup completato con successo!</b>\nHo creato {created_count} elementi nel tuo Notion.\n\nOra puoi iniziare a scrivermi le tue spese!",
+                "parse_mode": "HTML"
+            })
+            
+            return jsonify({"status": "ok", "created": created_count})
+        
+        return jsonify({"error": "Setup failed", "details": errors}), 500
+
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=5000, debug=True)

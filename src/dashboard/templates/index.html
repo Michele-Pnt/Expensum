@@ -1,0 +1,165 @@
+{% extends "base.html" %}
+{% block content %}
+<h1 class="page-title">Panoramica Sistema</h1>
+<p class="page-desc">Benvenuto Admin. Questa è la salute attuale del tuo agente.</p>
+
+<div class="stats-grid">
+    <!-- AWS Billing & Infrastructure -->
+    <div class="stat-card glass-panel" style="border-top: 2px solid var(--accent-neon); grid-column: span 1; display:flex; flex-direction:column; justify-content:space-between;">
+        <div>
+            <div class="stat-label" style="display:flex; justify-content:space-between; align-items:center;">
+                <span>AWS Fatturazione ({{ aws_data.monitored_region | default('eu-central-1') }})</span>
+                {% if aws_data.error %}
+                <span style="color: var(--danger); font-size: 0.7rem;"><i class="fas fa-exclamation-triangle"></i></span>
+                {% endif %}
+            </div>
+            
+            <div class="stat-value" style="color: #fff; text-shadow: 0 0 10px rgba(0,240,255,0.4); margin: 0.5rem 0;">
+                {{ aws_data.total_cost_formatted }}
+            </div>
+            
+            {% if not aws_data.error %}
+                {% if aws_data.services %}
+                <div style="font-size: 0.75rem; border-top: 1px solid rgba(255,255,255,0.1); padding-top: 0.5rem; margin-top: 0.5rem;">
+                    {% for service, cost in aws_data.services.items() %}
+                        <div style="display: flex; justify-content: space-between; margin-bottom: 2px; color: var(--text-muted);">
+                            <span>{{ service | truncate(15) }}</span>
+                            <span style="color: #fff;">${{ cost }}</span>
+                        </div>
+                    {% endfor %}
+                </div>
+                {% endif %}
+                
+                <div style="font-size: 0.75rem; border-top: 1px solid rgba(255,255,255,0.1); padding-top: 0.5rem; margin-top: 0.5rem;">
+                    <div style="margin-bottom: 4px;"><strong style="color: var(--accent-neon);">Istanze EC2 ({{ aws_data.ec2|length }})</strong></div>
+                    {% for inst in aws_data.ec2 %}
+                        <div style="display: flex; justify-content: space-between; margin-bottom: 2px; color: var(--text-muted);">
+                            <span>{{ inst.Name }} <small>({{ inst.InstanceType }})</small></span>
+                            <span style="color: {% if inst.State == 'running' %}var(--success){% else %}var(--warning){% endif %};"><i class="fas fa-circle" style="font-size:0.5rem;"></i> {{ inst.State }}</span>
+                        </div>
+                    {% else %}
+                        <div style="color: var(--text-muted); font-style: italic;">Nessuna EC2 trovata</div>
+                    {% endfor %}
+                    
+                    <div style="margin-top: 8px; margin-bottom: 4px;"><strong style="color: var(--accent-pink);">Database RDS ({{ aws_data.rds|length }})</strong></div>
+                    {% for db in aws_data.rds %}
+                        <div style="display: flex; justify-content: space-between; margin-bottom: 2px; color: var(--text-muted);">
+                            <span>{{ db.DBInstanceIdentifier }} <small>({{ db.Engine }})</small></span>
+                            <span style="color: {% if db.DBInstanceStatus == 'available' %}var(--success){% else %}var(--warning){% endif %};"><i class="fas fa-database" style="font-size:0.5rem;"></i> {{ db.DBInstanceStatus }}</span>
+                        </div>
+                    {% else %}
+                        <div style="color: var(--text-muted); font-style: italic;">Nessun DB RDS trovato</div>
+                    {% endfor %}
+                </div>
+            {% else %}
+                <div style="font-size: 0.75rem; color: var(--danger); margin-top: 0.5rem;">{{ aws_data.error }}</div>
+            {% endif %}
+        </div>
+        <span class="stat-label" style="text-transform:none; margin-top:10px; font-size: 0.7rem; text-align:right;">Mese in corso (Cost Explorer AWS)</span>
+    </div>
+
+
+    <!-- RAM -->
+    <div class="stat-card glass-panel">
+        <div class="stat-label">Uso Memoria Server</div>
+        <div class="stat-value" style="color: {% if sys.ram_percent > 80 %}var(--danger){% else %}var(--accent-neon){% endif %}">
+            {{ sys.ram_percent }}%
+        </div>
+        <span class="stat-label" style="text-transform:none; margin-top:5px">{{ sys.ram_used_gb }} GB usati</span>
+    </div>
+    <!-- CPU -->
+    <div class="stat-card glass-panel">
+        <div class="stat-label">Carico CPU</div>
+        <div class="stat-value" style="color: {% if sys.cpu_percent > 80 %}var(--danger){% else %}var(--accent-neon){% endif %}">
+            {{ sys.cpu_percent }}%
+        </div>
+    </div>
+    <!-- DB Users -->
+    <div class="stat-card glass-panel">
+        <div class="stat-label">Database Users</div>
+        <div class="stat-value">{{ users_count }}</div>
+        <span class="stat-label" style="text-transform:none; margin-top:5px">{{ active_users }} Utenti Attivi</span>
+    </div>
+    <!-- Feedback -->
+    <div class="stat-card glass-panel">
+        <div class="stat-label">Feedback da leggere</div>
+        <div class="stat-value" style="color: {% if unread_feedback > 0 %}var(--warning){% else %}var(--success){% endif %}">
+            {{ unread_feedback }}
+        </div>
+    </div>
+</div>
+
+<div class="chart-container glass-panel">
+    <h3 style="margin-bottom: 1.5rem; color: #fff;">Consumo Traffico (10 Giorni)</h3>
+    <div style="position: relative; height: 350px; width: 100%;">
+        <canvas id="usageChart"></canvas>
+    </div>
+</div>
+
+<script>
+    const ctx = document.getElementById('usageChart').getContext('2d');
+    
+    // Gradient definitions
+    const gradientPink = ctx.createLinearGradient(0, 0, 0, 400);
+    gradientPink.addColorStop(0, 'rgba(255, 0, 85, 0.5)');
+    gradientPink.addColorStop(1, 'rgba(255, 0, 85, 0.0)');
+    
+    const gradientNeon = ctx.createLinearGradient(0, 0, 0, 400);
+    gradientNeon.addColorStop(0, 'rgba(0, 240, 255, 0.5)');
+    gradientNeon.addColorStop(1, 'rgba(0, 240, 255, 0.0)');
+
+    const usageChart = new Chart(ctx, {
+        type: 'line',
+        data: {
+            labels: {{ chart_labels | tojson }},
+            datasets: [
+                {
+                    label: 'Messaggi Testo',
+                    data: {{ chart_text | tojson }},
+                    borderColor: '#00f0ff',
+                    backgroundColor: gradientNeon,
+                    borderWidth: 2,
+                    tension: 0.4,
+                    fill: true
+                },
+                {
+                    label: 'Vocali Spese',
+                    data: {{ chart_voice | tojson }},
+                    borderColor: '#ff0055',
+                    backgroundColor: gradientPink,
+                    borderWidth: 2,
+                    tension: 0.4,
+                    fill: true
+                },
+                {
+                    label: 'Foto Inviate',
+                    data: {{ chart_photo | tojson }},
+                    borderColor: '#f59e0b',
+                    backgroundColor: 'transparent',
+                    borderWidth: 2,
+                    borderDash: [5, 5],
+                    tension: 0.4,
+                }
+            ]
+        },
+        options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            plugins: {
+                legend: { labels: { color: '#e2e8f0' } }
+            },
+            scales: {
+                y: {
+                    beginAtZero: true,
+                    grid: { color: 'rgba(255, 255, 255, 0.05)' },
+                    ticks: { color: '#94a3b8' }
+                },
+                x: {
+                    grid: { color: 'rgba(255, 255, 255, 0.05)' },
+                    ticks: { color: '#94a3b8' }
+                }
+            }
+        }
+    });
+</script>
+{% endblock %}

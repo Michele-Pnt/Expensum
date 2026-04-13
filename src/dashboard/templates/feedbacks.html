@@ -1,0 +1,60 @@
+{% extends "base.html" %}
+{% block content %}
+<h1 class="page-title">Gestione Feedback Utenti</h1>
+<p class="page-desc">Leggi i ticket aperti in beta tramite il comando `/feedback`.</p>
+
+<div class="glass-panel data-table-wrapper">
+    <table class="glass-table">
+        <thead>
+            <tr>
+                <th>Data</th>
+                <th>Mittente ID</th>
+                <th>Messaggio Feedback</th>
+                <th>Stato</th>
+                <th>Azioni (Risponditore)</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for f in feedbacks %}
+            <tr>
+                <td style="color:var(--text-muted)">{{ f.created_at.strftime('%Y-%m-%d %H:%M') }}</td>
+                <td><code>{{ f.chat_id }}</code></td>
+                <td style="max-width:300px">{{ f.message }}</td>
+                <td id="fb-status-{{ f.id }}">
+                    {% if f.status == 'unread' %}
+                        <span class="badge unread">Unread🔥</span>
+                    {% else %}
+                        <span class="badge active">Risolto ✅</span>
+                    {% endif %}
+                </td>
+                <td>
+                    <button class="btn-toggle" onclick="resolveFeedback('{{ f.id }}')">
+                        Segna Letto/Risolto
+                    </button>
+                </td>
+            </tr>
+            {% endfor %}
+            {% if not feedbacks %}
+            <tr><td colspan="5" style="text-align:center">Nessun feedback inviato ancora.</td></tr>
+            {% endif %}
+        </tbody>
+    </table>
+</div>
+
+<script>
+    async function resolveFeedback(id) {
+        const res = await fetch(`/api/resolve-feedback/${id}`, { method: 'POST' });
+        const data = await res.json();
+        if(data.status === 'ok') {
+            const td = document.getElementById(`fb-status-${id}`);
+            if(data.new_state === 'unread') {
+                td.innerHTML = '<span class="badge unread">Unread🔥</span>';
+            } else {
+                td.innerHTML = '<span class="badge active">Risolto ✅</span>';
+            }
+        } else {
+            alert("Errore");
+        }
+    }
+</script>
+{% endblock %}

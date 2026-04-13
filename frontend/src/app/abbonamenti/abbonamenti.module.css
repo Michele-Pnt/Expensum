@@ -1,0 +1,113 @@
+.container {
+  padding: 2rem;
+  max-width: 900px;
+  margin: 0 auto;
+}
+
+.header {
+  margin-bottom: 3rem;
+  text-align: center;
+}
+
+.header h1 {
+  font-size: 1.8rem;
+  font-weight: 700;
+  margin: 0 0 0.5rem 0;
+}
+
+.header p {
+  color: var(--muted-foreground);
+  margin: 0;
+  font-size: 1rem;
+}
+
+.grid {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 2rem;
+}
+
+@media (min-width: 768px) {
+  .grid {
+    grid-template-columns: 1fr 1fr;
+  }
+}
+
+.card {
+  background-color: var(--sidebar-bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 2rem;
+  display: flex;
+  flex-direction: column;
+}
+
+.cardPremium {
+  border-color: #f59e0b;
+  position: relative;
+  overflow: hidden;
+}
+
+.cardPremium::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 4px;
+  background: linear-gradient(135deg, #f59e0b, #d97706);
+}
+
+.planName {
+  font-size: 1.5rem;
+  font-weight: 600;
+  margin: 0 0 1rem 0;
+}
+
+.price {
+  font-size: 2.5rem;
+  font-weight: 700;
+  margin: 0 0 1.5rem 0;
+}
+
+.price span {
+  font-size: 1rem;
+  color: var(--muted-foreground);
+  font-weight: 400;
+}
+
+.features {
+  margin-bottom: 2rem;
+  flex: 1;
+}
+
+.feature {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  margin-bottom: 0.75rem;
+  font-size: 0.95rem;
+}
+
+.featureIcon {
+  color: #10b981;
+}
+
+.btn {
+  background-color: var(--muted);
+  color: var(--foreground);
+  padding: 0.75rem;
+  border-radius: var(--radius);
+  font-weight: 600;
+  text-align: center;
+  transition: opacity 0.2s;
+}
+
+.btnPremium {
+  background: linear-gradient(135deg, #f59e0b, #d97706);
+  color: white;
+}
+
+.btn:hover {
+  opacity: 0.8;
+}

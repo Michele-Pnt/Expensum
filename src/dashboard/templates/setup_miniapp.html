@@ -1,0 +1,773 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+    <title>Moneo Setup</title>
+    <script src="https://telegram.org/js/telegram-web-app.js"></script>
+    <style>
+        :root {
+            --bg: var(--tg-theme-bg-color, #1a1a2e);
+            --text: var(--tg-theme-text-color, #e0e0e0);
+            --hint: var(--tg-theme-hint-color, #888);
+            --secondary-bg: var(--tg-theme-secondary-bg-color, #16213e);
+            --accent: #f59e0b;
+            --accent-dim: rgba(245,158,11,0.15);
+            --danger: #ef4444;
+            --radius: 14px;
+        }
+
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            background: var(--bg);
+            color: var(--text);
+            min-height: 100vh;
+            padding-bottom: 90px;
+        }
+
+        .header {
+            padding: 20px 16px 12px;
+            text-align: center;
+            background: var(--secondary-bg);
+            border-bottom: 1px solid rgba(255,255,255,0.06);
+        }
+        .header h1 { font-size: 20px; color: var(--accent); margin-bottom: 6px; }
+        .header p { font-size: 13px; color: var(--hint); line-height: 1.4; max-width: 340px; margin: 0 auto; }
+
+        .tabs {
+            display: flex;
+            background: var(--secondary-bg);
+            border-bottom: 2px solid rgba(255,255,255,0.06);
+        }
+
+        .tab-btn {
+            flex: 1;
+            padding: 13px 8px;
+            background: transparent;
+            border: none;
+            color: var(--hint);
+            font-size: 13px;
+            font-weight: 600;
+            cursor: pointer;
+            border-bottom: 2px solid transparent;
+            margin-bottom: -2px;
+            transition: all 0.25s;
+        }
+        .tab-btn.active { color: var(--accent); border-bottom-color: var(--accent); }
+
+        .panel { display: none; padding: 16px; }
+        .panel.active { display: block; }
+
+        .card {
+            background: var(--secondary-bg);
+            border-radius: var(--radius);
+            padding: 16px;
+            margin-bottom: 14px;
+            border: 1px solid rgba(255,255,255,0.06);
+        }
+
+        .card-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 14px;
+            padding-bottom: 10px;
+            border-bottom: 1px solid rgba(255,255,255,0.07);
+        }
+        .card-title { font-weight: 700; font-size: 15px; color: var(--accent); }
+        .btn-remove {
+            color: var(--danger);
+            font-size: 12px;
+            font-weight: 600;
+            cursor: pointer;
+            padding: 4px 8px;
+            border-radius: 8px;
+            background: rgba(239,68,68,0.1);
+            border: none;
+        }
+
+        .field { margin-bottom: 12px; }
+        .field label {
+            display: block;
+            font-size: 11px;
+            color: var(--hint);
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            margin-bottom: 5px;
+        }
+        .field input,
+        .field select {
+            width: 100%;
+            padding: 11px 13px;
+            background: rgba(255,255,255,0.06);
+            border: 1px solid rgba(255,255,255,0.1);
+            border-radius: 10px;
+            color: var(--text);
+            font-size: 15px;
+            -webkit-appearance: none;
+        }
+        .field input:focus, .field select:focus { border-color: var(--accent); outline: none; }
+        .field select option { background: #1a1a2e; }
+
+        .btn-add {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 8px;
+            width: 100%;
+            padding: 14px;
+            background: var(--accent-dim);
+            border: 2px dashed var(--accent);
+            border-radius: var(--radius);
+            color: var(--accent);
+            font-weight: 700;
+            font-size: 14px;
+            cursor: pointer;
+            margin-bottom: 16px;
+        }
+
+        .cat-section-title {
+            font-size: 13px;
+            font-weight: 600;
+            color: var(--hint);
+            text-transform: uppercase;
+            letter-spacing: 0.6px;
+            margin: 16px 0 10px;
+        }
+
+        .cat-search {
+            width: 100%;
+            padding: 11px 13px;
+            background: rgba(255,255,255,0.06);
+            border: 1px solid rgba(255,255,255,0.1);
+            border-radius: 10px;
+            color: var(--text);
+            font-size: 15px;
+            margin-bottom: 12px;
+        }
+        .cat-search:focus { border-color: var(--accent); outline: none; }
+
+        .preset-grid {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 8px;
+            margin-bottom: 16px;
+            max-height: 280px;
+            overflow-y: auto;
+            padding: 4px 2px;
+        }
+        .preset-chip {
+            padding: 7px 13px;
+            border-radius: 20px;
+            background: rgba(255,255,255,0.07);
+            border: 1px solid rgba(255,255,255,0.1);
+            color: var(--text);
+            font-size: 13px;
+            cursor: pointer;
+            user-select: none;
+        }
+        .preset-chip.selected {
+            background: var(--accent);
+            color: #000;
+            border-color: var(--accent);
+            font-weight: 600;
+        }
+
+        .cat-add-manual { display: flex; gap: 8px; margin-bottom: 16px; }
+        .cat-add-manual input {
+            flex: 1;
+            padding: 11px 13px;
+            background: rgba(255,255,255,0.06);
+            border: 1px solid rgba(255,255,255,0.1);
+            border-radius: 10px;
+            color: var(--text);
+            font-size: 15px;
+        }
+        .cat-add-manual input:focus { border-color: var(--accent); outline: none; }
+        .cat-manual-btn {
+            padding: 11px 16px;
+            background: var(--accent);
+            border: none;
+            border-radius: 10px;
+            color: #000;
+            font-weight: 700;
+            font-size: 14px;
+            cursor: pointer;
+        }
+
+        .added-categories-title { font-size: 13px; font-weight: 600; color: var(--hint); margin: 8px 0 10px; }
+        .cat-tag {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            padding: 5px 10px;
+            border-radius: 20px;
+            background: var(--accent-dim);
+            border: 1px solid var(--accent);
+            color: var(--accent);
+            font-size: 13px;
+            margin: 0 6px 6px 0;
+        }
+        .cat-tag-remove { cursor: pointer; opacity: 0.7; font-size: 15px; }
+
+        .footer {
+            position: fixed;
+            bottom: 0; left: 0; right: 0;
+            padding: 12px 16px;
+            background: var(--bg);
+            border-top: 1px solid rgba(255,255,255,0.07);
+            z-index: 100;
+        }
+        .btn-main {
+            width: 100%;
+            padding: 16px;
+            background: var(--accent);
+            color: #000;
+            border: none;
+            border-radius: var(--radius);
+            font-size: 16px;
+            font-weight: 700;
+            cursor: pointer;
+        }
+        .btn-main:disabled { opacity: 0.5; cursor: not-allowed; }
+
+        .loader-overlay {
+            position: fixed; inset: 0;
+            background: rgba(0,0,0,0.65);
+            display: none;
+            justify-content: center;
+            align-items: center;
+            z-index: 999;
+        }
+        .spinner {
+            width: 44px; height: 44px;
+            border: 4px solid rgba(255,255,255,0.2);
+            border-top-color: var(--accent);
+            border-radius: 50%;
+            animation: spin 0.9s linear infinite;
+        }
+        @keyframes spin { to { transform: rotate(360deg); } }
+
+        .empty-state {
+            text-align: center;
+            padding: 30px 16px;
+            color: var(--hint);
+            font-size: 14px;
+        }
+        .empty-state span { font-size: 32px; display: block; margin-bottom: 8px; }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>&#x1F437; Moneo Setup</h1>
+        <p>ciao, Inserisci I tuoi account finanziari, le tue categorie e i tuoi abbonamenti nei rispettivi menu</p>
+    </div>
+
+    <div class="tabs">
+        <button class="tab-btn active" id="tab-accounts">&#x1F3E6; Conti</button>
+        <button class="tab-btn" id="tab-categories">&#x1F4C2; Categorie</button>
+        <button class="tab-btn" id="tab-subscriptions">&#x1F501; Abbonamenti</button>
+    </div>
+
+    <div id="panel-accounts" class="panel active">
+        <div id="accounts-cards"></div>
+        <button class="btn-add" id="add-account-btn">&#xFF0B; Aggiungi Conto</button>
+    </div>
+
+    <div id="panel-categories" class="panel">
+        <p class="cat-section-title">Cerca e seleziona dalle categorie comuni</p>
+        <input type="text" class="cat-search" id="cat-search-input" placeholder="&#x1F50D; Cerca categoria...">
+        <div class="preset-grid" id="preset-grid"></div>
+
+        <p class="cat-section-title">Oppure aggiungila manualmente</p>
+        <div class="cat-add-manual">
+            <input type="text" id="manual-cat-input" placeholder="Nome categoria personalizzata...">
+            <button class="cat-manual-btn" id="manual-cat-btn">&#xFF0B;</button>
+        </div>
+
+        <div id="cat-tags-wrapper" style="display:none">
+            <p class="added-categories-title">&#x2705; Categorie selezionate:</p>
+            <div id="cat-tags"></div>
+        </div>
+    </div>
+
+    <div id="panel-subscriptions" class="panel">
+        <div id="subscriptions-cards"></div>
+        <button class="btn-add" id="add-subscription-btn">&#xFF0B; Aggiungi Abbonamento</button>
+    </div>
+
+    <div class="footer">
+        <button id="mainBtn" class="btn-main">&#x1F4BE; Salva e Completa</button>
+    </div>
+
+    <div id="loader" class="loader-overlay">
+        <div class="spinner"></div>
+    </div>
+
+    <script>
+        // Safe Telegram WebApp init
+        var tg = null;
+        try {
+            if (window.Telegram && window.Telegram.WebApp) {
+                tg = window.Telegram.WebApp;
+                tg.expand();
+            }
+        } catch(e) { /* noop */ }
+
+        var schemasRaw = {{ schemas | tojson }};
+        var REG_TOKEN = "{{ reg_token }}";
+        var availableAccounts = {{ available_accounts | tojson }};
+        var availableCategories = {{ available_categories | tojson }};
+
+        // Schema di default: usato quando Notion non espone le proprietà
+        // (es. linked database views non condivise con l'integrazione).
+        // I nomi delle colonne vengono iniettati dal backend (Config).
+        var SCHEMA_DEFAULTS = {
+            accounts_db_id: {
+                properties: {
+                    'Name': { type: 'title' },
+                    '{{ col_accounts_initial_amount }}': { type: 'number' },
+                    '{{ col_accounts_type }}': { type: 'select', options: [
+                        'Cash','Brokerage','Credit Card','Saving'
+                    ]}
+                }
+            },
+            subscriptions_db_id: {
+                properties: {
+                    'Name': { type: 'title' },
+                    '{{ col_sub_type }}': { type: 'select', options: [
+                        'Mensile','Annuale','Settimanale','Trimestrale','Bi-mensile'
+                    ]},
+                    '{{ col_sub_amount }}': { type: 'number' },
+                    '{{ col_sub_category }}': { type: 'relation' },
+                    '{{ col_sub_account }}': { type: 'relation' }
+                }
+            }
+        };
+
+        var itemsData = { accounts_db_id: [], subscriptions_db_id: [] };
+        var selectedCategories = [];
+
+        var PRESET_CATEGORIES = [
+            "Ristoranti","Supermercato","Bar/Caffe","Pub/Locale","Asporto",
+            "Carburante","Trasporto Pubblico","Voli","Treni","Taxi/Uber","Parcheggio",
+            "Affitto","Luce","Acqua","Gas","Internet","Telefono","Pulizie Casa",
+            "Farmacia","Visite Mediche","Palestra","Benessere","Assicurazione Salute",
+            "Abbigliamento","Scarpe","Cosmetici","Parrucchiere",
+            "Cinema","Concerti","Libri","Videogiochi","Hobby",
+            "Netflix","Spotify","Gaming","Amazon Prime","Corsi Online",
+            "Veterinario","Cibo Animali",
+            "Scuola","Baby Sitter","Giocattoli",
+            "Vacanze","Hotel","Campeggio",
+            "Tecnologia","Software","Riparazioni","Manutenzione",
+            "Regali","Gioielli","Giardino",
+            "Investimenti","Commissioni Banca","Interessi",
+            "Trasferimento","Altro"
+        ];
+        var filteredPresets = PRESET_CATEGORIES.slice();
+
+        function renderPresets() {
+            var grid = document.getElementById('preset-grid');
+            if (!grid) return;
+            var html = '';
+            for (var i = 0; i < filteredPresets.length; i++) {
+                var cat = filteredPresets[i];
+                var isSel = selectedCategories.indexOf(cat) !== -1;
+                html += '<div class="preset-chip' + (isSel ? ' selected' : '') + '" data-cat="' + cat.replace(/"/g, '&quot;') + '">' + cat + '</div>';
+            }
+            grid.innerHTML = html;
+            var chips = grid.querySelectorAll('.preset-chip');
+            for (var j = 0; j < chips.length; j++) {
+                chips[j].addEventListener('click', function() {
+                    togglePreset(this.getAttribute('data-cat'));
+                });
+            }
+        }
+
+        function filterPresets(query) {
+            var q = query.toLowerCase();
+            filteredPresets = q
+                ? PRESET_CATEGORIES.filter(function(c) { return c.toLowerCase().indexOf(q) !== -1; })
+                : PRESET_CATEGORIES.slice();
+            renderPresets();
+        }
+
+        function togglePreset(cat) {
+            var idx = selectedCategories.indexOf(cat);
+            if (idx === -1) selectedCategories.push(cat);
+            else selectedCategories.splice(idx, 1);
+            renderPresets();
+            renderCatTags();
+            refreshRelationOptions();
+        }
+
+        function addManualCategory() {
+            var input = document.getElementById('manual-cat-input');
+            var val = input.value.trim();
+            if (!val) return;
+            if (selectedCategories.indexOf(val) === -1) {
+                selectedCategories.push(val);
+                renderCatTags();
+                renderPresets();
+                refreshRelationOptions();
+            }
+            input.value = '';
+        }
+
+        function removeCategory(cat) {
+            selectedCategories = selectedCategories.filter(function(c) { return c !== cat; });
+            renderPresets();
+            renderCatTags();
+            refreshRelationOptions();
+        }
+
+        function renderCatTags() {
+            var wrapper = document.getElementById('cat-tags-wrapper');
+            var container = document.getElementById('cat-tags');
+            if (!wrapper || !container) return;
+            if (selectedCategories.length === 0) { wrapper.style.display = 'none'; return; }
+            wrapper.style.display = 'block';
+            container.innerHTML = '';
+            for (var i = 0; i < selectedCategories.length; i++) {
+                (function(cat) {
+                    var span = document.createElement('span');
+                    span.className = 'cat-tag';
+                    span.textContent = cat + ' ';
+                    var x = document.createElement('span');
+                    x.className = 'cat-tag-remove';
+                    x.textContent = '\u00d7';
+                    x.addEventListener('click', function() { removeCategory(cat); });
+                    span.appendChild(x);
+                    container.appendChild(span);
+                })(selectedCategories[i]);
+            }
+        }
+
+        function switchTab(name) {
+            var names = ['accounts','categories','subscriptions'];
+            var tabs = ['tab-accounts','tab-categories','tab-subscriptions'];
+            for (var i = 0; i < names.length; i++) {
+                var tb = document.getElementById(tabs[i]);
+                var pn = document.getElementById('panel-' + names[i]);
+                if (tb) tb.classList.toggle('active', names[i] === name);
+                if (pn) pn.classList.toggle('active', names[i] === name);
+            }
+        }
+
+        function getSchema(dbKey) {
+            var s = schemasRaw[dbKey];
+            var liveProps = (s && s.properties && Object.keys(s.properties).length > 0)
+                            ? s.properties : null;
+            if (liveProps) return liveProps;
+            // Fallback agli schemi hardcoded quando Notion non espone le proprietà
+            var def = SCHEMA_DEFAULTS[dbKey];
+            return (def && def.properties) ? def.properties : {};
+        }
+
+        function buildFields(dbKey, idx, container) {
+            var props = getSchema(dbKey);
+            var excluded = ['formula','rollup','created_time','last_edited_time','created_by','last_edited_by'];
+
+            if (Object.keys(props).length === 0) {
+                var fallbackDiv = document.createElement('div');
+                fallbackDiv.className = 'field';
+                var lbl = document.createElement('label');
+                lbl.textContent = 'Nome';
+                var inp = document.createElement('input');
+                inp.type = 'text';
+                inp.placeholder = 'Inserisci nome...';
+                inp.addEventListener('input', function() {
+                    if (!itemsData[dbKey][idx]) itemsData[dbKey][idx] = {};
+                    itemsData[dbKey][idx]['Name'] = this.value;
+                });
+                fallbackDiv.appendChild(lbl);
+                fallbackDiv.appendChild(inp);
+                container.appendChild(fallbackDiv);
+                return;
+            }
+
+            var propNames = Object.keys(props);
+            for (var pi = 0; pi < propNames.length; pi++) {
+                var pName = propNames[pi];
+                var pInfo = props[pName];
+                if (excluded.indexOf(pInfo.type) !== -1) continue;
+
+                var fieldDiv = document.createElement('div');
+                fieldDiv.className = 'field';
+                var lbl = document.createElement('label');
+                lbl.textContent = pName;
+                fieldDiv.appendChild(lbl);
+
+                var el;
+                if (pInfo.type === 'select' || pInfo.type === 'multi_select') {
+                    el = document.createElement('select');
+                    var defOpt = document.createElement('option');
+                    defOpt.value = ''; defOpt.textContent = 'Seleziona...';
+                    el.appendChild(defOpt);
+                    // pInfo.options → schema processato da discover_db_schemas (array di stringhe)
+                    // pInfo[pInfo.type].options → schema Notion raw (array di oggetti {id, name, color})
+                    // Controlliamo length > 0 perché [] è truthy e non triggera il fallback
+                    var rawOpts = (Array.isArray(pInfo.options) && pInfo.options.length > 0)
+                        ? pInfo.options
+                        : ((pInfo[pInfo.type] && Array.isArray(pInfo[pInfo.type].options) && pInfo[pInfo.type].options.length > 0)
+                            ? pInfo[pInfo.type].options : []);
+                    var opts = rawOpts.map(function(o) { return typeof o === 'string' ? o : o.name; });
+                    for (var oi = 0; oi < opts.length; oi++) {
+                        var opt = document.createElement('option');
+                        opt.value = opts[oi]; opt.textContent = opts[oi];
+                        el.appendChild(opt);
+                    }
+                } else if (pInfo.type === 'number') {
+                    el = document.createElement('input');
+                    el.type = 'number'; el.step = 'any'; el.placeholder = '0.00';
+                } else if (pInfo.type === 'date') {
+                    el = document.createElement('input');
+                    el.type = 'date';
+                } else if (pInfo.type === 'checkbox') {
+                    el = document.createElement('select');
+                    var no = document.createElement('option'); no.value = 'false'; no.textContent = 'No';
+                    var si = document.createElement('option'); si.value = 'true'; si.textContent = 'Si';
+                    el.appendChild(no); el.appendChild(si);
+                } else if (pInfo.type === 'relation') {
+                    el = document.createElement('select');
+                    el.setAttribute('data-relation-for', pName);
+                    el.innerHTML = '<option value="">-- Seleziona --</option>';
+                    // Le opzioni vengono popolate da refreshRelationOptions()
+                } else {
+                    el = document.createElement('input');
+                    el.type = 'text'; el.placeholder = '...';
+                }
+
+                (function(key, i, name, type) {
+                    var handler = function() {
+                        if (!itemsData[key][i]) itemsData[key][i] = {};
+                        var v = this.value;
+                        if (type === 'checkbox') v = (v === 'true');
+                        if (type === 'number') v = parseFloat(v);
+                        itemsData[key][i][name] = v;
+                    };
+                    el.addEventListener('input', handler);
+                    el.addEventListener('change', handler);
+                })(dbKey, idx, pName, pInfo.type);
+
+                fieldDiv.appendChild(el);
+                container.appendChild(fieldDiv);
+            }
+        }
+
+        function addItem(dbKey) {
+            var idx = itemsData[dbKey].length;
+            itemsData[dbKey].push({});
+            renderCards(dbKey);
+            refreshRelationOptions();
+        }
+
+        function removeItem(dbKey, idx) {
+            itemsData[dbKey].splice(idx, 1);
+            renderCards(dbKey);
+            refreshRelationOptions();
+        }
+
+        function renderCards(dbKey) {
+            var containerId = dbKey === 'accounts_db_id' ? 'accounts-cards' : 'subscriptions-cards';
+            var container = document.getElementById(containerId);
+            if (!container) return;
+            container.innerHTML = '';
+
+            if (itemsData[dbKey].length === 0) {
+                container.innerHTML = '<div class="empty-state"><span>&#x1F4ED;</span>Nessun elemento. Clicca "+ Aggiungi" per iniziare.</div>';
+                return;
+            }
+
+            var labels = { accounts_db_id: 'Conto', subscriptions_db_id: 'Abbonamento' };
+            for (var i = 0; i < itemsData[dbKey].length; i++) {
+                (function(idx) {
+                    var card = document.createElement('div');
+                    card.className = 'card';
+
+                    var hdr = document.createElement('div');
+                    hdr.className = 'card-header';
+                    var ttl = document.createElement('span');
+                    ttl.className = 'card-title';
+                    ttl.textContent = (labels[dbKey] || 'Elemento') + ' #' + (idx + 1);
+                    var rmBtn = document.createElement('button');
+                    rmBtn.className = 'btn-remove';
+                    rmBtn.textContent = '\u2715 Rimuovi';
+                    rmBtn.addEventListener('click', function() { removeItem(dbKey, idx); });
+                    hdr.appendChild(ttl);
+                    hdr.appendChild(rmBtn);
+                    card.appendChild(hdr);
+
+                    buildFields(dbKey, idx, card);
+                    container.appendChild(card);
+                })(i);
+            }
+        }
+
+        // Aggiorna i dropdown relation in tutte le card subscriptions
+        function refreshRelationOptions() {
+            // Opzioni Account: esistenti su Notion + quelli che si stanno aggiungendo nel form
+            var accOpts = availableAccounts.map(function(a) { return { value: a.id, label: a.name }; });
+            itemsData['accounts_db_id'].forEach(function(item) {
+                var n = item['Name'] || '';
+                if (n && !accOpts.find(function(o) { return o.label === n; }))
+                    accOpts.push({ value: '__name__:' + n, label: n + ' (da creare)' });
+            });
+
+            // Opzioni Category: esistenti su Notion + quelle selezionate nel form
+            var catOpts = availableCategories.map(function(c) { return { value: c.id, label: c.name }; });
+            selectedCategories.forEach(function(n) {
+                if (!catOpts.find(function(o) { return o.label === n; }))
+                    catOpts.push({ value: '__name__:' + n, label: n + ' (da creare)' });
+            });
+
+            // Aggiorna tutti i <select> marcati con data-relation-for
+            document.querySelectorAll('[data-relation-for]').forEach(function(sel) {
+                var relFor = sel.getAttribute('data-relation-for');
+                var isAccount = relFor.toLowerCase().indexOf('account') !== -1;
+                var opts = isAccount ? accOpts : catOpts;
+                var cur = sel.value;
+                sel.innerHTML = '<option value="">-- Seleziona --</option>';
+                opts.forEach(function(o) {
+                    var opt = document.createElement('option');
+                    opt.value = o.value; opt.textContent = o.label;
+                    if (o.value === cur) opt.selected = true;
+                    sel.appendChild(opt);
+                });
+            });
+        }
+
+        function buildNotionProp(pType, value) {
+            if (value === '' || value === undefined || value === null) return null;
+            if (pType === 'title') return { title: [{ text: { content: String(value) } }] };
+            if (pType === 'rich_text') return { rich_text: [{ text: { content: String(value) } }] };
+            if (pType === 'number') return { number: parseFloat(value) };
+            if (pType === 'select') return { select: { name: String(value) } };
+            if (pType === 'relation') return value ? { __relation_ref: String(value) } : null;
+            if (pType === 'multi_select') return { multi_select: [{ name: String(value) }] };
+            if (pType === 'date') return { date: { start: String(value) } };
+            if (pType === 'checkbox') return { checkbox: value === true };
+            if (pType === 'url') return { url: String(value) };
+            return { rich_text: [{ text: { content: String(value) } }] };
+        }
+
+        function formatItems(dbKey) {
+            var props = getSchema(dbKey);
+            var result = [];
+            for (var i = 0; i < itemsData[dbKey].length; i++) {
+                var item = itemsData[dbKey][i];
+                var properties = {};
+                var keys = Object.keys(item);
+                for (var k = 0; k < keys.length; k++) {
+                    var pName = keys[k];
+                    var pValue = item[pName];
+                    var pInfo = props[pName];
+                    var pType = pInfo ? pInfo.type : 'rich_text';
+                    var built = buildNotionProp(pType, pValue);
+                    if (built) properties[pName] = built;
+                }
+                if (Object.keys(properties).length > 0) result.push(properties);
+            }
+            return result;
+        }
+
+        function formatCategories() {
+            var props = getSchema('categories_db_id');
+            var titleKey = 'Name';
+            var propKeys = Object.keys(props);
+            for (var i = 0; i < propKeys.length; i++) {
+                if (props[propKeys[i]].type === 'title') { titleKey = propKeys[i]; break; }
+            }
+            var result = [];
+            for (var j = 0; j < selectedCategories.length; j++) {
+                var obj = {};
+                obj[titleKey] = { title: [{ text: { content: selectedCategories[j] } }] };
+                result.push(obj);
+            }
+            return result;
+        }
+
+        function showMsg(msg) {
+            if (tg && tg.showAlert) { tg.showAlert(msg); }
+            else { alert(msg); }
+        }
+
+        function submitSetup() {
+            var btn = document.getElementById('mainBtn');
+            var loader = document.getElementById('loader');
+            if (btn) btn.disabled = true;
+            if (loader) loader.style.display = 'flex';
+
+            var payload = {
+                reg_token: REG_TOKEN,
+                items: {
+                    accounts_db_id: formatItems('accounts_db_id'),
+                    categories_db_id: formatCategories(),
+                    subscriptions_db_id: formatItems('subscriptions_db_id')
+                }
+            };
+
+            console.log('[DEBUG] payload inviato:', JSON.stringify(payload, null, 2));
+            fetch('/api/setup-complete', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload)
+            })
+            .then(function(resp) { return resp.json().then(function(res) { return { ok: resp.ok, res: res }; }); })
+            .then(function(data) {
+                console.log('[DEBUG] risposta server:', JSON.stringify(data, null, 2));
+                var details = (data.res && data.res.details && data.res.details.length > 0)
+                    ? '\n\nDettagli:\n' + data.res.details.join('\n') : '';
+                var msg = data.ok && data.res.status === 'ok'
+                    ? 'Setup completato! Creati ' + data.res.created + ' elementi su Notion.'
+                    : 'Ops! ' + (data.res.error || 'Errore sconosciuto') + details;
+                if (data.ok && data.res.status === 'ok' && tg && tg.showAlert) {
+                    tg.showAlert(msg, function() { if (tg.close) tg.close(); });
+                } else {
+                    showMsg(msg);
+                    if (btn) btn.disabled = false;
+                }
+            })
+            .catch(function(err) {
+                showMsg('Errore: ' + err.message);
+                if (btn) btn.disabled = false;
+            })
+            .finally(function() {
+                if (loader) loader.style.display = 'none';
+            });
+        }
+
+        // ---- INIT ----
+        document.addEventListener('DOMContentLoaded', function() {
+            // Tab switching
+            document.getElementById('tab-accounts').addEventListener('click', function() { switchTab('accounts'); });
+            document.getElementById('tab-categories').addEventListener('click', function() { switchTab('categories'); });
+            document.getElementById('tab-subscriptions').addEventListener('click', function() { switchTab('subscriptions'); });
+
+            // Add item buttons
+            document.getElementById('add-account-btn').addEventListener('click', function() { addItem('accounts_db_id'); });
+            document.getElementById('add-subscription-btn').addEventListener('click', function() { addItem('subscriptions_db_id'); });
+
+            // Category search
+            document.getElementById('cat-search-input').addEventListener('input', function() { filterPresets(this.value); });
+
+            // Manual category
+            document.getElementById('manual-cat-btn').addEventListener('click', addManualCategory);
+            document.getElementById('manual-cat-input').addEventListener('keydown', function(e) {
+                if (e.key === 'Enter') { e.preventDefault(); addManualCategory(); }
+            });
+
+            // Submit
+            document.getElementById('mainBtn').addEventListener('click', submitSetup);
+
+            // Initial renders
+            renderPresets();
+            renderCards('accounts_db_id');
+            renderCards('subscriptions_db_id');
+            refreshRelationOptions();
+        });
+    </script>
+</body>
+</html>

@@ -13,7 +13,10 @@ Il parser usa il LLM (Ollama o Gemini) per estrarre un JSON strutturato:
 import json
 import logging
 import re
+import time
+import random
 from datetime import date, datetime
+import difflib
 
 from config import Config
 
@@ -32,10 +35,18 @@ REGOLE TASSATIVE:
 3. Se il messaggio NON sembra una transazione finanziaria, rispondi con: {"error": "not_expense"}
 4. NON inventare importi.
 
-ESEMPI:
+ESEMPI SPESE:
 - "ieri pizza 25€" → {"type": "expense", "amount": 25.0, "category": "Ristoranti", "name": "Pizza", "date": "2026-03-20"}
-- "ho ricevuto lo stipendio 1500" → {"type": "income", "amount": 1500.0, "category": null, "name": "Stipendio", "date": "2026-03-22"}
 - "netflix" → {"type": "expense", "amount": null, "category": "Abbonamenti", "name": "Netflix", "date": "2026-03-21"}
+- "ho speso 67 euro al supermercato" → {"type": "expense", "amount": 67.0, "category": "Supermercato", "name": "Spesa supermercato", "date": "2026-03-21"}
+
+ESEMPI ENTRATE:
+- "ho ricevuto lo stipendio 1500" → {"type": "income", "amount": 1500.0, "category": null, "name": "Stipendio", "date": "2026-03-22"}
+- "busta paga marzo 1800 euro" → {"type": "income", "amount": 1800.0, "category": null, "name": "Busta paga marzo", "date": "2026-03-22"}
+- "rimborso spese 120€" → {"type": "income", "amount": 120.0, "category": null, "name": "Rimborso spese", "date": "2026-03-22"}
+- "mi hanno pagato 500" → {"type": "income", "amount": 500.0, "category": null, "name": "Pagamento ricevuto", "date": "2026-03-22"}
+- "bonifico ricevuto 300 euro" → {"type": "income", "amount": 300.0, "category": null, "name": "Bonifico ricevuto", "date": "2026-03-22"}
+- "regalo compleanno 50 euro" → {"type": "income", "amount": 50.0, "category": null, "name": "Regalo compleanno", "date": "2026-03-22"}
 """
 
 
@@ -154,19 +165,51 @@ class ExpenseParser:
         return response.message.content or ""
 
     def _call_gemini(self, user_prompt: str) -> str:
-        """Chiama Gemini per il parsing."""
+        """Chiama Gemini con exponential backoff + jitter e fallback model."""
         from google.genai import types
-        response = self._gemini_client.models.generate_content(
-            model=Config.GEMINI_MODEL,
-            contents=user_prompt,
-            config=types.GenerateContentConfig(
-                system_instruction=_SYSTEM_PROMPT,
-                temperature=0.1,
-                max_output_tokens=1024,
-                response_mime_type="application/json",
-            ),
-        )
-        return response.text or ""
+
+        max_retries = 3
+        base_delay = 1.0  # secondi
+        models_to_try = [Config.GEMINI_MODEL, Config.GEMINI_FALLBACK_1, Config.GEMINI_FALLBACK_2]
+
+        for model_name in models_to_try:
+            for attempt in range(max_retries):
+                try:
+                    response = self._gemini_client.models.generate_content(
+                        model=model_name,
+                        contents=user_prompt,
+                        config=types.GenerateContentConfig(
+                            system_instruction=_SYSTEM_PROMPT,
+                            temperature=0.1,
+                            max_output_tokens=1024,
+                            response_mime_type="application/json",
+                        ),
+                    )
+                    return response.text or ""
+                except Exception as e:
+                    error_str = str(e)
+                    is_retryable = any(code in error_str for code in ("503", "429", "UNAVAILABLE", "RESOURCE_EXHAUSTED"))
+
+                    if not is_retryable:
+                        raise  # Errore non recuperabile, esci subito
+
+                    if attempt < max_retries - 1:
+                        # Exponential backoff con jitter
+                        delay = base_delay * (2 ** attempt) + random.uniform(0, 1)
+                        logger.warning(
+                            f"[Gemini] {model_name} tentativo {attempt + 1}/{max_retries} fallito "
+                            f"({error_str[:80]}). Retry tra {delay:.1f}s..."
+                        )
+                        time.sleep(delay)
+                    else:
+                        is_last = (model_name == models_to_try[-1])
+                        logger.warning(
+                            f"[Gemini] {model_name} esaurito {max_retries} tentativi. "
+                            f"{'Nessun altro fallback disponibile.' if is_last else 'Provo il prossimo modello di fallback...'}"
+                        )
+
+        # Se arriviamo qui, tutti i tentativi su tutti i modelli sono falliti
+        raise RuntimeError("Tutti i modelli Gemini non disponibili dopo i retry.")
 
     def _normalize(self, parsed: dict, today: date) -> dict:
         """Normalizza e valida il risultato del parsing."""
@@ -188,22 +231,26 @@ class ExpenseParser:
         # Category — verifica che sia tra quelle disponibili
         category = parsed.get("category")
         if category and self._categories:
-            # Fuzzy match: cerca la categoria più simile (case-insensitive)
+            # 1. Prova match esatto (case-insensitive)
             category_lower = category.lower()
             matched = next(
                 (c for c in self._categories if c.lower() == category_lower),
                 None,
             )
+            
+            # 2. Se non c'è match esatto, prova il fuzzy match
             if not matched:
-                # Cerca per contenimento parziale
-                matched = next(
-                    (c for c in self._categories if category_lower in c.lower() or c.lower() in category_lower),
-                    None,
-                )
-            category = matched or category  # usa il match o il valore originale
+                matches = difflib.get_close_matches(category_lower, [c.lower() for c in self._categories], n=1, cutoff=0.6)
+                if matches:
+                    # Recupera il nome originale con le maiuscole corrette
+                    best_match_lower = matches[0]
+                    matched = next(c for c in self._categories if c.lower() == best_match_lower)
+
+            category = matched or category
 
         # Name
-        name = parsed.get("name") or "Spesa"
+        _type = parsed.get("type", "expense")
+        name = parsed.get("name") or ("Entrata" if _type == "income" else "Spesa")
 
         return {
             "type": parsed.get("type", "expense"), # per indentificare spesa o entrata 

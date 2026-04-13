@@ -25,12 +25,25 @@ class Config:
     NOTION_ACCOUNTS_DATABASE_ID: str = os.getenv("NOTION_ACCOUNTS_DATABASE_ID", "")
     NOTION_SUBSCRIPTIONS_DATABASE_ID: str = os.getenv("NOTION_SUBSCRIPTIONS_DATABASE_ID", "")
     NOTION_PAY_TRANSFER_DATABASE_ID: str = os.getenv("NOTION_PAY_TRANSFER_DATABASE_ID", "")
+    
+    # OAuth (Fase 2)
+    NOTION_CLIENT_ID: str = os.getenv("NOTION_CLIENT_ID", "")
+    NOTION_CLIENT_SECRET: str = os.getenv("NOTION_CLIENT_SECRET", "")
+    NOTION_REDIRECT_URI: str = os.getenv("NOTION_REDIRECT_URI", "http://localhost:5000/auth/notion/callback")
     # Nomi colonne database Expense
     NOTION_COL_DATE: str = os.getenv("NOTION_COL_DATE", "Date")
     NOTION_COL_CATEGORY: str = os.getenv("NOTION_COL_CATEGORY", "Categories")
     NOTION_COL_NAME: str = os.getenv("NOTION_COL_NAME", "Name")
     NOTION_COL_AMOUNT: str = os.getenv("NOTION_COL_AMOUNT", "Amount")
     NOTION_COL_ACCOUNT: str = os.getenv("NOTION_COL_ACCOUNT", "Accounts")
+    NOTION_INCOME_COL_MISC: str = os.getenv("NOTION_INCOME_COL_MISC", "Misc")
+    # Nomi colonne database Accounts (setup)
+    NOTION_ACCOUNTS_COL_TYPE: str = os.getenv("NOTION_ACCOUNTS_COL_TYPE", "Account Type")
+    # Nomi colonne database Subscriptions
+    NOTION_SUB_COL_TYPE:     str = os.getenv("NOTION_SUB_COL_TYPE", "Type")
+    NOTION_SUB_COL_AMOUNT:   str = os.getenv("NOTION_SUB_COL_AMOUNT", "Amount")
+    NOTION_SUB_COL_CATEGORY: str = os.getenv("NOTION_SUB_COL_CATEGORY", "Category")
+    NOTION_SUB_COL_ACCOUNT:  str = os.getenv("NOTION_SUB_COL_ACCOUNT", "Account")
     # Nomi colonne database Accounts
     NOTION_ACCOUNTS_COL_NAME: str = os.getenv("NOTION_ACCOUNTS_COL_NAME", "Name")
     NOTION_ACCOUNTS_COL_BALANCE: str = os.getenv("NOTION_ACCOUNTS_COL_BALANCE", "Current Balance")
@@ -49,6 +62,8 @@ class Config:
     # --- GEMINI ---
     GEMINI_API_KEY: str = os.getenv("GEMINI_API_KEY", "")
     GEMINI_MODEL: str = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
+    GEMINI_FALLBACK_1: str = os.getenv("GEMINI_FALLBACK_1", "gemini-2.5-flash-8b")
+    GEMINI_FALLBACK_2: str = os.getenv("GEMINI_FALLBACK_2", "gemini-1.5-flash")
 
     # --- OLLAMA ---
     OLLAMA_BASE_URL: str = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
@@ -60,10 +75,17 @@ class Config:
     INVITE_CODE: str = os.getenv("INVITE_CODE", "")
     
     # --- DATABASE ---
-    # Default: SQLite locale. Per PostgreSQL/Oracle: "postgresql://user:pass@host/dbname"
+    # Default: SQLite locale (sqlite:///users.db). 
+    # Per PostgreSQL: "postgresql://utente:password@localhost:5432/financebot"
     DATABASE_URL: str = os.getenv("DATABASE_URL", "sqlite:///users.db")
 
-    # --- SICUREZZA ---
+    # --- SICUREZZA e CLOUD ---
+    # AWS Credentials for Cost Tracking (lettura dashboard)
+    AWS_ACCESS_KEY_ID: str = os.getenv("AWS_ACCESS_KEY_ID", "")
+    AWS_SECRET_ACCESS_KEY: str = os.getenv("AWS_SECRET_ACCESS_KEY", "")
+
+    # Password master per la web dashboard
+    DASHBOARD_PASSWORD: str = os.getenv("DASHBOARD_PASSWORD", "admin")
     # Rate Limiting: max messaggi per utente per finestra di 60 secondi
     # Motivazione: un utente legittimo non inserisce più di 2-3 spese al minuto
     MAX_MESSAGES_PER_MINUTE: int = int(os.getenv("MAX_MESSAGES_PER_MINUTE", "10"))
@@ -80,7 +102,9 @@ class Config:
 
     # --- LOGGING ---
     LOG_DIR: Path = Path(__file__).parent / "logs"
-    LOG_LEVEL: int = logging.INFO
+    LOG_LEVEL: int = logging.DEBUG
+
+
 
     @classmethod
     def validate(cls) -> None:
@@ -92,6 +116,8 @@ class Config:
             "NOTION_ACCOUNTS_DATABASE_ID": cls.NOTION_ACCOUNTS_DATABASE_ID,
             "TELEGRAM_BOT_TOKEN": cls.TELEGRAM_BOT_TOKEN,
             "TELEGRAM_CHAT_ID": cls.TELEGRAM_CHAT_ID,
+            "NOTION_CLIENT_ID": cls.NOTION_CLIENT_ID,
+            "NOTION_CLIENT_SECRET": cls.NOTION_CLIENT_SECRET,
         }
         # GEMINI_API_KEY è richiesta solo se il provider è Gemini
         if cls.LLM_PROVIDER == "gemini":
@@ -117,4 +143,11 @@ def setup_logging() -> logging.Logger:
             logging.StreamHandler(),
         ],
     )
+    # Forza il livello debug per i nostri moduli se impostato in Config
+    logger = logging.getLogger("financial_agent.bot")
+    logging.getLogger("financial_agent").setLevel(Config.LOG_LEVEL)
+    
     return logging.getLogger("financial_agent")
+
+# Inizializza il logging centralizzato
+setup_logging()

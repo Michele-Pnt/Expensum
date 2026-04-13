@@ -19,8 +19,9 @@ Avvio:
 import argparse
 import logging
 import sys
+import json
 
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update, WebAppInfo
 from telegram.constants import ParseMode
 from google import genai
 from google.genai import types
@@ -49,6 +50,13 @@ logger = logging.getLogger("financial_agent.bot")
 # ---------------------------------------------------------------------------
 WAITING_INVITE_CODE, WAITING_API_KEY, WAITING_EXPENSE_DB, WAITING_INCOME_DB, WAITING_CATEGORIES_DB, WAITING_MONTHLY_DB, WAITING_ACCOUNTS_DB = range(7)
 
+# ---------------------------------------------------------------------------
+# Stati della inizializzazione del template
+# ---------------------------------------------------------------------------
+SETUP_STATUS_WAIT_ACCOUNTS = "WAIT_ACCOUNTS"
+SETUP_STATUS_DONE = "DONE"
+
+
 # Cache globali (inizializzate al primo messaggio)
 _notion: NotionFinanceClient | None = None
 _parser: ExpenseParser | None = None
@@ -60,6 +68,16 @@ _user_store = UserStore(db_url=Config.DATABASE_URL)
 # Formato: { "chat_id": OggettoClient }
 _notion_clients: dict[str, NotionFinanceClient] = {}
 _parsers: dict[str, ExpenseParser] = {}
+
+
+def _safe_json_load(raw: str | None) -> dict | None:
+    if not raw:
+        return None
+    try:
+        loaded = json.loads(raw)
+        return loaded if isinstance(loaded, dict) else None
+    except Exception:
+        return None
 
 def _get_notion(chat_id: str) -> NotionFinanceClient:
     """Ritorna il client Notion specifico per l'utente, creandolo se manca."""
@@ -75,19 +93,38 @@ def _get_notion(chat_id: str) -> NotionFinanceClient:
         raise ValueError(f"Utente {chat_id} non autorizzato, devi registrati per poter accedere al servizio")
 
     # 3. Creiamo un NUOVO client personalizzato con le chiavi di quell'utente
+    # Fase 2: Preferiamo il token OAuth se presente, altrimenti usiamo la vecchia API key
+    api_key = user.notion_access_token or user.notion_api_key
+    
+    # Carichiamo gli schemi dalla nuova tabella dedicata
+    stored_schemas = _user_store.get_database_schemas(chat_id)
+    
+    # Prepariamo il dizionario dei db_schemas per il client, effettuando il parsing JSON
+    db_schemas = {}
+    for db_key, data in stored_schemas.items():
+        db_schemas[db_key] = {
+            "database_id": data["database_id"],
+            "properties": _safe_json_load(data["properties"]),
+            "mapped": _safe_json_load(data["mapped"])
+        }
+
     client = NotionFinanceClient(
-        api_key=user.notion_api_key,
+        api_key=api_key,
         expense_db_id=user.expense_db_id,
         income_db_id=user.income_db_id,
         categories_db_id=user.categories_db_id,
         monthly_balance_db_id=user.monthly_balance_db_id,
-        accounts_db_id=user.accounts_db_id
+        accounts_db_id=user.accounts_db_id,
+        subscriptions_db_id=user.subscriptions_db_id,
+        pay_transfer_db_id=user.pay_transfer_db_id,
+        db_schemas=db_schemas,
     )
 
     #salviamo il client
     _notion_clients[chat_id] = client
     return client
     
+
 def _get_parser(chat_id: str) -> ExpenseParser:
     """Ritorna il parser con categorie da Notion specifico per l'utente, creandolo se manca."""
     chat_id = str(chat_id)  # Convertiamo in stringa per sicurezza (le chiavi dei dizionari sono stringhe)
@@ -106,6 +143,7 @@ def _get_parser(chat_id: str) -> ExpenseParser:
     logger.info(f"Parser inizializzato con {len(categories)} categorie: {categories}")
     return parser
 
+
 def _is_authorized(update: Update) -> bool:
     """Verifica che il messaggio arrivi dall'utente autorizzato (presente nel database) e attivo."""
     if not update.effective_chat:
@@ -116,6 +154,88 @@ def _is_authorized(update: Update) -> bool:
     return user is not None
 
 
+def sanitize_letters_only(text: str) -> str:
+    """Rimuove tutto tranne lettere Unicode e spazi, normalizzando gli spazi multipli."""
+    cleaned = "".join(char if (char.isalpha() or char.isspace()) else " " for char in text)
+    return " ".join(cleaned.split())
+
+
+def _parse_keyboard_list(raw_text: str) -> list[str]:
+    """Parsa una lista separata da virgole e sanitizza ogni voce."""
+    items = []
+    for raw_item in raw_text.split(","):
+        sanitized = sanitize_letters_only(raw_item)
+        if sanitized:
+            items.append(sanitized)
+    return items
+
+
+def _build_setup_summary(accounts: list[str], categories: list[str], subscriptions: list[str]) -> str:
+    accounts_block = "\n".join(f"- {item}" for item in accounts) or "- Nessuno"
+    categories_block = "\n".join(f"- {item}" for item in categories) or "- Nessuna"
+    subscriptions_block = "\n".join(f"- {item}" for item in subscriptions) or "- Nessuno"
+
+    return (
+        "🛠️ *Riepilogo Setup Iniziale*\n\n"
+        "🏦 *Accounts*\n"
+        f"{accounts_block}\n\n"
+        "📂 *Categories*\n"
+        f"{categories_block}\n\n"
+        "🔁 *Subscriptions*\n"
+        f"{subscriptions_block}\n\n"
+        "Confermi la creazione su Notion?"
+    )
+
+def _has_notion_template_binding(user) -> bool:
+    if not user:
+        return False
+    required_ids = [
+        user.expense_db_id,
+        user.income_db_id,
+        user.categories_db_id,
+        user.accounts_db_id,
+        user.subscriptions_db_id,
+        user.pay_transfer_db_id,
+        user.monthly_balance_db_id,
+    ]
+    return all(required_ids)
+
+async def cmd_setup(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Fornisce il link alla Mini App per il setup dinamico."""
+    if not _is_authorized(update):
+        await update.message.reply_text(
+            "⚠️ *Non sei ancora registrato!*\nUsa /registrati per configurare il bot.",
+            parse_mode=ParseMode.MARKDOWN,
+        )
+        return
+
+    chat_id = str(update.effective_chat.id)
+    user = _user_store.get_user(chat_id)
+    if not _has_notion_template_binding(user):
+        await update.message.reply_text(
+            "⚠️ Prima completa /registrati (binding Notion template) e poi rilancia /setup."
+        )
+        return
+
+    # Generiamo un token sicuro per la sessione di setup
+    reg_token = _user_store.create_oauth_session(chat_id)
+    
+    # URL della Mini App (usiamo lo stesso host dell'OAuth)
+    # NOTA: In produzione andrà configurata l'URL pubblica
+    setup_url = f"https://bondless-charlena-bicolor.ngrok-free.dev/setup?reg_token={reg_token}"
+    
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("🛠️ Apri Setup Form", web_app=WebAppInfo(url=setup_url))]
+    ])
+    
+    await update.message.reply_text(
+        "🚀 *Configurazione Rapida Moneo*\n\n"
+        "Ho preparato un form dinamico per impostare i tuoi **Conti**, le **Categorie** e gli **Abbonamenti** direttamente in questa chat.\n\n"
+        "È il modo più veloce per iniziare! ✨",
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=keyboard
+    )
+
 # ---------------------------------------------------------------------------
 # Handlers
 # ---------------------------------------------------------------------------
@@ -125,30 +245,64 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not _is_authorized(update):
         await update.message.reply_text(
             "👋 *Benvenuto!*\n\n"
-            "Questo bot è privato. Per usarlo, devi prima configurare le tue credenziali Notion.\n\n"
+            "Sono **Moneo** 🐷, la tua mascotte e assistente finanziario.\n"
+            "Visto che sono molto geloso dei miei file, questo sistema è privato. Per poterti aiutare, devi prima configurare le tue credenziali Notion.\n\n"
             "Digita /registra per iniziare! 🚀",
             parse_mode=ParseMode.MARKDOWN
         )
         return
 
     await update.message.reply_text(
-        "👋 *Bentornato!* Sono il tuo assistente finanziario.\n\n"
-        "Scrivimi una spesa in modo naturale, come a un amico:\n"
-        "• _\"ieri pizza con amici 25€\"_\n"
-        "• _\"ho speso 67 euro al supermercato\"_\n"
+        "👋 *Bentornato!* Sono **Moneo** 🐷, il tuo amichevole assistente finanziario.\n\n"
+        "Dimmi, cosa hai comprato di bello?\n"
+        "Scrivimi una spesa in modo naturale:\n"
+        "• _\"ieri ho sganciato 25€ per la pizza\"_\n"
+        "• _\"spesa al super per 67 euro\"_\n"
         "• _\"netflix 13.99\"_\n\n"
-        "Io la interpreto e la salvo su Notion per te! 🚀",
+        "Ci penso io a fare i conti e salvarti tutto su Notion! 🚀",
         parse_mode=ParseMode.MARKDOWN,
     )
 
-async def cmd_registra(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """PUNTO DI INIZIO: Chiede il codice invito."""
+async def cmd_feedback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handler per /feedback — raccoglie e salva i suggerimenti/problemi dell'utente."""
+    if not _is_authorized(update):
+        await update.message.reply_text("⚠️ *Non sei ancora registrato!*\nUsa /registra per configurare il bot.", parse_mode=ParseMode.MARKDOWN)
+        return
+
+    chat_id = str(update.effective_chat.id)
+    # Rimuove il comando dal testo
+    text = update.message.text.split("/feedback", 1)[-1].strip()
+    
+    if not text:
+        await update.message.reply_text("Esempio di utilizzo:\n`/feedback Il bot ha sbagliato categoria per l'Esselunga`", parse_mode=ParseMode.MARKDOWN)
+        return
+        
+    _user_store.save_feedback(chat_id, text)
+    await update.message.reply_text("✅ *Grazie per il tuo feedback!*\n\nIl tuo commento è stato salvato e lo terremo in considerazione per le prossime versioni di Moneo ✨", parse_mode=ParseMode.MARKDOWN)
+
+async def cmd_registra(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Fornisce il link per il setup automatico tramite OAuth."""
+    chat_id = str(update.effective_chat.id)
+    
+    # Fase 2 (Security Patch): Generiamo un token monouso sicuro
+    # Invece di passare il chat_id nell'URL, passiamo un segreto temporaneo.
+    reg_token = _user_store.create_oauth_session(chat_id)
+    
+    # URL del nostro server locale (Fase 2)
+    # NOTA: In produzione qui useremo l'URL pubblico (es. https://traky.app/...)
+    auth_url = f"https://bondless-charlena-bicolor.ngrok-free.dev/auth/notion?reg_token={reg_token}"
+    
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("🔗 Connetti a Notion", url=auth_url)]
+    ])
+    
     await update.message.reply_text(
-        "🔐 *Accesso Riservato*\n\n"
-        "Questo bot è privato. Inserisci il tuo *Codice d'Invito* per procedere:",
-        parse_mode=ParseMode.MARKDOWN
+        "🚀 *Configurazione Rapida con Traky*\n\n"
+        "Verrai reindirizzato su Notion per autorizzare Traky ad accedere (solo alle pagine che sceglierai tu!).\n\n"
+        "È facile, veloce e sicuro. 🛡️",
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=keyboard
     )
-    return WAITING_INVITE_CODE
 
 async def process_invite_code(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Fase 1: Verifica il codice e chiede la API Key."""
@@ -168,7 +322,7 @@ async def process_api_key(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         return WAITING_API_KEY
         
     context.user_data["notion_api_key"] = api_key
-    await update.message.reply_text("Ottimo! Ora incolla l'**ID del Database Spese** (Expense):")
+    await update.message.reply_text("Ottimo! Ora incolla l'*ID del Database Spese* (Expense):")
     return WAITING_EXPENSE_DB
 
 async def process_expense_db(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -250,6 +404,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         return
 
     logger.info(f"[User {chat_id}] Messaggio ricevuto: '{message_text}'")
+    _user_store.increment_usage(chat_id, "text")
  
     # Mostra "sta scrivendo..."
     await update.message.chat.send_action("typing")
@@ -313,18 +468,15 @@ async def _process_expense_text(update: Update, context: ContextTypes.DEFAULT_TY
     parser = _get_parser(chat_id)
     # 2. Parsa con LLM (input sanificato)
     result = parser.parse(safe_input)
-    
-    logger.info(f"[User {chat_id}] Risultato parser: {result['type']} - {result['name']} (€{result['amount']})")
 
     if result is None:
         await update.message.reply_text(
-            "🤔 Non ho capito che spesa intendi. "
-            "Prova a scrivermi qualcosa come:\n"
-            "• _\"Ho speso 45 euro di spesa\"_\n"
-            "• _\"Ho ricevuto 20 euro di bonifico\"_",
-            parse_mode=ParseMode.MARKDOWN,
+            "⚠️ Non sono riuscito ad elaborare il messaggio in questo momento.\n"
+            "Il servizio AI è temporaneamente sovraccarico — riprova tra qualche secondo! 🔄",
         )
         return
+
+    logger.info(f"[User {chat_id}] Risultato parser: {result['type']} - {result['name']} (€{result['amount']})")
 
     # Salva i dati nel contesto utente (evita il limite 64 byte di callback_data)
     context.user_data["pending_expense"] = {
@@ -423,6 +575,7 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         )
         message_trascribed = response.text.strip()
         logger.info(f"[User {chat_id}] Trascrizione Audio: {message_trascribed}")
+        _user_store.increment_usage(chat_id, "voice")
         await update.message.reply_text("🎙️ Ho ascoltato! Sto elaborando...")
         await _process_expense_text(update, context, message_trascribed, chat_id)
 
@@ -480,6 +633,7 @@ async def handle_photos(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         )
         message_trascribed = response.text.strip()
         logger.info(f"[User {chat_id}] Analisi Foto: {message_trascribed}")
+        _user_store.increment_usage(chat_id, "photo")
         await update.message.reply_text("📸 Foto analizzata! Sto elaborando...")
         await _process_expense_text(update, context, message_trascribed, chat_id)
 
@@ -535,8 +689,8 @@ async def _save_to_notion(query, context, chat_id: str, account_id: str | None =
     except Exception as e:
         logger.error(f"Errore salvataggio Notion: {e}")
         await query.edit_message_text(
-            f"❌ Errore nel salvataggio su Notion:\n`{str(e)[:200]}`",
-            parse_mode=ParseMode.MARKDOWN,
+            "⚠️ Non sono riuscito a salvare su Notion in questo momento.\n"
+            "Riprova tra qualche secondo oppure contatta il supporto se il problema persiste.",
         )
 
 async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -580,7 +734,9 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             keyboard.append([InlineKeyboardButton(f"🏦 {acc['name']} (€{acc['current_balance']:.2f})", callback_data=f"account:{acc['id']}")])
         keyboard.append([InlineKeyboardButton("❌ Annulla", callback_data="cancel")])
         
-        await query.edit_message_text("🏦 Da quale conto hai pagato?", reply_markup=InlineKeyboardMarkup(keyboard))
+        pending = context.user_data.get("pending_expense", {})
+        question = "🏦 Su quale conto è arrivata l'entrata?" if pending.get("type") == "income" else "🏦 Da quale conto hai pagato?"
+        await query.edit_message_text(question, reply_markup=InlineKeyboardMarkup(keyboard))
         return
 
     if query.data.startswith("account:"):
@@ -624,24 +780,10 @@ def main():
 
     # --- Handlers ---
     
-    # 1. Registrazione (deve stare prima per gestire i messaggi di testo dedicati)
-    conv_handler = ConversationHandler(
-        entry_points=[CommandHandler("registra", cmd_registra)],
-        states={
-            WAITING_INVITE_CODE: [MessageHandler(filters.TEXT & ~filters.COMMAND, process_invite_code)],
-            WAITING_API_KEY: [MessageHandler(filters.TEXT & ~filters.COMMAND, process_api_key)],
-            WAITING_EXPENSE_DB: [MessageHandler(filters.TEXT & ~filters.COMMAND, process_expense_db)],
-            WAITING_INCOME_DB: [MessageHandler(filters.TEXT & ~filters.COMMAND, process_income_db)],
-            WAITING_CATEGORIES_DB: [MessageHandler(filters.TEXT & ~filters.COMMAND, process_categories_db)],
-            WAITING_MONTHLY_DB: [MessageHandler(filters.TEXT & ~filters.COMMAND, process_monthly_db)],
-            WAITING_ACCOUNTS_DB: [MessageHandler(filters.TEXT & ~filters.COMMAND, process_accounts_db)],
-        },
-        fallbacks=[CommandHandler("cancel", cancel_registra)],
-    )
-    app.add_handler(conv_handler)
-
-    # 2. Altri comandi e messaggi
     app.add_handler(CommandHandler("start", cmd_start))
+    app.add_handler(CommandHandler("registrati", cmd_registra))
+    app.add_handler(CommandHandler("setup", cmd_setup))
+    app.add_handler(CommandHandler("feedback", cmd_feedback))
     app.add_handler(CallbackQueryHandler(handle_callback))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     app.add_handler(MessageHandler(filters.VOICE & ~filters.COMMAND, handle_voice))

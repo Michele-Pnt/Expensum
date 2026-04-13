@@ -1,0 +1,23 @@
+{% extends "base.html" %}
+{% block content %}
+<h1 class="page-title">Terminale Live Log</h1>
+<p class="page-desc">Ispezione cruda di `agent.log`. Mostra le ultime 100 righe del file senza SSH.</p>
+
+<div class="terminal-window">
+<pre id="logArea">{% if not log_lines %}File `agent.log` non ancora creato o vuoto.{% endif %}
+{% for line in log_lines %}
+{% if 'ERROR' in line %}
+<span class="log-error">{{ line }}</span>
+{% elif 'WARNING' in line %}
+<span class="log-warn">{{ line }}</span>
+{% else %}
+{{ line }}
+{% endif %}
+{% endfor %}</pre>
+</div>
+<script>
+    // Forza scroll in basso all'apertura
+    const term = document.querySelector('.terminal-window');
+    term.scrollTop = term.scrollHeight;
+</script>
+{% endblock %}

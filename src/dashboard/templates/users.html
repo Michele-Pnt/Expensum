@@ -1,0 +1,57 @@
+{% extends "base.html" %}
+{% block content %}
+<h1 class="page-title">Gestione Utenti</h1>
+<p class="page-desc">Lista completa delle utenze autorizzate al bot. Clicca su Toggle per bloccare l'accesso istantaneamente.</p>
+
+<div class="glass-panel data-table-wrapper">
+    <table class="glass-table">
+        <thead>
+            <tr>
+                <th>Telegram ID</th>
+                <th>Username</th>
+                <th>Data Registrazione</th>
+                <th>Stato</th>
+                <th>Azioni (Tira i Fili)</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for u in users %}
+            <tr>
+                <td><code>{{ u.chat_id }}</code></td>
+                <td>@{{ u.username or 'Sconosciuto' }}</td>
+                <td>{{ u.created_at.strftime('%Y-%m-%d %H:%M') }}</td>
+                <td id="status-{{ u.chat_id }}">
+                    {% if u.is_active %}
+                        <span class="badge active">Attivo</span>
+                    {% else %}
+                        <span class="badge suspended">Sospeso</span>
+                    {% endif %}
+                </td>
+                <td>
+                    <button class="btn-toggle" onclick="toggleUser('{{ u.chat_id }}')">
+                        Sospendi / Riattiva
+                    </button>
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+
+<script>
+    async function toggleUser(chatId) {
+        const res = await fetch(`/api/toggle-user/${chatId}`, { method: 'POST' });
+        const data = await res.json();
+        if(data.status === 'ok') {
+            const td = document.getElementById(`status-${chatId}`);
+            if(data.new_state) {
+                td.innerHTML = '<span class="badge active">Attivo</span>';
+            } else {
+                td.innerHTML = '<span class="badge suspended">Sospeso</span>';
+            }
+        } else {
+            alert("Errore nel toggle");
+        }
+    }
+</script>
+{% endblock %}

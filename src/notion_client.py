@@ -40,6 +40,310 @@ logger = logging.getLogger("financial_agent.notion")
 class NotionFinanceClient:
     """Client per l'estrazione dati da tutti i database Notion necessari."""
 
+    @staticmethod
+    def discover_databases(access_token: str, template_page_id: str | None = None) -> tuple[dict, list[str]]:
+        """
+        Discovery super-veloce basata su ricerca globale (Strategy: Trust search).
+        Ritorna (discovered_map, all_candidates).
+        """
+        from notion_client import Client
+        client = Client(auth=access_token)
+        discovered = {}
+        all_candidates = []
+        
+        # Mapping nomi -> chiavi interne (supportiamo singolari, plurali e sinonimi comuni)
+        name_to_key = {
+            "expense": "expense_db_id", "spese": "expense_db_id", "spesa": "expense_db_id", "uscita": "expense_db_id",
+            "income": "income_db_id", "entrate": "income_db_id", "entrata": "income_db_id", "ricavo": "income_db_id",
+            "categories": "categories_db_id", "categorie": "categories_db_id", "categoria": "categories_db_id",
+            "monthly": "monthly_balance_db_id", "bilancio": "monthly_balance_db_id", "balance": "monthly_balance_db_id", "mensile": "monthly_balance_db_id",
+            "accounts": "accounts_db_id", "conti": "accounts_db_id", "conto": "accounts_db_id",
+            "subscriptions": "subscriptions_db_id", "abbonamenti": "subscriptions_db_id", "abbonamento": "subscriptions_db_id",
+            "pay/transfer": "pay_transfer_db_id", "pay transfer": "pay_transfer_db_id", "transazione": "pay_transfer_db_id",
+            "pay": "pay_transfer_db_id", "transfer": "pay_transfer_db_id", "trasferimento": "pay_transfer_db_id",
+        }
+
+        def _match_name(title_low: str) -> str | None:
+            """Ritorna la chiave del DB se il titolo match con parole chiave."""
+            # 1. Match Esatto con confini di parola (\b)
+            for name, key in name_to_key.items():
+                if "/" in name:
+                    if name in title_low: return key
+                    continue
+                pattern = rf"\b{re.escape(name)}\b"
+                if re.search(pattern, title_low):
+                    return key
+            
+            # 2. Match Parziale (Substring) come fallback se non è stato trovato nulla
+            # Utile per nomi composti come "Rimborso spesa"
+            for name, key in name_to_key.items():
+                if len(name) > 4 and name in title_low:
+                     return key
+            
+            return None
+
+        import time
+        def _scan_recursive(block_id: str, depth: int = 0) -> None:
+            """Scansiona blocchi con rate-limit e pazienza."""
+            if depth > 4: return
+            try:
+                # Rate limit protection (Notion doc: 3 req/s max)
+                time.sleep(0.4) 
+                
+                response = client.blocks.children.list(block_id=block_id)
+                children = response.get("results", [])
+                
+                for block in children:
+                    b_type = block.get("type", "")
+                    b_id = block.get("id", "")
+                    title = ""
+                    
+                    if b_type == "child_database":
+                        title = block.get("child_database", {}).get("title", "")
+                    elif b_type == "child_page":
+                        title = block.get("child_page", {}).get("title", "")
+                    
+                    if title:
+                        title_low = title.lower().strip()
+                        logger.debug(f"[Discovery] Visto in '{block_id[:5]}...': '{title}' [{b_type}]")
+                        
+                        # 1. Match DATABASE
+                        if b_type == "child_database":
+                            if title not in all_candidates:
+                                all_candidates.append(title)
+                            matched_key = _match_name(title_low)
+                            if matched_key and matched_key not in discovered:
+                                discovered[matched_key] = b_id
+                                logger.info(f"[Discovery] MATCH TROVATO: {title} -> {matched_key}")
+                        
+                        # 2. Esplorazione profonda
+                        elif b_type == "child_page":
+                            # Entriamo se è una cartella nota o se siamo ai primi livelli
+                            is_container = any(k in title_low for k in ["database", "db", "finance", "dashboard", "tracky"])
+                            if is_container or depth < 2:
+                                _scan_recursive(b_id, depth + 1)
+                                
+            except Exception as e:
+                if "copy_indicator" not in str(e):
+                    logger.warning(f"[Discovery] Blocco {block_id} non leggibile: {e}")
+
+        # 1. STRATEGIA PRIORITARIA: Scansione del Template (10 tentativi = 30s)
+        if template_page_id:
+            for attempt in range(10):
+                logger.info(f"[Discovery] Tentativo {attempt + 1}/10 scansione template...")
+                _scan_recursive(template_page_id)
+                if len(discovered) >= 7: break
+                if attempt < 9: time.sleep(3)
+            
+            if len(discovered) == 7:
+                return discovered, all_candidates
+
+        # 2. STRATEGIA DI BACKUP: Ricerca Globale Paginata
+        try:
+            logger.info("[Discovery] Scansione template parziale, provo ricerca globale...")
+            search_results = client.search(page_size=100).get("results", [])
+            
+            for obj in search_results:
+                o_type = obj.get("object")
+                o_id = obj.get("id")
+                title = ""
+                
+                if o_type == "database":
+                    title_list = obj.get("title", [])
+                    title = "".join([t.get("plain_text", "") for t in title_list])
+                elif o_type == "page":
+                    # Estrazione titolo pagina varia in base a proprietà
+                    props = obj.get("properties", {})
+                    for p in props.values():
+                        if p.get("type") == "title":
+                            title = "".join([t.get("plain_text", "") for t in p.get("title", [])])
+                            break
+                
+                if not title: continue
+                title_low = title.lower().strip()
+                if title not in all_candidates: all_candidates.append(title)
+                
+                if o_type == "database":
+                    matched_key = _match_name(title_low)
+                    if matched_key and matched_key not in discovered:
+                        discovered[matched_key] = o_id
+                        logger.info(f"[Discovery] Backup trovato DB: {title}")
+                elif "database" in title_low or "finance" in title_low:
+                     # Se è una pagina col nome giusto, scansioniamola ora
+                    _scan_recursive(o_id, depth=1)
+                    
+        except Exception as e:
+            logger.error(f"[Discovery] Errore critico nel backup: {e}")
+            
+        return discovered, all_candidates
+
+    @staticmethod
+    def discover_db_schemas(access_token: str, db_bindings: dict) -> dict[str, dict]:
+        """Recupera lo schema (proprietà + title property) dei 7 DB con auto-mapping."""
+        client = Client(auth=access_token)
+        result: dict[str, dict] = {}
+
+        all_db_keys = (
+            "expense_db_id", "income_db_id", "categories_db_id", 
+            "monthly_balance_db_id", "accounts_db_id", "subscriptions_db_id",
+            "pay_transfer_db_id"
+        )
+
+        for db_key in all_db_keys:
+            db_id = db_bindings.get(db_key)
+            if not db_id:
+                continue
+
+            try:
+                db = client.databases.retrieve(database_id=db_id)
+                raw_properties = db.get("properties", {}) or {}
+                
+                # Se il DB è una "linked database view", properties sarà vuoto.
+                # In quel caso seguiamo data_sources per trovare il DB originale con le proprietà.
+                if not raw_properties:
+                    data_sources = db.get("data_sources", [])
+                    if data_sources:
+                        real_db_id = data_sources[0].get("id")
+                        if real_db_id:
+                            try:
+                                real_db = client.databases.retrieve(database_id=real_db_id)
+                                raw_properties = real_db.get("properties", {}) or {}
+                                # Aggiorniamo anche l'ID del db al quello reale per gli inserimenti
+                                db_id = real_db_id
+                            except Exception as follow_err:
+                                logger.warning("Impossibile leggere il DB sorgente '%s': %s", real_db_id, follow_err)
+
+                # Fallback: se properties ancora vuote (linked view non condivisa), inferisci
+                # lo schema interrogando la view. Raccogliamo tutti i record per ottenere
+                # anche i valori unici dei campi select (usati come "opzioni" nel form).
+                if not raw_properties:
+                    try:
+                        select_options: dict[str, set] = {}
+                        has_more = True
+                        cursor = None
+                        while has_more:
+                            kwargs: dict = {"database_id": db_id, "page_size": 100}
+                            if cursor:
+                                kwargs["start_cursor"] = cursor
+                            query_result = client.databases.query(**kwargs)
+                            pages = query_result.get("results", [])
+                            has_more = query_result.get("has_more", False)
+                            cursor = query_result.get("next_cursor")
+
+                            for page in pages:
+                                for prop_name, prop_val in page.get("properties", {}).items():
+                                    p_type = prop_val.get("type", "unknown")
+                                    if prop_name not in raw_properties:
+                                        raw_properties[prop_name] = {"type": p_type}
+                                    # Raccogliamo i valori select/multi_select unici
+                                    if p_type == "select":
+                                        sel = prop_val.get("select") or {}
+                                        if sel.get("name"):
+                                            select_options.setdefault(prop_name, set()).add(sel["name"])
+                                    elif p_type == "multi_select":
+                                        for item in prop_val.get("multi_select", []):
+                                            if item.get("name"):
+                                                select_options.setdefault(prop_name, set()).add(item["name"])
+
+                        # Inietta le opzioni raccolte nel formato atteso da properties_map
+                        for prop_name, opts in select_options.items():
+                            if prop_name in raw_properties:
+                                p_type = raw_properties[prop_name]["type"]
+                                raw_properties[prop_name][p_type] = {
+                                    "options": [{"name": o} for o in sorted(opts)]
+                                }
+
+                        if raw_properties:
+                            logger.info("Schema DB '%s' inferito da query (%d prop, %d select)",
+                                        db_key, len(raw_properties), len(select_options))
+                        else:
+                            logger.warning("DB '%s': view vuota, impossibile inferire schema", db_key)
+                    except Exception as infer_err:
+                        logger.warning("Impossibile inferire schema DB '%s' da query: %s", db_key, infer_err)
+                
+                # 1. Estrarre i tipi e metadati (es. opzioni select)
+                properties_map = {}
+                for prop_name, prop_meta in raw_properties.items():
+                    p_type = prop_meta.get("type") or "unknown"
+                    p_info = {"type": p_type}
+                    
+                    if p_type == "select":
+                        p_info["options"] = [o["name"] for o in prop_meta.get("select", {}).get("options", [])]
+                    elif p_type == "multi_select":
+                        p_info["options"] = [o["name"] for o in prop_meta.get("multi_select", {}).get("options", [])]
+                    
+                    properties_map[prop_name] = p_info
+
+                # 2. Eseguire Auto-Mapping Intelligente
+                mapped = {}
+                
+                # Regole generali per trovare i campi logici basandosi sul tipo
+                for p_name, p_info in properties_map.items():
+                    p_type = p_info["type"]
+                    p_name_low = p_name.lower()
+                    
+                    if p_type == "title":
+                        mapped["name"] = p_name
+                    elif p_type == "select":
+                        # Accounts DB: campo tipo conto (es. "Type", "Account type", "Tipo")
+                        if db_key == "accounts_db_id":
+                            if "type" in p_name_low or "tipo" in p_name_low:
+                                mapped["account_type"] = p_name
+                        # Subscriptions DB: campo tipo abbonamento (es. "Type", "Tipo", "Frequenza")
+                        elif db_key == "subscriptions_db_id":
+                            if "type" in p_name_low or "tipo" in p_name_low or "frequen" in p_name_low:
+                                mapped["sub_type"] = p_name
+                    elif p_type == "number":
+                        # Accounts DB: distinguiamo initial_amount dagli altri numeri
+                        if db_key == "accounts_db_id" and ("initial" in p_name_low or "iniziale" in p_name_low):
+                            mapped["initial_amount"] = p_name
+                        # Subscriptions DB: importo abbonamento
+                        elif db_key == "subscriptions_db_id" and ("amount" in p_name_low or "importo" in p_name_low or "cost" in p_name_low):
+                            mapped["sub_amount"] = p_name
+                        elif "importo" in p_name_low or "amount" in p_name_low or "cost" in p_name_low or "prezzo" in p_name_low:
+                            mapped["amount"] = p_name
+                        elif "amount" not in mapped: # Fallback al primo numero trovato se non c'è match testuale
+                            mapped["amount"] = p_name
+                    elif p_type == "date":
+                        if "data" in p_name_low or "date" in p_name_low or "month" in p_name_low or "mese" in p_name_low:
+                            mapped["date"] = p_name
+                        elif "date" not in mapped:
+                            mapped["date"] = p_name
+                    elif p_type == "relation":
+                        # Cerchiamo di capire a cosa punta (opzionale, basato sui nomi per ora)
+                        if "cat" in p_name_low: mapped["rel_category"] = p_name
+                        if "conto" in p_name_low or "account" in p_name_low:
+                            if "from" in p_name_low: mapped["rel_account_from"] = p_name
+                            elif "to" in p_name_low: mapped["rel_account_to"] = p_name
+                            else: mapped["rel_account"] = p_name
+                        if "monthly" in p_name_low or "bilancio" in p_name_low or "balance" in p_name_low:
+                            mapped["rel_monthly_balance"] = p_name
+
+                # Se manca il campo "name" (title), cerchiamo il primo del tipo giusto
+                if "name" not in mapped:
+                    for p_name, p_info in properties_map.items():
+                        if p_info["type"] == "title": 
+                            mapped["name"] = p_name
+                            break
+                
+                result[db_key] = {
+                    "database_id": db_id,
+                    "title_property": mapped.get("name"),
+                    "properties": properties_map,
+                    "mapped": mapped
+                }
+            except Exception as e:
+                logger.warning("Impossibile leggere schema DB '%s': %s", db_key, e)
+                result[db_key] = {
+                    "database_id": db_id,
+                    "title_property": None,
+                    "properties": {},
+                    "mapped": {},
+                    "error": str(e),
+                }
+
+        return result
+
     def __init__(self, 
                  api_key: Optional[str] = None,
                  expense_db_id: Optional[str] = None,
@@ -48,7 +352,8 @@ class NotionFinanceClient:
                  monthly_balance_db_id: Optional[str] = None,
                  accounts_db_id: Optional[str] = None,
                  subscriptions_db_id: Optional[str] = None,
-                 pay_transfer_db_id: Optional[str] = None):
+                 pay_transfer_db_id: Optional[str] = None,
+                 db_schemas: Optional[dict[str, dict]] = None):
     
         # Logica del "Fallback": 
         # Se passo un ID (es. dal DB), uso quello. 
@@ -61,6 +366,7 @@ class NotionFinanceClient:
         self.accounts_db_id = accounts_db_id or Config.NOTION_ACCOUNTS_DATABASE_ID
         self.subscriptions_db_id = subscriptions_db_id or Config.NOTION_SUBSCRIPTIONS_DATABASE_ID
         self.pay_transfer_db_id = pay_transfer_db_id or Config.NOTION_PAY_TRANSFER_DATABASE_ID
+        self._db_schemas = dict(db_schemas or {})
 
         # Inizializziamo il client ufficiale Notion con la chiave specifica di QUESTA istanza
         self._client = Client(auth=self.notion_api_key)
@@ -69,6 +375,71 @@ class NotionFinanceClient:
         self._data_source_cache: dict[str, str] = {}
         self._category_map: dict[str, dict] = {}
         self._categories_loaded = False
+
+    def _resolve_title_property_name(self, db_key: str, db_id: str) -> str:
+        """Ritorna il nome della property di tipo title per un database."""
+        schema = self._db_schemas.get(db_key) or {}
+        
+        # 1. Prova dal mapping logico se presente
+        mapped = schema.get("mapped") or {}
+        if mapped.get("name"):
+            return mapped["name"]
+            
+        # 2. Prova dalla property title_property legacy
+        title_property = schema.get("title_property")
+        if title_property:
+            return title_property
+
+        default_name = "Name"
+        if not db_id:
+            return default_name
+
+        try:
+            db = self._client.databases.retrieve(database_id=db_id)
+            props = db.get("properties", {}) or {}
+            for prop_name, prop_meta in props.items():
+                if prop_meta.get("type") == "title":
+                    title_property = prop_name
+                    break
+
+            if not title_property:
+                return default_name
+
+            # Aggiorna la cache dello schema per le prossime chiamate
+            if db_key not in self._db_schemas:
+                self._db_schemas[db_key] = {}
+            self._db_schemas[db_key]["title_property"] = title_property
+            
+            return title_property
+        except Exception as e:
+            logger.warning(f"Errore risoluzione title property per {db_key}: {e}")
+            return default_name
+
+    def _get_property_name(self, db_key: str, logical_field: str, fallback_config_key: str = None) -> str:
+        """Helper per ottenere il nome reale della property Notion da uno schema mappato."""
+        schema = self._db_schemas.get(db_key) or {}
+        mapped = schema.get("mapped") or {}
+
+        # 1. Mapping esplicito (più affidabile)
+        if mapped.get(logical_field):
+            return mapped[logical_field]
+
+        # 2. Se il fallback config corrisponde a una property esistente, usalo
+        properties = schema.get("properties") or {}
+        if fallback_config_key and fallback_config_key in properties:
+            return fallback_config_key
+
+        # 3. Ricerca fuzzy nelle properties: cerca una chiave che contenga il logical_field
+        #    (es. logical_field="account_type" → trova "Type" o "Account type")
+        search_terms = logical_field.replace("_", " ").lower().split()
+        for prop_name in properties:
+            prop_low = prop_name.lower()
+            if any(term in prop_low for term in search_terms):
+                logger.debug(f"[_get_property_name] fuzzy match: {logical_field} → {prop_name}")
+                return prop_name
+
+        # 4. Fallback al valore Config (legacy/statico)
+        return fallback_config_key or logical_field.capitalize()
 
     # ------------------------------------------------------------------
     # Risoluzione data_source_id (API 2025-09-03)
@@ -790,14 +1161,21 @@ class NotionFinanceClient:
         Returns:
             dict con i dati della page creata
         """
+        # Risoluzione nomi proprietà dallo schema
+        col_date = self._get_property_name("expense_db_id", "date", Config.NOTION_COL_DATE)
+        col_amount = self._get_property_name("expense_db_id", "amount", Config.NOTION_COL_AMOUNT)
+        col_name = self._get_property_name("expense_db_id", "name", Config.NOTION_COL_NAME)
+        col_category = self._get_property_name("expense_db_id", "rel_category", Config.NOTION_COL_CATEGORY)
+        col_account = self._get_property_name("expense_db_id", "rel_account", Config.NOTION_COL_ACCOUNT)
+
         properties = {
-            Config.NOTION_COL_DATE: {
+            col_date: {
                 "date": {"start": expense_date.isoformat()}
             },
-            Config.NOTION_COL_AMOUNT: {
+            col_amount: {
                 "number": abs(float(amount))
             },
-            Config.NOTION_COL_NAME: {
+            col_name: {
                 "title": [
                     {
                         "text": {"content": name}
@@ -810,7 +1188,7 @@ class NotionFinanceClient:
         if category_name:
             cat_page_id = self._resolve_category_by_name(category_name)
             if cat_page_id:
-                properties[Config.NOTION_COL_CATEGORY] = {
+                properties[col_category] = {
                     "relation": [{"id": cat_page_id}]
                 }
                 logger.info(f"Categoria '{category_name}' risolta in page_id {cat_page_id[:8]}...")
@@ -818,15 +1196,16 @@ class NotionFinanceClient:
                 logger.warning(f"Categoria '{category_name}' non trovata nel database Categories.")
 
         # Risolvi il conto 
-        if account_id and hasattr(Config, "NOTION_COL_ACCOUNT"):
-            properties[Config.NOTION_COL_ACCOUNT] = {
+        if account_id:
+            properties[col_account] = {
                 "relation": [{"id": account_id}]
             }
 
         # Risolvi Monthly Balance
         mb_id = self._resolve_monthly_balance(expense_date)
         if mb_id:
-            properties["Monthly Balance"] = {
+            col_mb = self._get_property_name("expense_db_id", "rel_monthly_balance", "Monthly Balance")
+            properties[col_mb] = {
                 "relation": [{"id": mb_id}]
             }
             logger.info(f"Relazione Monthly Balance ({expense_date.strftime('%m/%Y')}) risolta in page_id {mb_id[:8]}...")
@@ -869,32 +1248,44 @@ class NotionFinanceClient:
         Returns:
             dict con i dati della page creata
         """
+        # Risoluzione nomi proprietà dallo schema
+        col_date = self._get_property_name("income_db_id", "date", Config.NOTION_COL_DATE)
+        col_amount = self._get_property_name("income_db_id", "amount", Config.NOTION_COL_AMOUNT)
+        col_name = self._get_property_name("income_db_id", "name", Config.NOTION_COL_NAME)
+        col_account = self._get_property_name("income_db_id", "rel_account", Config.NOTION_COL_ACCOUNT)
+
+        col_misc = self._get_property_name("income_db_id", "misc", Config.NOTION_INCOME_COL_MISC)
+
         properties = {
-            Config.NOTION_COL_DATE: {
+            col_date: {
                 "date": {"start": income_date.isoformat()}
             },
-            Config.NOTION_COL_AMOUNT: {
+            col_amount: {
                 "number": abs(float(amount))
             },
-            Config.NOTION_COL_NAME: {
+            col_name: {
                 "title": [
                     {
                         "text": {"content": name}
                     }
                 ]
             },
+            col_misc: {
+                "rich_text": [{"text": {"content": name}}]
+            },
         }
 
-        # Risolvi il conto 
-        if account_id and hasattr(Config, "NOTION_COL_ACCOUNT"):
-            properties[Config.NOTION_COL_ACCOUNT] = {
+        # Risolvi il conto
+        if account_id:
+            properties[col_account] = {
                 "relation": [{"id": account_id}]
             }
 
         # Risolvi Monthly Balance
         mb_id = self._resolve_monthly_balance(income_date)
         if mb_id:
-            properties["Monthly Balance"] = {
+            col_mb = self._get_property_name("income_db_id", "rel_monthly_balance", "Monthly Balance")
+            properties[col_mb] = {
                 "relation": [{"id": mb_id}]
             }
         else:
@@ -913,6 +1304,95 @@ class NotionFinanceClient:
 
         logger.info(f"Introito creato con successo: page_id={result['id'][:8]}...")
         return result
+
+    # ------------------------------------------------------------------
+    # Write: creazione generica (per Setup Form Dinamico)
+    # ------------------------------------------------------------------
+    def create_database_item(self, database_id: str, properties_data: dict) -> dict:
+        """
+        Crea un elemento in un database Notion con proprietà arbitrarie.
+        Gestisce la formattazione corretta dei tipi Notion (title, number, etc.).
+        """
+        logger.info(f"Creazione elemento nel DB {database_id[:8]}...")
+        return self._client.pages.create(
+            parent={"database_id": database_id},
+            properties=properties_data
+        )
+
+    # ------------------------------------------------------------------
+    # Write: creazione elementi setup (accounts/categories/subscriptions)
+    # ------------------------------------------------------------------
+    def create_account(self, account_name: str,
+                       initial_amount: float = None,
+                       account_type: str = None) -> dict:
+        """Crea un conto nel database Accounts usando la title property corretta."""
+        if not self.accounts_db_id:
+            raise ValueError("Accounts database non configurato")
+
+        title_property = self._resolve_title_property_name("accounts_db_id", self.accounts_db_id)
+        properties = {
+            title_property: {
+                "title": [{"text": {"content": account_name}}]
+            }
+        }
+        if initial_amount is not None:
+            col = self._get_property_name("accounts_db_id", "initial_amount", Config.NOTION_ACCOUNTS_COL_INITIAL_AMOUNT)
+            properties[col] = {"number": float(initial_amount)}
+        if account_type:
+            col = self._get_property_name("accounts_db_id", "account_type", Config.NOTION_ACCOUNTS_COL_TYPE)
+            properties[col] = {"select": {"name": account_type}}
+        return self._client.pages.create(
+            parent={"database_id": self.accounts_db_id},
+            properties=properties,
+        )
+
+    def create_category(self, category_name: str) -> dict:
+        """Crea una categoria nel database Categories usando la title property corretta."""
+        if not self.categories_db_id:
+            raise ValueError("Categories database non configurato")
+
+        title_property = self._resolve_title_property_name("categories_db_id", self.categories_db_id)
+        properties = {
+            title_property: {
+                "title": [{"text": {"content": category_name}}]
+            }
+        }
+        return self._client.pages.create(
+            parent={"database_id": self.categories_db_id},
+            properties=properties,
+        )
+
+    def create_subscription(self, subscription_name: str,
+                            sub_type: str = None,
+                            amount: float = None,
+                            category_id: str = None,
+                            account_id: str = None) -> dict:
+        """Crea un abbonamento nel database Subscriptions usando la title property corretta."""
+        if not self.subscriptions_db_id:
+            raise ValueError("Subscriptions database non configurato")
+
+        title_property = self._resolve_title_property_name("subscriptions_db_id", self.subscriptions_db_id)
+        properties = {
+            title_property: {
+                "title": [{"text": {"content": subscription_name}}]
+            }
+        }
+        if sub_type:
+            col = self._get_property_name("subscriptions_db_id", "sub_type", Config.NOTION_SUB_COL_TYPE)
+            properties[col] = {"select": {"name": sub_type}}
+        if amount is not None:
+            col = self._get_property_name("subscriptions_db_id", "amount", Config.NOTION_SUB_COL_AMOUNT)
+            properties[col] = {"number": float(amount)}
+        if category_id:
+            col = self._get_property_name("subscriptions_db_id", "rel_category", Config.NOTION_SUB_COL_CATEGORY)
+            properties[col] = {"relation": [{"id": category_id}]}
+        if account_id:
+            col = self._get_property_name("subscriptions_db_id", "rel_account", Config.NOTION_SUB_COL_ACCOUNT)
+            properties[col] = {"relation": [{"id": account_id}]}
+        return self._client.pages.create(
+            parent={"database_id": self.subscriptions_db_id},
+            properties=properties,
+        )
 
 
     # ------------------------------------------------------------------
