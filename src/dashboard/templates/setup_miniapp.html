@@ -257,6 +257,67 @@
             font-size: 14px;
         }
         .empty-state span { font-size: 32px; display: block; margin-bottom: 8px; }
+
+        .existing-section-title {
+            font-size: 12px;
+            font-weight: 700;
+            color: var(--hint);
+            text-transform: uppercase;
+            letter-spacing: 0.6px;
+            margin: 4px 0 10px;
+        }
+
+        .existing-item-row {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 10px 14px;
+            background: rgba(255,255,255,0.04);
+            border: 1px solid rgba(255,255,255,0.07);
+            border-radius: 10px;
+            margin-bottom: 8px;
+        }
+        .existing-item-name {
+            font-size: 14px;
+            color: var(--text);
+        }
+        .existing-item-meta {
+            font-size: 12px;
+            color: var(--hint);
+            margin-left: 8px;
+        }
+        .btn-delete-existing {
+            background: none;
+            border: none;
+            color: var(--danger);
+            font-size: 18px;
+            cursor: pointer;
+            padding: 2px 6px;
+            border-radius: 6px;
+            line-height: 1;
+            opacity: 0.7;
+        }
+        .btn-delete-existing:hover { opacity: 1; background: rgba(239,68,68,0.1); }
+
+        .existing-cat-tag {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            padding: 5px 10px;
+            border-radius: 20px;
+            background: rgba(255,255,255,0.06);
+            border: 1px solid rgba(255,255,255,0.12);
+            color: var(--hint);
+            font-size: 13px;
+            margin: 0 6px 6px 0;
+        }
+        .existing-cat-remove {
+            cursor: pointer;
+            font-size: 15px;
+            opacity: 0.6;
+            color: var(--danger);
+        }
+        .existing-cat-remove:hover { opacity: 1; }
     </style>
 </head>
 <body>
@@ -272,11 +333,14 @@
     </div>
 
     <div id="panel-accounts" class="panel active">
+        <div id="existing-accounts-section"></div>
         <div id="accounts-cards"></div>
         <button class="btn-add" id="add-account-btn">&#xFF0B; Aggiungi Conto</button>
     </div>
 
     <div id="panel-categories" class="panel">
+        <div id="existing-categories-section"></div>
+
         <p class="cat-section-title">Cerca e seleziona dalle categorie comuni</p>
         <input type="text" class="cat-search" id="cat-search-input" placeholder="&#x1F50D; Cerca categoria...">
         <div class="preset-grid" id="preset-grid"></div>
@@ -288,7 +352,7 @@
         </div>
 
         <div id="cat-tags-wrapper" style="display:none">
-            <p class="added-categories-title">&#x2705; Categorie selezionate:</p>
+            <p class="added-categories-title">&#x2705; Categorie da aggiungere:</p>
             <div id="cat-tags"></div>
         </div>
     </div>
@@ -318,37 +382,151 @@
 
         var schemasRaw = {{ schemas | tojson }};
         var REG_TOKEN = "{{ reg_token }}";
+        var BACKEND = "{{ backend|default('notion') }}";
         var availableAccounts = {{ available_accounts | tojson }};
         var availableCategories = {{ available_categories | tojson }};
 
         // Schema di default: usato quando Notion non espone le proprietà
-        // (es. linked database views non condivise con l'integrazione).
-        // I nomi delle colonne vengono iniettati dal backend (Config).
-        var SCHEMA_DEFAULTS = {
-            accounts_db_id: {
-                properties: {
-                    'Name': { type: 'title' },
-                    '{{ col_accounts_initial_amount }}': { type: 'number' },
-                    '{{ col_accounts_type }}': { type: 'select', options: [
-                        'Cash','Brokerage','Credit Card','Saving'
-                    ]}
+        // (es. linked database views non condivise con l'integrazione)
+        // oppure quando siamo in backend postgres (niente schema Notion a disposizione).
+        var SCHEMA_DEFAULTS;
+        if (BACKEND === 'postgres') {
+            // Schema semplificato: solo i campi che la tabella postgres richiede davvero.
+            SCHEMA_DEFAULTS = {
+                accounts_db_id: {
+                    properties: {
+                        'Name': { type: 'title' },
+                        'Saldo iniziale': { type: 'number' }
+                    }
+                },
+                subscriptions_db_id: {
+                    properties: {
+                        'Name': { type: 'title' }
+                    }
                 }
-            },
-            subscriptions_db_id: {
-                properties: {
-                    'Name': { type: 'title' },
-                    '{{ col_sub_type }}': { type: 'select', options: [
-                        'Mensile','Annuale','Settimanale','Trimestrale','Bi-mensile'
-                    ]},
-                    '{{ col_sub_amount }}': { type: 'number' },
-                    '{{ col_sub_category }}': { type: 'relation' },
-                    '{{ col_sub_account }}': { type: 'relation' }
+            };
+        } else {
+            SCHEMA_DEFAULTS = {
+                accounts_db_id: {
+                    properties: {
+                        'Name': { type: 'title' },
+                        '{{ col_accounts_initial_amount }}': { type: 'number' },
+                        '{{ col_accounts_type }}': { type: 'select', options: [
+                            'Cash','Brokerage','Credit Card','Saving'
+                        ]}
+                    }
+                },
+                subscriptions_db_id: {
+                    properties: {
+                        'Name': { type: 'title' },
+                        '{{ col_sub_type }}': { type: 'select', options: [
+                            'Mensile','Annuale','Settimanale','Trimestrale','Bi-mensile'
+                        ]},
+                        '{{ col_sub_amount }}': { type: 'number' },
+                        'Last Billed': { type: 'date' },
+                        '{{ col_sub_category }}': { type: 'relation' },
+                        '{{ col_sub_account }}': { type: 'relation' }
+                    }
                 }
-            }
-        };
+            };
+        }
 
         var itemsData = { accounts_db_id: [], subscriptions_db_id: [] };
         var selectedCategories = [];
+
+        // Copie mutabili degli item già presenti su Notion (da bootstrap)
+        var existingAccounts = availableAccounts.slice();
+        var existingCategories = availableCategories.slice();
+
+        // ---- DELETE NOTION ITEM ----
+        // Solo backend Notion: la API /api/delete-notion-item non esiste per postgres.
+        // Nel branch postgres i bottoni delete vengono soppressi in fase di rendering.
+        function deleteNotionItem(pageId, type, onSuccess) {
+            if (BACKEND !== 'notion') {
+                showMsg('Cancellazione non supportata in modalità PostgreSQL (funzione in arrivo).');
+                return;
+            }
+            fetch('/api/delete-notion-item', {
+                method: 'DELETE',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ reg_token: REG_TOKEN, page_id: pageId })
+            })
+            .then(function(resp) { return resp.json().then(function(res) { return { ok: resp.ok, res: res }; }); })
+            .then(function(data) {
+                if (data.ok) {
+                    onSuccess();
+                } else {
+                    showMsg('Errore eliminazione: ' + (data.res.error || 'sconosciuto'));
+                }
+            })
+            .catch(function(err) { showMsg('Errore: ' + err.message); });
+        }
+
+        function renderExistingAccounts() {
+            var section = document.getElementById('existing-accounts-section');
+            if (!section) return;
+            if (existingAccounts.length === 0) { section.innerHTML = ''; return; }
+            var html = '<p class="existing-section-title">&#x1F3E6; Conti gi\u00e0 presenti</p>';
+            for (var i = 0; i < existingAccounts.length; i++) {
+                var a = existingAccounts[i];
+                var meta = (a.balance !== undefined && a.balance !== null)
+                    ? (' \u2014 ' + a.balance + (a.currency ? ' ' + a.currency : '')) : '';
+                html += '<div class="existing-item-row" data-idx="' + i + '">'
+                    + '<span class="existing-item-name">' + escapeHtml(a.name)
+                    + '<span class="existing-item-meta">' + escapeHtml(meta) + '</span></span>'
+                    + '<button class="btn-delete-existing" data-id="' + escapeHtml(a.id) + '" data-type="account" title="Elimina">\u00d7</button>'
+                    + '</div>';
+            }
+            section.innerHTML = html;
+            section.querySelectorAll('.btn-delete-existing').forEach(function(btn) {
+                btn.addEventListener('click', function() {
+                    var pageId = this.getAttribute('data-id');
+                    var self = this;
+                    if (!confirm('Eliminare questo conto da Notion?')) return;
+                    deleteNotionItem(pageId, 'account', function() {
+                        existingAccounts = existingAccounts.filter(function(a) { return a.id !== pageId; });
+                        renderExistingAccounts();
+                        refreshRelationOptions();
+                    });
+                });
+            });
+        }
+
+        function renderExistingCategories() {
+            var section = document.getElementById('existing-categories-section');
+            if (!section) return;
+            if (existingCategories.length === 0) { section.innerHTML = ''; return; }
+            var html = '<p class="existing-section-title">&#x1F4C2; Categorie gi\u00e0 presenti</p>'
+                + '<div style="margin-bottom:14px;">';
+            for (var i = 0; i < existingCategories.length; i++) {
+                var c = existingCategories[i];
+                html += '<span class="existing-cat-tag">' + escapeHtml(c.name)
+                    + '<span class="existing-cat-remove" data-id="' + escapeHtml(c.id) + '" title="Elimina">\u00d7</span>'
+                    + '</span>';
+            }
+            html += '</div>';
+            section.innerHTML = html;
+            section.querySelectorAll('.existing-cat-remove').forEach(function(btn) {
+                btn.addEventListener('click', function() {
+                    var pageId = this.getAttribute('data-id');
+                    if (!confirm('Eliminare questa categoria da Notion?')) return;
+                    deleteNotionItem(pageId, 'category', function() {
+                        existingCategories = existingCategories.filter(function(c) { return c.id !== pageId; });
+                        renderExistingCategories();
+                        refreshRelationOptions();
+                    });
+                });
+            });
+        }
+
+        function escapeHtml(str) {
+            if (!str) return '';
+            return String(str)
+                .replace(/&/g, '&amp;')
+                .replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;')
+                .replace(/"/g, '&quot;');
+        }
 
         var PRESET_CATEGORIES = [
             "Ristoranti","Supermercato","Bar/Caffe","Pub/Locale","Asporto",
@@ -466,9 +644,22 @@
             return (def && def.properties) ? def.properties : {};
         }
 
+        var LABEL_IT = {
+            'Last Billed':   'Data inizio abbonamento',
+            'Amount':        'Importo (€)',
+            'Type':          'Frequenza',
+            'Category':      'Categoria',
+            'Account':       'Conto',
+            'Name':          'Nome',
+        };
+
+        function fieldLabel(name) {
+            return LABEL_IT[name] || name;
+        }
+
         function buildFields(dbKey, idx, container) {
             var props = getSchema(dbKey);
-            var excluded = ['formula','rollup','created_time','last_edited_time','created_by','last_edited_by'];
+            var excluded = ['formula','rollup','created_time','last_edited_time','created_by','last_edited_by','button'];
 
             if (Object.keys(props).length === 0) {
                 var fallbackDiv = document.createElement('div');
@@ -497,7 +688,7 @@
                 var fieldDiv = document.createElement('div');
                 fieldDiv.className = 'field';
                 var lbl = document.createElement('label');
-                lbl.textContent = pName;
+                lbl.textContent = fieldLabel(pName);
                 fieldDiv.appendChild(lbl);
 
                 var el;
@@ -608,16 +799,16 @@
 
         // Aggiorna i dropdown relation in tutte le card subscriptions
         function refreshRelationOptions() {
-            // Opzioni Account: esistenti su Notion + quelli che si stanno aggiungendo nel form
-            var accOpts = availableAccounts.map(function(a) { return { value: a.id, label: a.name }; });
+            // Opzioni Account: esistenti su Notion (mutable) + quelli che si stanno aggiungendo nel form
+            var accOpts = existingAccounts.map(function(a) { return { value: a.id, label: a.name }; });
             itemsData['accounts_db_id'].forEach(function(item) {
                 var n = item['Name'] || '';
                 if (n && !accOpts.find(function(o) { return o.label === n; }))
                     accOpts.push({ value: '__name__:' + n, label: n + ' (da creare)' });
             });
 
-            // Opzioni Category: esistenti su Notion + quelle selezionate nel form
-            var catOpts = availableCategories.map(function(c) { return { value: c.id, label: c.name }; });
+            // Opzioni Category: esistenti su Notion (mutable) + quelle selezionate nel form
+            var catOpts = existingCategories.map(function(c) { return { value: c.id, label: c.name }; });
             selectedCategories.forEach(function(n) {
                 if (!catOpts.find(function(o) { return o.label === n; }))
                     catOpts.push({ value: '__name__:' + n, label: n + ' (da creare)' });
@@ -694,20 +885,60 @@
             else { alert(msg); }
         }
 
+        // --- Formatter POSTGRES: payload piatto, no Notion wrapping ---
+        function formatItemsPostgres(dbKey) {
+            var result = [];
+            for (var i = 0; i < itemsData[dbKey].length; i++) {
+                var item = itemsData[dbKey][i];
+                var name = (item['Name'] || '').trim();
+                if (!name) continue;
+                if (dbKey === 'accounts_db_id') {
+                    var bal = item['Saldo iniziale'];
+                    result.push({
+                        name: name,
+                        initial_balance: (bal === undefined || bal === null || isNaN(bal)) ? 0 : parseFloat(bal)
+                    });
+                } else {
+                    result.push({ name: name });
+                }
+            }
+            return result;
+        }
+
+        function formatCategoriesPostgres() {
+            var result = [];
+            for (var j = 0; j < selectedCategories.length; j++) {
+                result.push({ name: selectedCategories[j] });
+            }
+            return result;
+        }
+
         function submitSetup() {
             var btn = document.getElementById('mainBtn');
             var loader = document.getElementById('loader');
             if (btn) btn.disabled = true;
             if (loader) loader.style.display = 'flex';
 
-            var payload = {
-                reg_token: REG_TOKEN,
-                items: {
-                    accounts_db_id: formatItems('accounts_db_id'),
-                    categories_db_id: formatCategories(),
-                    subscriptions_db_id: formatItems('subscriptions_db_id')
-                }
-            };
+            var payload;
+            if (BACKEND === 'postgres') {
+                payload = {
+                    reg_token: REG_TOKEN,
+                    items: {
+                        accounts: formatItemsPostgres('accounts_db_id'),
+                        categories: formatCategoriesPostgres(),
+                        subscriptions: formatItemsPostgres('subscriptions_db_id')
+                    }
+                };
+            } else {
+                payload = {
+                    reg_token: REG_TOKEN,
+                    items: {
+                        accounts_db_id: formatItems('accounts_db_id'),
+                        categories_db_id: formatCategories(),
+                        subscriptions_db_id: formatItems('subscriptions_db_id')
+                    }
+                };
+            }
 
             console.log('[DEBUG] payload inviato:', JSON.stringify(payload, null, 2));
             fetch('/api/setup-complete', {
@@ -720,8 +951,9 @@
                 console.log('[DEBUG] risposta server:', JSON.stringify(data, null, 2));
                 var details = (data.res && data.res.details && data.res.details.length > 0)
                     ? '\n\nDettagli:\n' + data.res.details.join('\n') : '';
+                var successTarget = (BACKEND === 'postgres') ? 'nel database interno' : 'su Notion';
                 var msg = data.ok && data.res.status === 'ok'
-                    ? 'Setup completato! Creati ' + data.res.created + ' elementi su Notion.'
+                    ? 'Setup completato! Creati ' + data.res.created + ' elementi ' + successTarget + '.'
                     : 'Ops! ' + (data.res.error || 'Errore sconosciuto') + details;
                 if (data.ok && data.res.status === 'ok' && tg && tg.showAlert) {
                     tg.showAlert(msg, function() { if (tg.close) tg.close(); });
@@ -763,6 +995,8 @@
             document.getElementById('mainBtn').addEventListener('click', submitSetup);
 
             // Initial renders
+            renderExistingAccounts();
+            renderExistingCategories();
             renderPresets();
             renderCards('accounts_db_id');
             renderCards('subscriptions_db_id');

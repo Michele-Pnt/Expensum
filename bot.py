@@ -20,6 +20,10 @@ import argparse
 import logging
 import sys
 import json
+import time
+import threading
+from cachetools import TTLCache
+from apscheduler.schedulers.background import BackgroundScheduler
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update, WebAppInfo
 from telegram.constants import ParseMode
@@ -40,8 +44,12 @@ import os
 from config import Config, setup_logging
 from src.expense_parser import ExpenseParser
 from src.notion_client import NotionFinanceClient
+from src.storage.base import FinancialStorage
+from src.storage.notion_storage import NotionStorage                                                                                                         
+from src.storage.postgres_storage import PostgresStorage
 from src.rate_limiter import is_rate_limited
 from src.user_store import UserStore
+from src.category_sync import refresh_category_averages
 
 logger = logging.getLogger("financial_agent.bot")
 
@@ -64,10 +72,8 @@ _parser: ExpenseParser | None = None
 # Inizializziamo il database utenti (usando l'URL che abbiamo messo in Config)
 _user_store = UserStore(db_url=Config.DATABASE_URL)
 
-# Questi dizionari terranno in memoria i client degli utenti attivi
-# Formato: { "chat_id": OggettoClient }
-_notion_clients: dict[str, NotionFinanceClient] = {}
-_parsers: dict[str, ExpenseParser] = {}
+# Cache client storage: TTL 30 min, max 200 utenti (VPS Hetzner CX23 — 4GB RAM)
+_storage_clients: TTLCache = TTLCache(maxsize=200, ttl=1800)
 
 
 def _safe_json_load(raw: str | None) -> dict | None:
@@ -79,69 +85,50 @@ def _safe_json_load(raw: str | None) -> dict | None:
     except Exception:
         return None
 
-def _get_notion(chat_id: str) -> NotionFinanceClient:
-    """Ritorna il client Notion specifico per l'utente, creandolo se manca."""
-    chat_id = str(chat_id)  # Convertiamo in stringa per sicurezza (le chiavi dei dizionari sono stringhe)
+def _get_storage(chat_id: str) -> FinancialStorage:
+      """Ritorna il client di storage specifico per l'utente, creandolo se manca."""                                                                           
+      chat_id = str(chat_id)                                                                                                                                   
+  
+      if chat_id in _storage_clients:                                                                                                                          
+          return _storage_clients[chat_id]
+                                                                                                                                                               
+      user = _user_store.get_user(chat_id)
 
-    # 1. Se abbiamo già il client in memoria, restituiamolo subito 
-    if chat_id in _notion_clients:
-        return _notion_clients[chat_id]
-    
-    # 2. Se non c'è, dobbiamo andare a chiederlo al database
-    user = _user_store.get_user(chat_id)
-    if not user:
-        raise ValueError(f"Utente {chat_id} non autorizzato, devi registrati per poter accedere al servizio")
+      if user.storage_backend == "postgres":                                                                                                                   
+          session = _user_store.Session()
+          storage = PostgresStorage(session=session, user_id=chat_id)                                                                                          
+      else:                                                                                                                                                    
+          # Backend Notion — comportamento attuale
+          api_key = user.notion_access_token                                                                                                                   
+          db_schemas = _user_store.get_database_schemas(chat_id)
+          schemas = {}                                                                                                                                         
+          for data in db_schemas:
+              schemas[data["db_key"]] = {                                                                                                                      
+                  "raw": _safe_json_load(data["raw"]),
+                  "mapped": _safe_json_load(data["mapped"])
+              }
+          client = NotionFinanceClient(
+              api_key=api_key,                                                                                                                                 
+              expense_db_id=user.expense_db_id,
+              income_db_id=user.income_db_id,                                                                                                                  
+              categories_db_id=user.categories_db_id,
+              monthly_balance_db_id=user.monthly_balance_db_id,                                                                                                
+              accounts_db_id=user.accounts_db_id,
+              subscriptions_db_id=user.subscriptions_db_id,                                                                                                    
+              pay_transfer_db_id=user.pay_transfer_db_id,
+              db_schemas=schemas,                                                                                                                              
+          )       
+          storage = NotionStorage(client, store=_user_store, user_id=chat_id)
 
-    # 3. Creiamo un NUOVO client personalizzato con le chiavi di quell'utente
-    # Fase 2: Preferiamo il token OAuth se presente, altrimenti usiamo la vecchia API key
-    api_key = user.notion_access_token or user.notion_api_key
-    
-    # Carichiamo gli schemi dalla nuova tabella dedicata
-    stored_schemas = _user_store.get_database_schemas(chat_id)
-    
-    # Prepariamo il dizionario dei db_schemas per il client, effettuando il parsing JSON
-    db_schemas = {}
-    for db_key, data in stored_schemas.items():
-        db_schemas[db_key] = {
-            "database_id": data["database_id"],
-            "properties": _safe_json_load(data["properties"]),
-            "mapped": _safe_json_load(data["mapped"])
-        }
-
-    client = NotionFinanceClient(
-        api_key=api_key,
-        expense_db_id=user.expense_db_id,
-        income_db_id=user.income_db_id,
-        categories_db_id=user.categories_db_id,
-        monthly_balance_db_id=user.monthly_balance_db_id,
-        accounts_db_id=user.accounts_db_id,
-        subscriptions_db_id=user.subscriptions_db_id,
-        pay_transfer_db_id=user.pay_transfer_db_id,
-        db_schemas=db_schemas,
-    )
-
-    #salviamo il client
-    _notion_clients[chat_id] = client
-    return client
-    
+      _storage_clients[chat_id] = storage
+      return storage
 
 def _get_parser(chat_id: str) -> ExpenseParser:
-    """Ritorna il parser con categorie da Notion specifico per l'utente, creandolo se manca."""
-    chat_id = str(chat_id)  # Convertiamo in stringa per sicurezza (le chiavi dei dizionari sono stringhe)
-
-
-    # 1. Se abbiamo già il client in memoria, restituiamolo subito 
-    if chat_id in _parsers:
-        return _parsers[chat_id]
-    
-    # 2. Creiamo un NUOVO parser personalizzato con le chiavi di quell'utente
-    notion = _get_notion(chat_id)
-    categories = notion.get_category_names()
-    parser = ExpenseParser(categories=categories)
-    #3. salvo il parser
-    _parsers[chat_id] = parser
-    logger.info(f"Parser inizializzato con {len(categories)} categorie: {categories}")
-    return parser
+    """Crea un parser con categorie lette da user_categories (DB locale, < 1ms)."""
+    chat_id = str(chat_id)
+    categories = _user_store.get_user_category_names(chat_id)
+    logger.info(f"Parser con {len(categories)} categorie per {chat_id}")
+    return ExpenseParser(categories=categories)
 
 
 def _is_authorized(update: Update) -> bool:
@@ -211,7 +198,9 @@ async def cmd_setup(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     chat_id = str(update.effective_chat.id)
     user = _user_store.get_user(chat_id)
-    if not _has_notion_template_binding(user):
+    # Il binding dei 7 DB Notion è richiesto solo per utenti con backend Notion.
+    # Gli utenti con backend postgres non hanno DB IDs da verificare.
+    if user.storage_backend == "notion" and not _has_notion_template_binding(user):
         await update.message.reply_text(
             "⚠️ Prima completa /registrati (binding Notion template) e poi rilancia /setup."
         )
@@ -281,25 +270,27 @@ async def cmd_feedback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     await update.message.reply_text("✅ *Grazie per il tuo feedback!*\n\nIl tuo commento è stato salvato e lo terremo in considerazione per le prossime versioni di Moneo ✨", parse_mode=ParseMode.MARKDOWN)
 
 async def cmd_registra(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Fornisce il link per il setup automatico tramite OAuth."""
+    """Fornisce due opzioni di registrazione: OAuth Notion oppure backend PostgreSQL interno."""
     chat_id = str(update.effective_chat.id)
-    
-    # Fase 2 (Security Patch): Generiamo un token monouso sicuro
-    # Invece di passare il chat_id nell'URL, passiamo un segreto temporaneo.
+
+    # Un unico reg_token monouso valido per entrambi i percorsi:
+    # chi clicca per primo lo consuma e l'altro bottone resta inattivo.
     reg_token = _user_store.create_oauth_session(chat_id)
-    
-    # URL del nostro server locale (Fase 2)
-    # NOTA: In produzione qui useremo l'URL pubblico (es. https://traky.app/...)
-    auth_url = f"https://bondless-charlena-bicolor.ngrok-free.dev/auth/notion?reg_token={reg_token}"
-    
+
+    base_url = "https://bondless-charlena-bicolor.ngrok-free.dev"
+    notion_url = f"{base_url}/auth/notion?reg_token={reg_token}"
+    postgres_url = f"{base_url}/auth/postgres?reg_token={reg_token}"
+
     keyboard = InlineKeyboardMarkup([
-        [InlineKeyboardButton("🔗 Connetti a Notion", url=auth_url)]
+        [InlineKeyboardButton("🔗 Connetti a Notion", url=notion_url)],
+        [InlineKeyboardButton("🐘 Registrati su PostgreSQL", url=postgres_url)],
     ])
-    
+
     await update.message.reply_text(
-        "🚀 *Configurazione Rapida con Traky*\n\n"
-        "Verrai reindirizzato su Notion per autorizzare Traky ad accedere (solo alle pagine che sceglierai tu!).\n\n"
-        "È facile, veloce e sicuro. 🛡️",
+        "🚀 *Scegli come registrarti*\n\n"
+        "🔗 *Notion* — sincronizza le spese nel tuo workspace Notion (autorizzazione OAuth).\n"
+        "🐘 *PostgreSQL* — salva i dati nel database interno di Moneo, più veloce e senza rate limit.\n\n"
+        "Puoi cambiare idea più avanti scrivendo al supporto. 🛡️",
         parse_mode=ParseMode.MARKDOWN,
         reply_markup=keyboard
     )
@@ -484,6 +475,7 @@ async def _process_expense_text(update: Update, context: ContextTypes.DEFAULT_TY
         "date": result["date"].isoformat(),
         "amount": result["amount"],
         "category": result["category"],
+        "income_type": result.get("income_type"),
         "name": result["name"],
     }
     
@@ -502,10 +494,12 @@ async def _process_expense_text(update: Update, context: ContextTypes.DEFAULT_TY
     if result.get("type") == "income":
         # Se abbiamo già tutto, formatta l'entrata
         
+        income_type_label = result.get("income_type") or "Non determinato"
         summary = (
             f"📝 *Nuova Entrata riconosciuta:*\n\n"
             f"📅 Data: *{date_str}*\n"
             f"💰 Importo: *€{result['amount']:.2f}*\n"
+            f"🏷️ Tipo: *{income_type_label}*\n"
             f"📝 Descrizione: *{result['name']}*"
         )
 
@@ -655,13 +649,14 @@ async def _save_to_notion(query, context, chat_id: str, account_id: str | None =
         from datetime import datetime
         date = datetime.strptime(data["date"].split("T")[0], "%Y-%m-%d").date()
 
-        notion = _get_notion(chat_id)
+        storage = _get_storage(chat_id)
         if data["type"] == "income":
-            notion.create_income(
+            storage.create_income(
                 income_date=date,
                 amount=data["amount"],
                 name=data["name"],
-                account_id=account_id
+                account_id=account_id,
+                income_type=data.get("income_type"),
             )
             date_str = date.strftime("%d/%m/%Y")
             await query.edit_message_text(
@@ -671,7 +666,7 @@ async def _save_to_notion(query, context, chat_id: str, account_id: str | None =
             )
             logger.info(f"[User {chat_id}] Entrata salvata: {data['name']} €{data['amount']:.2f}")
         else:
-            notion.create_expense(
+            storage.create_expense(
                 expense_date=date,
                 amount=data["amount"],
                 name=data["name"],
@@ -717,8 +712,8 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
         # Recupera accounts da Notion per far selezionare il conto
         try:
-            notion = _get_notion(chat_id)
-            accounts = notion.fetch_accounts()
+            storage = _get_storage(chat_id)
+            accounts = storage.fetch_accounts()
         except Exception as e:
             logger.error(f"[User {chat_id}] Errore fetch accounts: {e}")
             accounts = []
@@ -746,8 +741,90 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
 
 # ---------------------------------------------------------------------------
+# Error handler globale
+# ---------------------------------------------------------------------------
+
+async def handle_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handler globale per le eccezioni non gestite nel bot.
+
+    Logga l'errore con contesto (update_id, chat_id) senza dati sensibili
+    e notifica l'utente con un messaggio generico.
+    """
+    logger.error(
+        "Eccezione durante la gestione di un update",
+        exc_info=context.error,
+        extra={
+            "update_id": update.update_id if hasattr(update, "update_id") else "N/A",
+        },
+    )
+
+    # Notifica l'utente solo se l'update ha un messaggio o una callback
+    if isinstance(update, Update):
+        chat_id = update.effective_chat.id if update.effective_chat else None
+        if chat_id:
+            try:
+                await context.bot.send_message(
+                    chat_id=chat_id,
+                    text="⚠️ Si è verificato un errore inaspettato. Riprova tra qualche istante.",
+                )
+            except Exception:
+                pass  # Ignora errori nell'invio del messaggio di errore
+
+
+# ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
+
+def _nightly_category_sync() -> None:
+    """Job APScheduler alle 03:00 — aggiorna medie categorie per tutti gli utenti attivi.
+
+    Sequenziale con 200ms di sleep tra utenti per non saturare CPU/rete su Hetzner CX23.
+    Ogni utente Notion usa il proprio OAuth token → bucket rate limit separato.
+    """
+    logger.info("[NightlySync] Avvio sincronizzazione notturna categorie.")
+
+    # --- Utenti Notion ---
+    try:
+        notion_users = _user_store.get_active_notion_users()
+        logger.info("[NightlySync] Utenti Notion: %d", len(notion_users))
+        for user in notion_users:
+            try:
+                db_schemas_raw = _user_store.get_database_schemas(user.chat_id)
+                schemas = {}
+                for data in db_schemas_raw.values():
+                    # get_database_schemas ritorna {db_key: {database_id, properties, mapped}}
+                    pass
+                notion_client = NotionFinanceClient(
+                    api_key=user.notion_access_token,
+                    categories_db_id=user.categories_db_id,
+                )
+                refresh_category_averages(user.chat_id, _user_store, notion_client=notion_client)
+            except Exception as e:
+                logger.error("[NightlySync] Errore Notion per %s: %s", user.chat_id, e)
+            time.sleep(0.2)
+    except Exception as e:
+        logger.error("[NightlySync] Errore fetch utenti Notion: %s", e)
+
+    # --- Utenti Postgres ---
+    try:
+        pg_users = _user_store.get_active_postgres_users()
+        logger.info("[NightlySync] Utenti Postgres: %d", len(pg_users))
+        for user in pg_users:
+            session = None
+            try:
+                session = _user_store.Session()
+                refresh_category_averages(user.chat_id, _user_store, session=session)
+            except Exception as e:
+                logger.error("[NightlySync] Errore Postgres per %s: %s", user.chat_id, e)
+            finally:
+                if session:
+                    session.close()
+            time.sleep(0.2)
+    except Exception as e:
+        logger.error("[NightlySync] Errore fetch utenti Postgres: %s", e)
+
+    logger.info("[NightlySync] Sincronizzazione notturna completata.")
+
 
 def main():
     setup_logging()
@@ -788,6 +865,15 @@ def main():
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     app.add_handler(MessageHandler(filters.VOICE & ~filters.COMMAND, handle_voice))
     app.add_handler(MessageHandler(filters.PHOTO & ~filters.COMMAND, handle_photos))
+
+    # Registra l'error handler globale — cattura tutte le eccezioni non gestite
+    app.add_error_handler(handle_error)
+
+    # Job notturno: aggiornamento medie categorie alle 03:00
+    scheduler = BackgroundScheduler(daemon=True)
+    scheduler.add_job(_nightly_category_sync, 'cron', hour=3, minute=0)
+    scheduler.start()
+    logger.info("⏰ Scheduler notturno avviato (sync categorie alle 03:00).")
 
     if args.webhook:
         # Modalità webhook

@@ -1,105 +1,165 @@
+"""
+tests/test_notion_client.py — Test per la discovery dei database Notion.
+
+discover_databases() ritorna una tupla (discovered_map: dict, all_candidates: list).
+"""
+
 import pytest
 from unittest.mock import MagicMock, patch
 from src.notion_client import NotionFinanceClient
+
 
 @pytest.fixture
 def mock_notion_client():
     with patch("notion_client.Client") as mock:
         yield mock
 
-def test_discover_databases_strategy_1(mock_notion_client):
-    """Test Strategia 1: Discovery tramite child_database di una pagina template."""
-    mock_instance = mock_notion_client.return_value
-    
-    # Simuliamo i blocchi figli del template
-    mock_instance.blocks.children.list.return_value = {
-        "results": [
-            {"type": "child_database", "id": "exp_id", "child_database": {"title": "Expense"}},
-            {"type": "child_database", "id": "inc_id", "child_database": {"title": "Income"}},
-            {"type": "child_database", "id": "cat_id", "child_database": {"title": "Categories"}},
-            {"type": "child_database", "id": "mb_id", "child_database": {"title": "Monthly Balance"}},
-            {"type": "child_database", "id": "acc_id", "child_database": {"title": "Accounts"}},
-            {"type": "child_database", "id": "sub_id", "child_database": {"title": "Subscriptions"}},
-            {"type": "child_database", "id": "pay_id", "child_database": {"title": "Pay/Transfer"}},
-        ]
-    }
-    
-    discovered = NotionFinanceClient.discover_databases("fake_token", template_page_id="tpl_123")
-    
-    assert len(discovered) == 7
-    assert discovered["expense_db_id"] == "exp_id"
-    assert discovered["categories_db_id"] == "cat_id"
-    # Verifichiamo che non abbia provato la strategia 2 (nessuna chiamata a search)
-    assert mock_instance.search.call_count == 0
 
-def test_discover_databases_strategy_2(mock_notion_client):
-    """Test Strategia 2: Fallback alla ricerca della pagina 'Finance Tracker'."""
-    mock_instance = mock_notion_client.return_value
-    
-    # 1. Search trova la pagina "Finance Tracker"
-    mock_instance.search.return_value = {
-        "results": [
-            {"object": "page", "id": "finance_page_id", "parent": {"type": "workspace"}}
-        ]
-    }
-    
-    # 2. I blocchi di quella pagina contengono i DB
-    mock_instance.blocks.children.list.return_value = {
-        "results": [
-            {"type": "child_database", "id": "exp_id", "child_database": {"title": "Expense"}},
-            {"type": "child_database", "id": "inc_id", "child_database": {"title": "Income"}},
-            {"type": "child_database", "id": "cat_id", "child_database": {"title": "Categories"}},
-            {"type": "child_database", "id": "mb_id", "child_database": {"title": "Monthly Balance"}},
-            {"type": "child_database", "id": "acc_id", "child_database": {"title": "Accounts"}},
-            {"type": "child_database", "id": "sub_id", "child_database": {"title": "Subscriptions"}},
-            {"type": "child_database", "id": "pay_id", "child_database": {"title": "Pay/Transfer"}},
-        ]
-    }
-    
-    # Chiamiamo SENZA template_page_id per forzare S2
-    discovered = NotionFinanceClient.discover_databases("fake_token")
-    
-    assert len(discovered) == 7
-    assert discovered["expense_db_id"] == "exp_id"
-    assert mock_instance.search.called
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
 
-def test_discover_databases_strategy_3(mock_notion_client):
-    """Test Strategia 3: Ricerca manuale per nome dei database (data_source)."""
-    mock_instance = mock_notion_client.return_value
-    
-    # Simuliamo che S2 fallisca (nessuna pagina trovata o blocchi vuoti)
-    # mock_instance.search.side_effect = ... (usiamo side_effect per gestire più chiamate)
-    
-    def side_effect_search(query=None, **kwargs):
-        if query in ["Finance Tracker", "Dashboard", "Traky"]:
-            return {"results": []} # S2 fallisce
-        
-        # S3 cerca per nome singolo
-        mapping = {
-            "Expense": "exp_id",
-            "Income": "inc_id",
-            "Categories": "cat_id",
-            "Monthly Balance": "mb_id",
-            "Accounts": "acc_id",
-            "Subscriptions": "sub_id",
-            "Pay": "pay_id"
-        }
-        if query in mapping:
-            return {
-                "results": [
-                    {
-                        "object": "data_source", 
-                        "id": mapping[query], 
-                        "title": [{"plain_text": query}]
-                    }
-                ]
+def _make_page_result(page_id: str, title: str) -> dict:
+    """Costruisce un risultato di tipo 'page' compatibile con la Notion search API."""
+    return {
+        "object": "page",
+        "id": page_id,
+        "properties": {
+            "title": {
+                "type": "title",
+                "title": [{"plain_text": title}],
             }
+        },
+    }
+
+
+_SEVEN_DATABASES = [
+    {"type": "child_database", "id": "exp_id", "child_database": {"title": "Expense"}},
+    {"type": "child_database", "id": "inc_id", "child_database": {"title": "Income"}},
+    {"type": "child_database", "id": "cat_id", "child_database": {"title": "Categories"}},
+    {"type": "child_database", "id": "mb_id",  "child_database": {"title": "Monthly Balance"}},
+    {"type": "child_database", "id": "acc_id", "child_database": {"title": "Accounts"}},
+    {"type": "child_database", "id": "sub_id", "child_database": {"title": "Subscriptions"}},
+    {"type": "child_database", "id": "pay_id", "child_database": {"title": "Pay/Transfer"}},
+]
+
+
+# ---------------------------------------------------------------------------
+# Strategia 0 — traversal mirato: root → "Databases" → child_database
+# ---------------------------------------------------------------------------
+
+def test_discover_databases_strategy_0(mock_notion_client):
+    """Strategy 0: trova tutti i DB reali dentro la sub-page 'Databases' della root."""
+    mock_instance = mock_notion_client.return_value
+
+    # 1. search trova la pagina root "Dashboard Tracky Finance"
+    mock_instance.search.return_value = {
+        "results": [_make_page_result("root_id", "Dashboard Tracky Finance")]
+    }
+
+    # 2. blocks.children.list: due chiamate distinte per root e per sub-page Databases
+    def children_side_effect(block_id, **kwargs):
+        if block_id == "root_id":
+            return {"results": [
+                {"type": "child_page", "id": "dbs_page_id", "child_page": {"title": "Databases"}},
+                {"type": "child_page", "id": "other_id",   "child_page": {"title": "Views"}},
+            ]}
+        if block_id == "dbs_page_id":
+            return {"results": _SEVEN_DATABASES}
         return {"results": []}
 
-    mock_instance.search.side_effect = side_effect_search
-    
-    discovered = NotionFinanceClient.discover_databases("fake_token")
-    
+    mock_instance.blocks.children.list.side_effect = children_side_effect
+
+    discovered, candidates = NotionFinanceClient.discover_databases("fake_token")
+
     assert len(discovered) == 7
     assert discovered["expense_db_id"] == "exp_id"
     assert discovered["categories_db_id"] == "cat_id"
+    assert discovered["income_db_id"] == "inc_id"
+    assert discovered["accounts_db_id"] == "acc_id"
+    assert discovered["subscriptions_db_id"] == "sub_id"
+    assert discovered["monthly_balance_db_id"] == "mb_id"
+    assert discovered["pay_transfer_db_id"] == "pay_id"
+
+
+def test_discover_databases_strategy_0_skips_linked_views(mock_notion_client):
+    """Strategy 0 deve ignorare le linked views al top level della root."""
+    mock_instance = mock_notion_client.return_value
+
+    mock_instance.search.return_value = {
+        "results": [_make_page_result("root_id", "Dashboard Tracky Finance")]
+    }
+
+    def children_side_effect(block_id, **kwargs):
+        if block_id == "root_id":
+            return {"results": [
+                {"type": "child_page", "id": "dbs_page_id", "child_page": {"title": "Databases"}},
+                # Le linked views al top level NON devono essere scoperte
+                {"type": "child_database", "id": "WRONG_linked_view", "child_database": {"title": "View of Accounts"}},
+            ]}
+        if block_id == "dbs_page_id":
+            return {"results": _SEVEN_DATABASES}
+        return {"results": []}
+
+    mock_instance.blocks.children.list.side_effect = children_side_effect
+
+    discovered, _ = NotionFinanceClient.discover_databases("fake_token")
+
+    # Strategy 0 legge solo i figli di dbs_page_id, non quelli della root
+    assert "WRONG_linked_view" not in discovered.values()
+    assert discovered["accounts_db_id"] == "acc_id"
+
+
+# ---------------------------------------------------------------------------
+# Strategia 1 — scansione del template (template_page_id esplicito)
+# ---------------------------------------------------------------------------
+
+def test_discover_databases_strategy_1_with_template_id(mock_notion_client):
+    """Strategy 1: discovery tramite template_page_id quando Strategy 0 non trova la root."""
+    mock_instance = mock_notion_client.return_value
+
+    # Strategy 0: search non trova la root
+    mock_instance.search.return_value = {"results": []}
+
+    # Strategy 1: blocks.children.list sul template_page_id restituisce i 7 DB
+    mock_instance.blocks.children.list.return_value = {"results": _SEVEN_DATABASES}
+
+    discovered, candidates = NotionFinanceClient.discover_databases(
+        "fake_token", template_page_id="tpl_123"
+    )
+
+    assert len(discovered) == 7
+    assert discovered["expense_db_id"] == "exp_id"
+    assert discovered["categories_db_id"] == "cat_id"
+    assert len(candidates) == 7
+
+
+# ---------------------------------------------------------------------------
+# Strategia 2 — ricerca globale (fallback)
+# ---------------------------------------------------------------------------
+
+def test_discover_databases_strategy_2_global_search(mock_notion_client):
+    """Strategy 2: fallback su search globale quando Strategy 0 e 1 falliscono."""
+    mock_instance = mock_notion_client.return_value
+
+    def search_side_effect(query=None, **kwargs):
+        # Strategy 0: root non trovata
+        if query == "Dashboard Tracky Finance":
+            return {"results": []}
+        # Strategy 2: search globale → restituisce una pagina finance che contiene i DB
+        return {
+            "results": [
+                {"object": "page", "id": "finance_page_id",
+                 "properties": {"title": {"type": "title", "title": [{"plain_text": "Finance Dashboard"}]}}},
+            ]
+        }
+
+    mock_instance.search.side_effect = search_side_effect
+
+    # blocks.children.list sulla pagina finance restituisce i 7 DB
+    mock_instance.blocks.children.list.return_value = {"results": _SEVEN_DATABASES}
+
+    discovered, _ = NotionFinanceClient.discover_databases("fake_token")
+
+    assert discovered["expense_db_id"] == "exp_id"
+    assert mock_instance.search.called

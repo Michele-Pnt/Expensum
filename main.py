@@ -29,6 +29,7 @@ from datetime import date, datetime
 
 from config import Config, setup_logging
 from src.notion_client import NotionFinanceClient
+from src.storage.notion_storage import NotionStorage
 from src.data_processor import DataProcessor
 from src.forecaster import Forecaster
 from src.gemini_client import GeminiClient
@@ -135,7 +136,7 @@ async def run_agent(target_year: int, target_month: int, dry_run: bool, debug_da
         accounts = [{"name": "Mock Bank", "current_balance": 1500.0}]
         logger.info(f"  [DRY-RUN] Usando {len(transactions)} transazioni mock")
     else:
-        notion = NotionFinanceClient()
+        storage = NotionStorage(NotionFinanceClient())
         months_back = Config.HISTORY_MONTHS + 1
         start_year = target_year
         start_month = target_month - months_back
@@ -145,18 +146,18 @@ async def run_agent(target_year: int, target_month: int, dry_run: bool, debug_da
         start_date = date(start_year, start_month, 1)
         end_date = date(target_year, target_month, monthrange(target_year, target_month)[1])
 
-        transactions = notion.fetch_all_transactions(
+        transactions = storage.fetch_all_transactions(
             start_date=start_date, end_date=end_date
         )
 
         logger.info("▶ Step 1b/7: Estrazione Monthly Balance (Risparmio Netto)")
-        monthly_balances = notion.fetch_monthly_balances(
+        monthly_balances = storage.fetch_monthly_balances(
             start_date=start_date, end_date=end_date
         )
 
         logger.info("▶ Step 1c/7: Estrazione Entrate e Conti Correnti")
-        incomes = notion.fetch_income(start_date=start_date, end_date=end_date)
-        accounts = notion.fetch_accounts()
+        incomes = storage.fetch_income(start_date=start_date, end_date=end_date)
+        accounts = storage.fetch_accounts()
         if accounts:
             accounts_log = ", ".join(
                 f"{acc.get('name', 'Sconosciuto')}=€{float(acc.get('current_balance', 0.0)):.2f}"

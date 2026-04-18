@@ -1,6 +1,7 @@
 import os
 import sys
 import json
+import threading
 from pathlib import Path
 from functools import wraps
 from flask import Flask, render_template, request, redirect, url_for, session, flash, jsonify
@@ -22,6 +23,10 @@ from config import Config
 from src.user_store import UserStore, User, DailyUsage, Feedback
 import sqlalchemy as sa
 from src.notion_client import NotionFinanceClient
+from src.storage.notion_storage import NotionStorage
+from src.storage.postgres_storage import PostgresStorage
+from src.workspace_bootstrapper import bootstrap_workspace
+from src.category_sync import refresh_category_averages
 
 # Inizializza l'app Flask
 app = Flask(__name__)
@@ -235,58 +240,56 @@ def auth_notion_start():
     
     return redirect(notion_auth_url)
 
-@app.route("/auth/notion/callback")
-def auth_notion_callback():
-    """Riceve il codice da Notion e lo scambia per un access_token."""
-    code = request.args.get("code")
-    state = request.args.get("state")
-    error = request.args.get("error")
-    
-    if error:
-        return f"<h1>Errore di autorizzazione Notion</h1><p>{error}</p>"
-        
-    if not code or not state:
-        return "<h1>Parametri mancanti</h1>", 400
-        
-    # 1. Recuperiamo il chat_id e verifichiamo lo state
-    chat_id = store.get_and_delete_oauth_session(state)
-    if not chat_id:
-        return "<h1>Sessione scaduta o non valida</h1><p>Riprova la registrazione dal bot.</p>", 403
-        
-    # 2. Scambio CODE -> ACCESS TOKEN
+def _process_oauth_background(
+    access_token: str,
+    workspace_id: str,
+    chat_id: str,
+    template_page_id: str | None,
+) -> None:
+    """Esegue discovery, salvataggio schemi e bootstrap in background.
+
+    Chiamato in un daemon thread dopo che auth_notion_callback ha già
+    restituito la risposta HTTP al browser dell'utente.
+    """
+    telegram_url = f"https://api.telegram.org/bot{Config.TELEGRAM_BOT_TOKEN}/sendMessage"
+
+    def _tg(text: str) -> None:
+        try:
+            requests.post(telegram_url, json={"chat_id": chat_id, "text": text, "parse_mode": "HTML"})
+        except Exception as tg_err:
+            print(f"[OAuth-bg] Errore invio Telegram: {tg_err}")
+
     try:
-        response = requests.post(
-            "https://api.notion.com/v1/oauth/token",
-            auth=(Config.NOTION_CLIENT_ID, Config.NOTION_CLIENT_SECRET),
-            json={
-                "grant_type": "authorization_code",
-                "code": code,
-                "redirect_uri": Config.NOTION_REDIRECT_URI,
-            },
-        )
-        
-        if not response.ok:
-            return f"<h1>Errore scambio token</h1><p>{response.text}</p>", 500
-            
-        auth_data = response.json()
-        access_token = auth_data.get("access_token")
-        workspace_id = auth_data.get("workspace_id")
-        # duplicated_template_id è presente quando l'utente ha usato il template Notion
-        template_page_id = auth_data.get("duplicated_template_id")
+        import time as _time
+        import logging as _logging
+        _bg_log = _logging.getLogger("financial_agent.oauth_bg")
 
-        # Avviamo la ricerca automatica (Auto-Discovery)
-        discovered, all_candidates = NotionFinanceClient.discover_databases(
-            access_token, template_page_id=template_page_id
-        )
+        # 1. Auto-Discovery — piccolo delay iniziale per la duplicazione asincrona Notion,
+        # poi 1 retry se i DB non vengono trovati tutti al primo tentativo.
+        _RETRY_DELAYS = [3, 10]  # secondi di attesa prima di ogni tentativo
+        discovered: dict = {}
+        all_candidates: list = []
+        for _attempt, _delay in enumerate(_RETRY_DELAYS, start=1):
+            _bg_log.info(
+                "[OAuth-bg] Attesa %ds, poi discovery tentativo %d/%d...",
+                _delay, _attempt, len(_RETRY_DELAYS),
+            )
+            _time.sleep(_delay)
+            discovered, all_candidates = NotionFinanceClient.discover_databases(
+                access_token, template_page_id=template_page_id
+            )
+            _bg_log.info("[OAuth-bg] Discovery tentativo %d: %d/7 DB trovati.", _attempt, len(discovered))
+            if len(discovered) >= 7:
+                break
+            if _attempt == len(_RETRY_DELAYS):
+                _bg_log.warning("[OAuth-bg] Discovery esaurita dopo %d tentativi: %d/7 DB.", _attempt, len(discovered))
 
-        # Usiamo i risultati 'discovered' direttamente (Trust-Mode)
         valid_discovered = discovered
-        invalid_discovered = {}
-        
-        # Recuperiamo gli schemi di TUTTI i DB scoperti (tutti e 7), salvandoli in cache
+
+        # 2. Schemi di tutti i DB scoperti
         discovered_schemas = NotionFinanceClient.discover_db_schemas(access_token, valid_discovered)
 
-        # 3. Salviamo nel DB Principale (Utente + Database IDs)
+        # 3. Salviamo utente + database IDs
         store.add_user(
             chat_id=chat_id,
             notion_access_token=access_token,
@@ -299,9 +302,8 @@ def auth_notion_callback():
             subscriptions_db_id=valid_discovered.get("subscriptions_db_id"),
             pay_transfer_db_id=valid_discovered.get("pay_transfer_db_id"),
         )
-        
-        # 4. Salviamo gli Schemi per TUTTI i DB scoperti (robustamente)
-        # Questo garantisce che setup_form non debba tornare su Notion
+
+        # 4. Cache degli schemi
         for db_key, schema_data in discovered_schemas.items():
             try:
                 store.save_database_schema(
@@ -309,67 +311,285 @@ def auth_notion_callback():
                     db_key=db_key,
                     notion_db_id=schema_data.get("database_id"),
                     properties_json=json.dumps(schema_data.get("properties") or {}),
-                    mapped_properties_json=json.dumps(schema_data.get("mapped") or {})
+                    mapped_properties_json=json.dumps(schema_data.get("mapped") or {}),
                 )
             except Exception as schema_err:
-                print(f"[OAuth] Errore salvataggio schema {db_key}: {schema_err}")
+                print(f"[OAuth-bg] Errore salvataggio schema {db_key}: {schema_err}")
 
+        # 5. Bootstrap workspace (best-effort)
+        bootstrap_db_ids = {
+            k: valid_discovered[k]
+            for k in ("categories_db_id", "accounts_db_id", "subscriptions_db_id")
+            if k in valid_discovered
+        }
+        if len(bootstrap_db_ids) == 3:
+            try:
+                bootstrap_schemas = {
+                    k: discovered_schemas[k]
+                    for k in bootstrap_db_ids
+                    if k in discovered_schemas
+                }
+                notion_client_for_bootstrap = NotionFinanceClient(
+                    api_key=access_token,
+                    categories_db_id=bootstrap_db_ids["categories_db_id"],
+                    accounts_db_id=bootstrap_db_ids["accounts_db_id"],
+                    subscriptions_db_id=bootstrap_db_ids["subscriptions_db_id"],
+                    db_schemas=bootstrap_schemas,
+                )
+                storage_for_bootstrap = NotionStorage(notion_client_for_bootstrap)
+                bootstrap_result = bootstrap_workspace(storage_for_bootstrap)
+                if not bootstrap_result.is_empty():
+                    bootstrap_msg = bootstrap_result.to_telegram_message()
+                    if bootstrap_msg:
+                        _tg(bootstrap_msg)
+                # Trigger A: prima sincronizzazione categorie → user_categories
+                refresh_category_averages(
+                    chat_id, store, notion_client=notion_client_for_bootstrap
+                )
+            except Exception as bootstrap_err:
+                print(f"[OAuth-bg] Errore bootstrap workspace: {bootstrap_err}")
+
+        # 6. Notifica finale
         if len(valid_discovered) != 7:
+            found_count = len(valid_discovered)
 
-            report_msg = (
-                "⚠️ <b>Configurazione incompleta</b>\n\n"
-                "Ho trovato alcuni elementi, ma mancano dei Database obbligatori (o alcuni sono Pagine semplici).\n\n"
-                "👉 <b>Cosa fare:</b>\n"
-                "1. Assicurati che nel tuo Notion ci siano <b>Database</b> e non solo pagine.\n"
-                "2. Riapri <b>/registrati</b> e assicurati di autorizzare l'intero template o tutti i database singoli.\n\n"
-                "<b>Stato verifica:</b>\n"
-            )
-            for key in ["expense_db_id", "income_db_id", "categories_db_id", "monthly_balance_db_id", "accounts_db_id", "subscriptions_db_id", "pay_transfer_db_id"]:
-                status = "✅" if key in valid_discovered else "❌"
-                name = key.replace('_db_id', '').capitalize()
-                err = f": {invalid_discovered[key]}" if key in invalid_discovered else ""
-                report_msg += f"{status} {name}{err}\n"
-            
-            if all_candidates:
-                report_msg += "\n<b>Database individuati nel tuo workspace:</b>\n"
-                report_msg += ", ".join([f"<i>{c}</i>" for c in all_candidates[:15]])
-                report_msg += "\n\n<i>Se uno di questi è quello corretto, rinominalo esattamente come richiesto (es. 'Spese' o 'Expense') e riprova.</i>"
+            if found_count == 0:
+                # Nessun DB trovato: l'integrazione non ha accesso al template
+                report_msg = (
+                    "⚠️ <b>Nessun database trovato</b>\n\n"
+                    "L'integrazione non riesce a vedere i database del template Moneo.\n\n"
+                    "👉 <b>Cosa fare:</b>\n"
+                    "1. Apri Notion → cerca la pagina <b>Dashboard Tracky Finance</b>\n"
+                    "2. Clicca su <b>...</b> in alto a destra → <b>Connect to</b> → seleziona <b>Traky Finance Agent</b>\n"
+                    "3. Riapri <b>/registrati</b> e riprova\n\n"
+                    "<i>Assicurati di condividere la pagina root e tutte le sotto-pagine con l'integrazione.</i>"
+                )
+            else:
+                report_msg = (
+                    f"⚠️ <b>Configurazione parziale ({found_count}/7)</b>\n\n"
+                    "Ho trovato alcuni database ma ne mancano altri.\n\n"
+                    "👉 <b>Cosa fare:</b>\n"
+                    "1. Assicurati che nel template ci siano tutti i <b>Database</b> (non solo pagine).\n"
+                    "2. Condividi la pagina root <b>Dashboard Tracky Finance</b> con l'integrazione.\n"
+                    "3. Riapri <b>/registrati</b> e riprova.\n\n"
+                    "<b>Stato verifica:</b>\n"
+                )
+                for key in [
+                    "expense_db_id", "income_db_id", "categories_db_id",
+                    "monthly_balance_db_id", "accounts_db_id", "subscriptions_db_id", "pay_transfer_db_id",
+                ]:
+                    status = "✅" if key in valid_discovered else "❌"
+                    name = key.replace("_db_id", "").capitalize()
+                    report_msg += f"{status} {name}\n"
 
-            telegram_url = f"https://api.telegram.org/bot{Config.TELEGRAM_BOT_TOKEN}/sendMessage"
-            requests.post(telegram_url, json={
-                "chat_id": chat_id,
-                "text": report_msg,
-                "parse_mode": "HTML"
-            })
+                if all_candidates:
+                    report_msg += "\n<b>Database accessibili nel tuo workspace:</b>\n"
+                    report_msg += ", ".join([f"<i>{c}</i>" for c in all_candidates[:15]])
+                    report_msg += (
+                        "\n\n<i>Se uno di questi è quello corretto, rinominalo esattamente "
+                        "come richiesto (es. 'Expense', 'Income') e riprova.</i>"
+                    )
 
-            return redirect("https://t.me/NotionFinaceBot")
+            _tg(report_msg)
+            return
 
-        # Notiamo che add_user e save_database_schema sono già stati chiamati sopra.
-        
         report_msg = "🎊 <b>TRAKY È PRONTO ALL'AZIONE!</b>\n\nHo scansionato il tuo Notion e collegato i database:\n"
-        
         if not discovered:
-            report_msg += "⚠️ <b>Attenzione</b>: Non ho trovato i database standard (Spese, Entrate, ecc.). Assicurati di averli creati o rinominati correttamente nel tuo workspace Notion!"
+            report_msg += (
+                "⚠️ <b>Attenzione</b>: Non ho trovato i database standard (Spese, Entrate, ecc.). "
+                "Assicurati di averli creati o rinominati correttamente nel tuo workspace Notion!"
+            )
         else:
             for key in discovered:
-                # Esempio: expense_db_id -> Expense
                 db_name = key.replace("_db_id", "").capitalize()
                 report_msg += f"✅ {db_name}\n"
+        _tg(report_msg)
 
-        # INVIAMO IL MESSAGGIO A TELEGRAM (API DIRETTA)
-        telegram_url = f"https://api.telegram.org/bot{Config.TELEGRAM_BOT_TOKEN}/sendMessage"
-        tg_resp = requests.post(telegram_url, json={
-            "chat_id": chat_id,
-            "text": report_msg,
-            "parse_mode": "HTML"
-        })
-        
-        if not tg_resp.ok:
-            print(f"[OAuth] ERRORE INVIO TELEGRAM: {tg_resp.text}")
-        
-        return redirect("https://t.me/NotionFinaceBot")
+    except Exception as e:
+        import logging as _logging
+        _logging.getLogger("financial_agent.oauth_bg").error(
+            "[OAuth-bg] Errore imprevisto nel thread background: %s", e, exc_info=True
+        )
+        try:
+            requests.post(
+                telegram_url,
+                json={
+                    "chat_id": chat_id,
+                    "text": "⚠️ Si è verificato un errore durante la configurazione. Riprova con /registrati.",
+                    "parse_mode": "HTML",
+                },
+            )
+        except Exception:
+            pass
+
+
+def _process_postgres_background(chat_id: str) -> None:
+    """Bootstrap del backend Postgres: seeda categorie e conti di default, poi notifica Telegram.
+
+    Parallelo a _process_oauth_background ma molto più snello: niente OAuth, niente
+    discovery di database, niente schema caching. L'utente viene creato sincronamente
+    nel handler; questa funzione fa solo il seed dei default e manda il messaggio.
+    """
+    telegram_url = f"https://api.telegram.org/bot{Config.TELEGRAM_BOT_TOKEN}/sendMessage"
+
+    def _tg(text: str) -> None:
+        try:
+            requests.post(telegram_url, json={"chat_id": chat_id, "text": text, "parse_mode": "HTML"})
+        except Exception as tg_err:
+            print(f"[Postgres-bg] Errore invio Telegram: {tg_err}")
+
+    session = None
+    try:
+        session = store.Session()
+        storage = PostgresStorage(session=session, user_id=chat_id)
+        bootstrap_result = bootstrap_workspace(storage)
+        # Trigger A: prima sincronizzazione medie categorie per utente Postgres
+        refresh_category_averages(chat_id, store, session=session)
+
+        report_msg = (
+            "🎊 <b>MONEO È PRONTO!</b>\n\n"
+            "Ho creato il tuo spazio personale nel database interno PostgreSQL.\n"
+        )
+        bootstrap_msg = bootstrap_result.to_telegram_message()
+        if bootstrap_msg:
+            report_msg += "\n" + bootstrap_msg
+        else:
+            report_msg += "\n💡 Usa <b>/setup</b> per personalizzare conti, categorie e abbonamenti."
+        _tg(report_msg)
+
+    except Exception as e:
+        import logging as _logging
+        _logging.getLogger("financial_agent.postgres_bg").error(
+            "[Postgres-bg] Errore imprevisto nel thread background: %s", e, exc_info=True
+        )
+        _tg("⚠️ Si è verificato un errore durante la configurazione. Riprova con /registrati.")
+    finally:
+        if session is not None:
+            session.close()
+
+
+@app.route("/auth/postgres")
+def auth_postgres_start():
+    """Registrazione diretta su PostgreSQL (senza OAuth).
+
+    Valida il reg_token, crea il record utente con storage_backend='postgres' e
+    avvia un thread di bootstrap che seeda i default (13 categorie + 2 conti).
+    """
+    reg_token = request.args.get("reg_token")
+    if not reg_token:
+        return "<h1>Accesso negato</h1><p>Manca il registration token.</p>", 403
+
+    # Consuma la sessione OAuth (atomico: recupera chat_id e cancella il token)
+    chat_id = store.get_and_delete_oauth_session(reg_token)
+    if not chat_id:
+        return "<h1>Token non valido o scaduto</h1><p>Riprova la registrazione dal bot.</p>", 403
+
+    try:
+        store.add_user(
+            chat_id=chat_id,
+            storage_backend="postgres",
+            setup_status="WAIT_ACCOUNTS",
+        )
+    except Exception as e:
+        import logging as _logging
+        _logging.getLogger("financial_agent.auth_postgres").error(
+            "Errore creazione utente postgres: %s", e, exc_info=True
+        )
+        return "<h1>Errore imprevisto</h1><p>Riprova dal bot.</p>", 500
+
+    # Notifica immediata all'utente (UX parity con OAuth Notion)
+    try:
+        requests.post(
+            f"https://api.telegram.org/bot{Config.TELEGRAM_BOT_TOKEN}/sendMessage",
+            json={
+                "chat_id": chat_id,
+                "text": (
+                    "⏳ <b>Registrazione in corso!</b>\n\n"
+                    "Sto preparando il tuo spazio nel database interno "
+                    "(categorie e conti di default).\n\n"
+                    "Tra pochi secondi potrai iniziare a loggare le tue spese. 🚀"
+                ),
+                "parse_mode": "HTML",
+            },
+        )
+    except Exception:
+        pass  # Non bloccare se Telegram è irraggiungibile
+
+    threading.Thread(
+        target=_process_postgres_background,
+        args=(chat_id,),
+        daemon=True,
+    ).start()
+
+    return redirect("https://t.me/NotionFinaceBot")
+
+
+@app.route("/auth/notion/callback")
+def auth_notion_callback():
+    """Riceve il codice da Notion, scambia il token e avvia il setup in background."""
+    code = request.args.get("code")
+    state = request.args.get("state")
+    error = request.args.get("error")
+
+    if error:
+        return f"<h1>Errore di autorizzazione Notion</h1><p>{error}</p>"
+
+    if not code or not state:
+        return "<h1>Parametri mancanti</h1>", 400
+
+    # 1. Verifica stato OAuth
+    chat_id = store.get_and_delete_oauth_session(state)
+    if not chat_id:
+        return "<h1>Sessione scaduta o non valida</h1><p>Riprova la registrazione dal bot.</p>", 403
+
+    # 2. Scambio CODE -> ACCESS TOKEN (unica operazione sincrona)
+    try:
+        response = requests.post(
+            "https://api.notion.com/v1/oauth/token",
+            auth=(Config.NOTION_CLIENT_ID, Config.NOTION_CLIENT_SECRET),
+            json={
+                "grant_type": "authorization_code",
+                "code": code,
+                "redirect_uri": Config.NOTION_REDIRECT_URI,
+            },
+        )
+        if not response.ok:
+            return f"<h1>Errore scambio token</h1><p>{response.text}</p>", 500
+
+        auth_data = response.json()
+        access_token = auth_data.get("access_token")
+        workspace_id = auth_data.get("workspace_id")
+        template_page_id = auth_data.get("duplicated_template_id")
     except Exception as e:
         return f"<h1>Errore imprevisto</h1><p>{str(e)}</p>", 500
+
+    # 3. Notifica immediata all'utente e avvio elaborazione in background
+    try:
+        requests.post(
+            f"https://api.telegram.org/bot{Config.TELEGRAM_BOT_TOKEN}/sendMessage",
+            json={
+                "chat_id": chat_id,
+                "text": (
+                    "⏳ <b>Autorizzazione ricevuta!</b>\n\n"
+                    "Sto configurando il tuo workspace Notion in background "
+                    "(discovery database, schemi, dati di default).\n\n"
+                    "Riceverai un messaggio qui quando tutto è pronto. Di solito "
+                    "ci vogliono meno di 30 secondi. 🚀"
+                ),
+                "parse_mode": "HTML",
+            },
+        )
+    except Exception:
+        pass  # Non bloccare se Telegram è irraggiungibile
+
+    t = threading.Thread(
+        target=_process_oauth_background,
+        args=(access_token, workspace_id, chat_id, template_page_id),
+        daemon=False,  # NON daemon: il Flask reloader non deve killarlo durante la discovery
+    )
+    t.start()
+
+    return redirect("https://t.me/NotionFinaceBot")
 
 # --- SETUP MINI APP (Fase 6) ---
 
@@ -387,11 +607,39 @@ def setup_form():
              # Fallback: controlliamo se l'utente esiste già ed è in stato setup
              # Altrimenti diamo errore
              return "<h1>Sessione scaduta</h1><p>Ricomincia il setup dal bot con /setup.</p>", 403
-        
+
         user = s.query(User).filter_by(chat_id=sess.chat_id).first()
-        if not user or not user.notion_access_token:
+        if not user:
+            return "<h1>Utente non trovato</h1><p>Esegui prima /registrati dal bot.</p>", 403
+
+        # --- Branch PostgreSQL: niente schemi Notion, form semplificato ---
+        if user.storage_backend == "postgres":
+            pg_storage = PostgresStorage(session=s, user_id=user.chat_id)
+            existing_accounts = pg_storage.fetch_accounts()
+            existing_categories = [
+                {"id": None, "name": n} for n in pg_storage.get_category_names()
+            ]
+            return render_template(
+                "setup_miniapp.html",
+                backend="postgres",
+                schemas={},
+                reg_token=reg_token,
+                user_name=user.username or "Utente",
+                available_accounts=existing_accounts,
+                available_categories=existing_categories,
+                # I col_* servono solo al ramo Notion: passiamo stringhe vuote come placeholder
+                col_accounts_initial_amount="",
+                col_accounts_type="",
+                col_sub_type="",
+                col_sub_amount="",
+                col_sub_category="",
+                col_sub_account="",
+            )
+
+        # --- Branch Notion (flusso legacy invariato) ---
+        if not user.notion_access_token:
             return "<h1>Utente non autorizzato</h1><p>Devi prima connettere Notion con /registrati.</p>", 403
-        
+
         # I 3 DB che ci servono per il setup
         setup_db_keys = ["accounts_db_id", "categories_db_id", "subscriptions_db_id"]
 
@@ -467,6 +715,7 @@ def setup_form():
             print(f"[Setup] fetch_categories fallito: {e}")
 
         return render_template("setup_miniapp.html",
+                               backend="notion",
                                schemas=schemas,
                                reg_token=reg_token,
                                user_name=user.username or "Utente",
@@ -494,11 +743,78 @@ def api_setup_complete():
         sess = s.query(OAuthSession).filter_by(state=reg_token).first()
         if not sess:
             return jsonify({"error": "Invalid session"}), 403
-            
+
         user = s.query(User).filter_by(chat_id=sess.chat_id).first()
         if not user:
             return jsonify({"error": "User not found"}), 404
 
+        # --- Branch PostgreSQL: payload piatto, creazione diretta via PostgresStorage ---
+        if user.storage_backend == "postgres":
+            pg_storage = PostgresStorage(session=s, user_id=user.chat_id)
+            errors: list[str] = []
+            created_count = 0
+
+            # 1. Categorie (prima delle subscriptions che possono referenziarle)
+            for item in items_data.get("categories", []):
+                name = (item.get("name") or "").strip()
+                if not name:
+                    errors.append("Nome vuoto in categories, elemento saltato")
+                    continue
+                try:
+                    pg_storage.create_category(name)
+                    created_count += 1
+                except Exception as e:
+                    errors.append(f"Errore categoria '{name}': {e}")
+
+            # 2. Conti
+            for item in items_data.get("accounts", []):
+                name = (item.get("name") or "").strip()
+                if not name:
+                    errors.append("Nome vuoto in accounts, elemento saltato")
+                    continue
+                try:
+                    initial_balance = float(item.get("initial_balance") or 0.0)
+                    pg_storage.create_account(name, initial_balance=initial_balance)
+                    created_count += 1
+                except Exception as e:
+                    errors.append(f"Errore account '{name}': {e}")
+
+            # 3. Abbonamenti (la firma astratta espone solo 'name': vedi BACKLOG per evolutiva)
+            for item in items_data.get("subscriptions", []):
+                name = (item.get("name") or "").strip()
+                if not name:
+                    errors.append("Nome vuoto in subscriptions, elemento saltato")
+                    continue
+                try:
+                    pg_storage.create_subscription(name)
+                    created_count += 1
+                except Exception as e:
+                    errors.append(f"Errore abbonamento '{name}': {e}")
+
+            if created_count > 0 or not errors:
+                store.mark_setup_completed(user.chat_id)
+                s.delete(sess)
+                s.commit()
+
+                telegram_url = f"https://api.telegram.org/bot{Config.TELEGRAM_BOT_TOKEN}/sendMessage"
+                try:
+                    requests.post(telegram_url, json={
+                        "chat_id": user.chat_id,
+                        "text": (
+                            f"✅ <b>Setup completato con successo!</b>\n"
+                            f"Ho creato {created_count} elementi nel database interno.\n\n"
+                            f"Ora puoi iniziare a scrivermi le tue spese!"
+                        ),
+                        "parse_mode": "HTML"
+                    })
+                except Exception:
+                    pass
+
+                return jsonify({"status": "ok", "created": created_count})
+
+            return jsonify({"error": "Setup failed", "details": errors}), 500
+
+        # --- Branch Notion (flusso legacy invariato) ---
         # Carichiamo gli schemi dal DB così _get_property_name può risolvere
         # i nomi reali delle colonne Notion (es. "Type" invece di "Account type")
         stored_schemas = store.get_database_schemas(user.chat_id)
@@ -646,6 +962,38 @@ def api_setup_complete():
             return jsonify({"status": "ok", "created": created_count})
         
         return jsonify({"error": "Setup failed", "details": errors}), 500
+
+@app.route("/api/delete-notion-item", methods=["DELETE"])
+def api_delete_notion_item():
+    """Archivia (soft-delete) un elemento Notion dato il suo page_id.
+
+    Body JSON atteso:
+        { "reg_token": "...", "page_id": "<notion-page-uuid>" }
+    """
+    payload = request.json or {}
+    reg_token = payload.get("reg_token")
+    page_id = payload.get("page_id")
+
+    if not reg_token or not page_id:
+        return jsonify({"error": "Missing reg_token or page_id"}), 400
+
+    with store.Session() as s:
+        from src.user_store import OAuthSession, User
+        sess = s.query(OAuthSession).filter_by(state=reg_token).first()
+        if not sess:
+            return jsonify({"error": "Invalid session"}), 403
+
+        user = s.query(User).filter_by(chat_id=sess.chat_id).first()
+        if not user:
+            return jsonify({"error": "User not found"}), 404
+
+        try:
+            notion_raw = NotionClient(auth=user.notion_access_token)
+            notion_raw.pages.update(page_id=page_id, archived=True)
+            return jsonify({"status": "ok"})
+        except Exception as e:
+            return jsonify({"error": str(e)}), 500
+
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000, debug=True)

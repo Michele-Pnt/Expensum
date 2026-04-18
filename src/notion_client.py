@@ -19,7 +19,6 @@ Approccio per il Monthly Balance:
 
 import logging
 import re
-from calendar import monthrange
 from datetime import date, datetime
 from typing import Optional
 
@@ -83,98 +82,325 @@ class NotionFinanceClient:
             return None
 
         import time
+        # Tipi di blocchi layout che possono contenere child_database/child_page
+        # ma non hanno un campo "title" — vanno attraversati senza condizioni di nome.
+        _LAYOUT_BLOCK_TYPES = {
+            "column_list", "column", "toggle", "callout", "quote",
+            "synced_block", "bulleted_list_item", "numbered_list_item",
+        }
+
+        def _fetch_db_title(db_id: str) -> str:
+            """Recupera il titolo reale di un database via databases.retrieve().
+
+            Serve quando il campo child_database.title del blocco è vuoto o
+            "Untitled" (succede nelle pagine duplicate da template).
+            """
+            try:
+                db = client.databases.retrieve(database_id=db_id)
+                title_list = db.get("title", []) or []
+                return "".join(t.get("plain_text", "") for t in title_list).strip()
+            except Exception as e:
+                logger.debug("[Discovery] databases.retrieve(%s) fallita: %s", db_id[:8], e)
+                return ""
+
+        def _fetch_page_title(page_id: str) -> str:
+            """Recupera il titolo reale di una pagina via pages.retrieve().
+
+            Serve quando il campo child_page.title del blocco è vuoto (stesso
+            problema async di _fetch_db_title ma per le sub-pagine).
+            """
+            try:
+                page = client.pages.retrieve(page_id=page_id)
+                props = page.get("properties", {}) or {}
+                for p in props.values():
+                    if p.get("type") == "title":
+                        return "".join(
+                            t.get("plain_text", "") for t in p.get("title", [])
+                        ).strip()
+            except Exception as e:
+                logger.debug("[Discovery] pages.retrieve(%s) fallita: %s", page_id[:8], e)
+            return ""
+
         def _scan_recursive(block_id: str, depth: int = 0) -> None:
-            """Scansiona blocchi con rate-limit e pazienza."""
+            """Scansiona blocchi ricorsivamente cercando child_database.
+
+            Entra nei blocchi layout (column_list, column, toggle, ecc.) anche
+            se non hanno un titolo, perché la pagina "Databases" del template
+            è spesso annidatainside una colonna invece di essere figlia diretta.
+            """
             if depth > 4: return
             try:
                 # Rate limit protection (Notion doc: 3 req/s max)
-                time.sleep(0.4) 
-                
+                time.sleep(0.4)
+
                 response = client.blocks.children.list(block_id=block_id)
                 children = response.get("results", [])
-                
+
                 for block in children:
                     b_type = block.get("type", "")
                     b_id = block.get("id", "")
-                    title = ""
-                    
+
                     if b_type == "child_database":
-                        title = block.get("child_database", {}).get("title", "")
-                    elif b_type == "child_page":
-                        title = block.get("child_page", {}).get("title", "")
-                    
-                    if title:
-                        title_low = title.lower().strip()
-                        logger.debug(f"[Discovery] Visto in '{block_id[:5]}...': '{title}' [{b_type}]")
-                        
-                        # 1. Match DATABASE
-                        if b_type == "child_database":
+                        title = block.get("child_database", {}).get("title", "") or ""
+                        # Il campo child_database.title nei blocchi è spesso vuoto o "Untitled"
+                        # quando il DB è in una pagina duplicata da template: bisogna recuperare
+                        # il titolo reale con databases.retrieve().
+                        if not title or title.strip().lower() in ("", "untitled"):
+                            title = _fetch_db_title(b_id) or title
+                        if title:
+                            title_low = title.lower().strip()
+                            logger.debug("[Discovery] Visto in '%s...': '%s' [child_database]", block_id[:5], title)
                             if title not in all_candidates:
                                 all_candidates.append(title)
                             matched_key = _match_name(title_low)
                             if matched_key and matched_key not in discovered:
                                 discovered[matched_key] = b_id
-                                logger.info(f"[Discovery] MATCH TROVATO: {title} -> {matched_key}")
-                        
-                        # 2. Esplorazione profonda
-                        elif b_type == "child_page":
-                            # Entriamo se è una cartella nota o se siamo ai primi livelli
-                            is_container = any(k in title_low for k in ["database", "db", "finance", "dashboard", "tracky"])
-                            if is_container or depth < 2:
-                                _scan_recursive(b_id, depth + 1)
-                                
+                                logger.info("[Discovery] MATCH TROVATO: %s -> %s", title, matched_key)
+
+                    elif b_type == "child_page":
+                        title = block.get("child_page", {}).get("title", "")
+                        title_low = title.lower().strip() if title else ""
+                        logger.debug("[Discovery] Visto in '%s...': '%s' [child_page]", block_id[:5], title)
+                        # Entriamo se è una cartella nota o se siamo ai primi livelli
+                        is_container = any(k in title_low for k in ["database", "db", "finance", "dashboard", "tracky"])
+                        if is_container or depth < 2:
+                            _scan_recursive(b_id, depth + 1)
+
+                    elif b_type in _LAYOUT_BLOCK_TYPES and depth < 3:
+                        # Layout block senza titolo: potrebbe contenere child_database annidati
+                        _scan_recursive(b_id, depth + 1)
+
             except Exception as e:
                 if "copy_indicator" not in str(e):
-                    logger.warning(f"[Discovery] Blocco {block_id} non leggibile: {e}")
+                    logger.warning("[Discovery] Blocco %s non leggibile: %s", block_id, e)
 
-        # 1. STRATEGIA PRIORITARIA: Scansione del Template (10 tentativi = 30s)
+        # ---------------------------------------------------------------------------
+        # Costanti del template
+        # ---------------------------------------------------------------------------
+        _ROOT_PAGE_NAME = "Dashboard Tracky Finance"
+        _DATABASES_SUBPAGE_NAME = "databases"
+
+        # Pagine di contenuto (leaf) del template: non entrarci durante la ricerca
+        # di "Databases", altrimenti si scansionano centinaia di blocchi inutili.
+        _LEAF_PAGE_TITLES = frozenset({
+            "expenses", "expense", "accounts", "account", "income",
+            "subscriptions", "subscription", "payment", "payments",
+            "graphs", "graph", "budget", "report", "reports",
+        })
+
+        def _list_children(block_id: str) -> list:
+            """Legge tutti i figli di un blocco con paginazione."""
+            results: list = []
+            cursor = None
+            while True:
+                kwargs: dict = {"block_id": block_id, "page_size": 100}
+                if cursor:
+                    kwargs["start_cursor"] = cursor
+                resp = client.blocks.children.list(**kwargs)
+                results.extend(resp.get("results", []))
+                if not resp.get("has_more"):
+                    break
+                cursor = resp.get("next_cursor")
+            return results
+
+        def _find_databases_subpage_id(start_id: str, depth: int = 0) -> str | None:
+            """Trova la sub-page 'Databases' navigando ricorsivamente la struttura.
+
+            Struttura reale del template:
+              root → column_list → column → synced_block → Menu (child_page)
+                   → Databases (child_page) → 7 child_database reali
+
+            L'algoritmo entra in:
+            - Tutti i blocchi layout (column_list, column, synced_block, callout…)
+            - Le child_page intermedie NON-leaf (es. "Menu") fino a depth 5
+            - NON entra nelle pagine di contenuto (Expenses, Accounts, Income…)
+            """
+            if depth > 7:
+                return None
+            try:
+                children = _list_children(start_id)
+            except Exception as e:
+                logger.debug("[Discovery] Lettura blocco %s fallita: %s", start_id[:8], e)
+                return None
+
+            child_pages_found: list[str] = []
+
+            # Prima passata: match diretto tra i child_page
+            for block in children:
+                b_type = block.get("type", "")
+                b_id = block.get("id", "")
+                if b_type == "child_page":
+                    title = block.get("child_page", {}).get("title", "") or ""
+                    if not title or title.strip().lower() in ("", "untitled"):
+                        title = _fetch_page_title(b_id) or title
+                    child_pages_found.append(title)
+                    if title.lower().strip() == _DATABASES_SUBPAGE_NAME:
+                        logger.info("[Discovery] Sub-page 'Databases' trovata (depth=%d): %s", depth, b_id)
+                        return b_id
+
+            # Seconda passata: ricorsione in layout block e child_page non-leaf
+            for block in children:
+                b_type = block.get("type", "")
+                b_id = block.get("id", "")
+                if b_type in _LAYOUT_BLOCK_TYPES:
+                    found = _find_databases_subpage_id(b_id, depth + 1)
+                    if found:
+                        return found
+                elif b_type == "child_page" and depth < 5:
+                    title = block.get("child_page", {}).get("title", "") or ""
+                    title_low = title.lower().strip()
+                    # Entra solo nelle pagine container, non in quelle di contenuto
+                    if title_low not in _LEAF_PAGE_TITLES:
+                        found = _find_databases_subpage_id(b_id, depth + 1)
+                        if found:
+                            return found
+
+            if depth == 0:
+                logger.warning(
+                    "[Discovery] Sub-page 'Databases' non trovata. "
+                    "Child pages root (%d blocchi totali): %s",
+                    len(children),
+                    child_pages_found or "(nessuna)",
+                )
+            return None
+
+        def _discover_from_databases_page(databases_page_id: str) -> None:
+            """Mappa i child_database discendenti della pagina 'Databases'.
+
+            Attraversa anche i blocchi layout per gestire template con DB
+            organizzati in colonne/toggle. Recupera il titolo reale via
+            databases.retrieve() quando il campo del blocco è vuoto.
+            """
+            def _walk(bid: str, depth: int = 0) -> None:
+                if depth > 3:
+                    return
+                try:
+                    children = client.blocks.children.list(block_id=bid).get("results", [])
+                except Exception as e:
+                    logger.warning("[Discovery] Errore lettura blocco %s: %s", bid[:8], e)
+                    return
+                for block in children:
+                    b_type = block.get("type", "")
+                    if b_type == "child_database":
+                        db_id = block["id"]
+                        title = block.get("child_database", {}).get("title", "") or ""
+                        if not title or title.strip().lower() in ("", "untitled"):
+                            title = _fetch_db_title(db_id) or title
+                        if not title:
+                            continue
+                        title_low = title.lower().strip()
+                        if title not in all_candidates:
+                            all_candidates.append(title)
+                        matched_key = _match_name(title_low)
+                        if matched_key and matched_key not in discovered:
+                            discovered[matched_key] = db_id
+                            logger.info("[Discovery] DB reale trovato: '%s' → %s", title, matched_key)
+                    elif b_type in _LAYOUT_BLOCK_TYPES:
+                        _walk(block["id"], depth + 1)
+
+            try:
+                _walk(databases_page_id)
+            except Exception as e:
+                logger.warning("[Discovery] Errore lettura pagina Databases: %s", e)
+
+        # ---------------------------------------------------------------------------
+        # STRATEGIA PRINCIPALE: template_page_id → Databases sub-page → child_database
+        #
+        # Quando l'utente fa OAuth con il template Moneo, Notion restituisce
+        # duplicated_template_id = ID della root page duplicata nel suo workspace.
+        # Il percorso reale è:
+        #   root → column_list → column → synced_block → Menu (child_page)
+        #        → Databases (child_page) → 7 child_database reali con titoli
+        #
+        # Se template_page_id non è disponibile, cerchiamo la root per nome.
+        # ---------------------------------------------------------------------------
+        root_id: str | None = None
         if template_page_id:
-            for attempt in range(10):
-                logger.info(f"[Discovery] Tentativo {attempt + 1}/10 scansione template...")
-                _scan_recursive(template_page_id)
-                if len(discovered) >= 7: break
-                if attempt < 9: time.sleep(3)
-            
-            if len(discovered) == 7:
-                return discovered, all_candidates
+            root_id = template_page_id
+            logger.info("[Discovery] Root = template_page_id: %s", root_id)
+        else:
+            # Fallback: cerca per nome (setup manuale senza template)
+            try:
+                results = client.search(
+                    query=_ROOT_PAGE_NAME,
+                    filter={"value": "page", "property": "object"},
+                    page_size=10,
+                ).get("results", [])
+                for obj in results:
+                    props = obj.get("properties", {})
+                    for p in props.values():
+                        if p.get("type") == "title":
+                            t = "".join(x.get("plain_text", "") for x in p.get("title", []))
+                            if t.strip().lower() == _ROOT_PAGE_NAME.lower():
+                                root_id = obj["id"]
+                                logger.info("[Discovery] Root trovata via search: %s", root_id)
+                                break
+                    if root_id:
+                        break
+            except Exception as e:
+                logger.debug("[Discovery] Search root fallita: %s", e)
 
-        # 2. STRATEGIA DI BACKUP: Ricerca Globale Paginata
+        if root_id:
+            databases_page_id = _find_databases_subpage_id(root_id)
+            if databases_page_id:
+                _discover_from_databases_page(databases_page_id)
+                found = len(discovered)
+                logger.info("[Discovery] Traversal completato: %d/7 DB trovati.", found)
+                if found >= 7:
+                    return discovered, all_candidates
+                # Trovati alcuni ma non tutti: continua con fallback
+                logger.warning("[Discovery] Solo %d/7 DB trovati via traversal, provo fallback.", found)
+            else:
+                logger.warning("[Discovery] Sub-page 'Databases' non trovata nella struttura.")
+
+        # Se abbiamo template_page_id ma la traversal ha fallito → stop qui.
+        # Non eseguire mai la global search quando il template è noto: potrebbe
+        # trovare DB omonimi nel template originale e far scrivere nei posti sbagliati.
+        if template_page_id:
+            logger.warning(
+                "[Discovery] Traversal fallita sul template dell'utente (%d/7 DB). "
+                "Assicurati che tutte le pagine siano condivise con l'integrazione.",
+                len(discovered),
+            )
+            return discovered, all_candidates
+
+        # FALLBACK: Ricerca Globale (solo se NON c'è template_page_id).
+        # Usata quando l'utente configura i DB manualmente senza usare il template.
         try:
-            logger.info("[Discovery] Scansione template parziale, provo ricerca globale...")
+            logger.info("[Discovery] Nessun template_page_id — ricerca globale nel workspace...")
             search_results = client.search(page_size=100).get("results", [])
-            
+
             for obj in search_results:
                 o_type = obj.get("object")
                 o_id = obj.get("id")
                 title = ""
-                
+
                 if o_type == "database":
                     title_list = obj.get("title", [])
                     title = "".join([t.get("plain_text", "") for t in title_list])
                 elif o_type == "page":
-                    # Estrazione titolo pagina varia in base a proprietà
                     props = obj.get("properties", {})
                     for p in props.values():
                         if p.get("type") == "title":
                             title = "".join([t.get("plain_text", "") for t in p.get("title", [])])
                             break
-                
+
                 if not title: continue
                 title_low = title.lower().strip()
-                if title not in all_candidates: all_candidates.append(title)
-                
+
                 if o_type == "database":
+                    if title not in all_candidates:
+                        all_candidates.append(title)
                     matched_key = _match_name(title_low)
                     if matched_key and matched_key not in discovered:
                         discovered[matched_key] = o_id
-                        logger.info(f"[Discovery] Backup trovato DB: {title}")
-                elif "database" in title_low or "finance" in title_low:
-                     # Se è una pagina col nome giusto, scansioniamola ora
+                        logger.info("[Discovery] Trovato DB (global): %s", title)
+                elif o_type == "page" and ("database" in title_low or "finance" in title_low):
                     _scan_recursive(o_id, depth=1)
-                    
+
         except Exception as e:
-            logger.error(f"[Discovery] Errore critico nel backup: {e}")
-            
+            logger.error("[Discovery] Errore critico nella ricerca globale: %s", e)
+
         return discovered, all_candidates
 
     @staticmethod
@@ -213,53 +439,14 @@ class NotionFinanceClient:
                             except Exception as follow_err:
                                 logger.warning("Impossibile leggere il DB sorgente '%s': %s", real_db_id, follow_err)
 
-                # Fallback: se properties ancora vuote (linked view non condivisa), inferisci
-                # lo schema interrogando la view. Raccogliamo tutti i record per ottenere
-                # anche i valori unici dei campi select (usati come "opzioni" nel form).
+                # Se le properties sono ancora vuote (DB sorgente 404 o non condiviso),
+                # il setup form usa SCHEMA_DEFAULTS come fallback — nessuna azione richiesta.
                 if not raw_properties:
-                    try:
-                        select_options: dict[str, set] = {}
-                        has_more = True
-                        cursor = None
-                        while has_more:
-                            kwargs: dict = {"database_id": db_id, "page_size": 100}
-                            if cursor:
-                                kwargs["start_cursor"] = cursor
-                            query_result = client.databases.query(**kwargs)
-                            pages = query_result.get("results", [])
-                            has_more = query_result.get("has_more", False)
-                            cursor = query_result.get("next_cursor")
-
-                            for page in pages:
-                                for prop_name, prop_val in page.get("properties", {}).items():
-                                    p_type = prop_val.get("type", "unknown")
-                                    if prop_name not in raw_properties:
-                                        raw_properties[prop_name] = {"type": p_type}
-                                    # Raccogliamo i valori select/multi_select unici
-                                    if p_type == "select":
-                                        sel = prop_val.get("select") or {}
-                                        if sel.get("name"):
-                                            select_options.setdefault(prop_name, set()).add(sel["name"])
-                                    elif p_type == "multi_select":
-                                        for item in prop_val.get("multi_select", []):
-                                            if item.get("name"):
-                                                select_options.setdefault(prop_name, set()).add(item["name"])
-
-                        # Inietta le opzioni raccolte nel formato atteso da properties_map
-                        for prop_name, opts in select_options.items():
-                            if prop_name in raw_properties:
-                                p_type = raw_properties[prop_name]["type"]
-                                raw_properties[prop_name][p_type] = {
-                                    "options": [{"name": o} for o in sorted(opts)]
-                                }
-
-                        if raw_properties:
-                            logger.info("Schema DB '%s' inferito da query (%d prop, %d select)",
-                                        db_key, len(raw_properties), len(select_options))
-                        else:
-                            logger.warning("DB '%s': view vuota, impossibile inferire schema", db_key)
-                    except Exception as infer_err:
-                        logger.warning("Impossibile inferire schema DB '%s' da query: %s", db_key, infer_err)
+                    logger.warning(
+                        "Schema DB '%s' non disponibile: properties vuote e sorgente non accessibile. "
+                        "Il form userà gli schemi di default.",
+                        db_key,
+                    )
                 
                 # 1. Estrarre i tipi e metadati (es. opzioni select)
                 properties_map = {}
@@ -293,6 +480,10 @@ class NotionFinanceClient:
                         elif db_key == "subscriptions_db_id":
                             if "type" in p_name_low or "tipo" in p_name_low or "frequen" in p_name_low:
                                 mapped["sub_type"] = p_name
+                        # Income DB: campo tipo entrata (es. "Income Type", "Tipo entrata", "Tipo")
+                        elif db_key == "income_db_id":
+                            if "income" in p_name_low or "tipo" in p_name_low or "type" in p_name_low:
+                                mapped["income_type"] = p_name
                     elif p_type == "number":
                         # Accounts DB: distinguiamo initial_amount dagli altri numeri
                         if db_key == "accounts_db_id" and ("initial" in p_name_low or "iniziale" in p_name_low):
@@ -371,10 +562,10 @@ class NotionFinanceClient:
         # Inizializziamo il client ufficiale Notion con la chiave specifica di QUESTA istanza
         self._client = Client(auth=self.notion_api_key)
         
-        # Caches (queste sono vuote all'inizio per ogni nuovo utente)
+        # Caches
         self._data_source_cache: dict[str, str] = {}
-        self._category_map: dict[str, dict] = {}
-        self._categories_loaded = False
+        # _category_map rimosso: le categorie vivono in user_categories (DB locale)
+        # e vengono lette tramite store in NotionStorage.
 
     def _resolve_title_property_name(self, db_key: str, db_id: str) -> str:
         """Ritorna il nome della property di tipo title per un database."""
@@ -462,77 +653,48 @@ class NotionFinanceClient:
         return ds_id
 
     # ------------------------------------------------------------------
-    # Pre-caricamento bulk delle categorie
+    # Risoluzione categoria — usata come fallback quando lo store locale non è disponibile
     # ------------------------------------------------------------------
-    def _load_categories(self) -> None:
-        """
-        Carica TUTTO il database Categories in una dict {page_id → nome}.
-        Va in graceful degradation se il DB non è accessibile.
-        """
-        if self._categories_loaded:
-            return
+    def _resolve_category_from_notion(self, page_id: str) -> dict:
+        """Risolve un page_id chiamando direttamente la Notion API (fallback).
 
+        Usato solo quando non è disponibile lo store locale (es. durante il bootstrap).
+        In condizioni normali la risoluzione avviene da user_categories via NotionStorage.
+        """
         db_id = self.categories_db_id
         if not db_id:
-            logger.warning("Categories Database ID non configurato.")
-            self._categories_loaded = True
-            return
-
+            return {"name": "Sconosciuta", "average": 0.0}
         try:
-            ds_id = self._get_data_source_id(db_id)
-            has_more = True
-            cursor = None
-            count = 0
-
-            while has_more:
-                resp = self._query_with_retry(ds_id, {}, cursor)
-                for page in resp.get("results", []):
-                    page_id = page["id"]
-                    props = page.get("properties", {})
-                    # Cerca il campo "title" (nome categoria) e "formula"/"number" (average)
-                    name = "Sconosciuta"
-                    average_val = 0.0
-                    for prop_name, prop in props.items():
-                        if prop.get("type") == "title":
-                            rt = prop.get("title", [])
-                            if rt:
-                                name = rt[0].get("plain_text", "Sconosciuta")
-                        elif prop_name.lower() == "average":
-                            ptype = prop.get("type", "")
-                            if ptype == "formula":
-                                f_val = prop.get("formula", {})
-                                ftype = f_val.get("type", "")
-                                if ftype == "number":
-                                    average_val = float(f_val.get("number") or 0.0)
-                            elif ptype == "number":
-                                average_val = float(prop.get("number") or 0.0)
-                                
-                    self._category_map[page_id] = {"name": name, "average": average_val}
-                    count += 1
-
-                has_more = resp.get("has_more", False)
-                cursor = resp.get("next_cursor")
-
-            logger.info(f"Categorie caricate: {count} entries")
+            page = self._client.pages.retrieve(page_id=page_id)
+            props = page.get("properties", {})
+            name = "Sconosciuta"
+            average_val = 0.0
+            for prop_name, prop in props.items():
+                if prop.get("type") == "title":
+                    rt = prop.get("title", [])
+                    if rt:
+                        name = rt[0].get("plain_text", "Sconosciuta")
+                elif prop_name.lower() == "average":
+                    ptype = prop.get("type", "")
+                    if ptype == "formula":
+                        f_val = prop.get("formula", {})
+                        if f_val.get("type") == "number":
+                            average_val = float(f_val.get("number") or 0.0)
+                    elif ptype == "number":
+                        average_val = float(prop.get("number") or 0.0)
+            return {"name": name, "average": average_val}
         except Exception as e:
-            logger.warning(
-                f"Impossibile caricare il database Categories: {e}\n"
-                "Assicurati di aver condiviso l'integrazione con il database Categories."
-            )
-        finally:
-            self._categories_loaded = True
-
-    def _resolve_category(self, page_id: str) -> dict:
-        """Risolve un page_id in nome e media categoria usando la mappa pre-caricata."""
-        return self._category_map.get(page_id, {"name": "Sconosciuta", "average": 0.0})
+            logger.warning("Impossibile risolvere categoria %s: %s", page_id[:8], e)
+            return {"name": "Sconosciuta", "average": 0.0}
 
     # ------------------------------------------------------------------
     # Parsing spese
     # ------------------------------------------------------------------
-    def _parse_expense_page(self, page: dict) -> Optional[dict]:
-        """
-        Converte una pagina Notion del database Expense in
-        {date, category, name, amount}.
+    def _parse_expense_page(self, page: dict, category_resolver=None) -> Optional[dict]:
+        """Converte una pagina Notion del database Expense in {date, category, name, amount}.
+
+        category_resolver: callable(page_id) → {name, average}
+        Se None, fa una chiamata Notion API per ogni categoria (solo fallback).
         """
         props = page.get("properties", {})
 
@@ -570,7 +732,8 @@ class NotionFinanceClient:
             if relations:
                 cat_page_id = relations[0].get("id", "")
                 if cat_page_id:
-                    cat_info = self._resolve_category(cat_page_id)
+                    resolver = category_resolver or self._resolve_category_from_notion
+                    cat_info = resolver(cat_page_id)
                     category_name = cat_info["name"]
                     category_average = cat_info["average"]
         elif cat_type in ("select", "multi_select"):
@@ -592,6 +755,7 @@ class NotionFinanceClient:
         self,
         start_date: Optional[date] = None,
         end_date: Optional[date] = None,
+        category_resolver=None,
     ) -> list[dict]:
         """
         Recupera tutte le transazioni dal database Expense.
@@ -603,10 +767,7 @@ class NotionFinanceClient:
             f"Estrazione Expense [{start_date or 'inizio'} → {end_date or 'oggi'}]"
         )
 
-        # 1. Pre-carica categorie
-        self._load_categories()
-
-        # 2. Risolvi data_source_id
+        # 1. Risolvi data_source_id
         ds_id = self._get_data_source_id(self.expense_db_id)
 
         # 3. Query paginata
@@ -625,15 +786,12 @@ class NotionFinanceClient:
             logger.info(f"Pagina {page_num}: {len(results)} record")
 
             for page in results:
-                parsed = self._parse_expense_page(page)
+                parsed = self._parse_expense_page(page, category_resolver)
                 if parsed:
                     all_results.append(parsed)
 
         all_results.sort(key=lambda x: x["date"])
-        logger.info(
-            f"Spese estratte: {len(all_results)} transazioni, "
-            f"{len(self._category_map)} categorie disponibili"
-        )
+        logger.info(f"Spese estratte: {len(all_results)} transazioni")
         return all_results
 
     # ------------------------------------------------------------------
@@ -832,7 +990,13 @@ class NotionFinanceClient:
         rich = name_prop.get(ptype, [])
         name = rich[0].get("plain_text", "—") if rich else "—"
 
-        return {"date": tx_date, "name": name, "amount": amount}
+        # --- INCOME TYPE ---
+        income_type_col = self._get_property_name("income_db_id", "income_type", "Income Type")
+        income_type_prop = props.get(income_type_col, {})
+        income_type_val = income_type_prop.get("select") or {}
+        income_type = income_type_val.get("name")
+
+        return {"date": tx_date, "name": name, "amount": amount, "income_type": income_type}
 
     # ------------------------------------------------------------------
     # Fetch Accounts
@@ -1124,20 +1288,63 @@ class NotionFinanceClient:
     # Write: creazione nuova spesa
     # ------------------------------------------------------------------
     def get_category_names(self) -> list[str]:
-        """Restituisce la lista dei nomi delle categorie disponibili (per il prompt LLM)."""
-        self._load_categories()
-        return [info["name"] for info in self._category_map.values()]
+        """Restituisce i nomi delle categorie via Notion API (fallback senza store locale)."""
+        db_id = self.categories_db_id
+        if not db_id:
+            return []
+        try:
+            ds_id = self._get_data_source_id(db_id)
+            names = []
+            has_more = True
+            cursor = None
+            while has_more:
+                resp = self._query_with_retry(ds_id, {}, cursor)
+                for page in resp.get("results", []):
+                    for prop in page.get("properties", {}).values():
+                        if prop.get("type") == "title":
+                            rt = prop.get("title", [])
+                            if rt:
+                                names.append(rt[0].get("plain_text", ""))
+                has_more = resp.get("has_more", False)
+                cursor = resp.get("next_cursor")
+            return [n for n in names if n]
+        except Exception as e:
+            logger.warning("Impossibile caricare nomi categorie da Notion: %s", e)
+            return []
 
-    def _resolve_category_by_name(self, category_name: str) -> Optional[str]:
-        """Risolve un nome di categoria nel page_id corrispondente."""
-        self._load_categories()
-        for page_id, info in self._category_map.items():
-            if info["name"].lower() == category_name.lower():
-                return page_id
-        # Fallback: ricerca parziale
-        for page_id, info in self._category_map.items():
-            if category_name.lower() in info["name"].lower() or info["name"].lower() in category_name.lower():
-                return page_id
+    def _resolve_category_by_name(self, category_name: str, page_id_override: Optional[str] = None) -> Optional[str]:
+        """Risolve un nome categoria in page_id.
+
+        Se page_id_override è fornito (da store locale), lo usa direttamente.
+        Altrimenti fa una fetch live da Notion API (fallback).
+        """
+        if page_id_override:
+            return page_id_override
+        # Fallback: fetch live da Notion API
+        db_id = self.categories_db_id
+        if not db_id:
+            return None
+        try:
+            ds_id = self._get_data_source_id(db_id)
+            has_more = True
+            cursor = None
+            while has_more:
+                resp = self._query_with_retry(ds_id, {}, cursor)
+                for page in resp.get("results", []):
+                    page_id = page["id"]
+                    for prop in page.get("properties", {}).values():
+                        if prop.get("type") == "title":
+                            rt = prop.get("title", [])
+                            if rt:
+                                name = rt[0].get("plain_text", "")
+                                if name.lower() == category_name.lower():
+                                    return page_id
+                                if category_name.lower() in name.lower() or name.lower() in category_name.lower():
+                                    return page_id
+                has_more = resp.get("has_more", False)
+                cursor = resp.get("next_cursor")
+        except Exception as e:
+            logger.warning("Impossibile risolvere categoria '%s' da Notion: %s", category_name, e)
         return None
 
     def create_expense(
@@ -1147,6 +1354,7 @@ class NotionFinanceClient:
         name: str,
         category_name: Optional[str] = None,
         account_id: Optional[str] = None,
+        _category_page_id: Optional[str] = None,
     ) -> dict:
         """
         Crea una nuova page nel database Expense.
@@ -1185,8 +1393,9 @@ class NotionFinanceClient:
         }
 
         # Risolvi la categoria in un page_id per la relation
+        # _category_page_id viene da store locale (NotionStorage); fallback su Notion API
         if category_name:
-            cat_page_id = self._resolve_category_by_name(category_name)
+            cat_page_id = self._resolve_category_by_name(category_name, page_id_override=_category_page_id)
             if cat_page_id:
                 properties[col_category] = {
                     "relation": [{"id": cat_page_id}]
@@ -1235,6 +1444,7 @@ class NotionFinanceClient:
         amount: float,
         name: str,
         account_id: Optional[str] = None,
+        income_type: Optional[str] = None,
     ) -> dict:
         """
         Crea una nuova page nel database Income.
@@ -1244,6 +1454,7 @@ class NotionFinanceClient:
             amount: Importo (positivo)
             name: Descrizione dell'entrata
             account_id: Page ID del conto corrente (opzionale)
+            income_type: Tipo di entrata (es. "Stipendio", "Bonus", "Regalo") — opzionale
 
         Returns:
             dict con i dati della page creata
@@ -1281,6 +1492,13 @@ class NotionFinanceClient:
                 "relation": [{"id": account_id}]
             }
 
+        # Income Type (select)
+        if income_type:
+            col_income_type = self._get_property_name("income_db_id", "income_type", "Income Type")
+            properties[col_income_type] = {
+                "select": {"name": income_type}
+            }
+
         # Risolvi Monthly Balance
         mb_id = self._resolve_monthly_balance(income_date)
         if mb_id:
@@ -1293,7 +1511,7 @@ class NotionFinanceClient:
 
         logger.info(
             f"Creazione introito su Notion: {name} — €{amount:.2f} — "
-            f"{income_date.isoformat()} — conto_id: {account_id or 'nessuno'}"
+            f"{income_date.isoformat()} — tipo: {income_type or 'nessuno'} — conto_id: {account_id or 'nessuno'}"
         )
 
         # Spediamo la entry al db

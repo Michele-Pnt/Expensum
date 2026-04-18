@@ -22,31 +22,39 @@ from config import Config
 
 logger = logging.getLogger("financial_agent.expense_parser")
 
+_INCOME_TYPES = [
+    "Stipendio", "Bonus", "Rimborso", "Regalo", "Cashback",
+    "Dividendi", "Affitto", "Interessi", "Mance", "Ripetizioni", "Paghetta",
+]
+
 _SYSTEM_PROMPT = """Sei un assistente finanziario. Il tuo compito è estrarre informazioni finanziarie da messaggi scritti in modo informale in italiano. Devi capire dal contesto se si tratta di un'uscita (spesa) o di un'entrata (stipendio, regalo, rimborso, bonifico ricevuto).
 
 REGOLE TASSATIVE:
 1. Rispondi SOLO con un oggetto JSON valido, senza altro testo.
-2. Il JSON deve avere esattamente questi 5 campi:
+2. Il JSON deve avere esattamente questi 6 campi:
    - "type": stringa. Deve essere ASSOLUTAMENTE "expense" (se è una spesa/uscita) oppure "income" (se è un introito/entrata).
    - "amount": numero (float). DEVI interpretare anche i numeri a parole. Esempi: "150 mila euro" -> 150000.0, "cento euro" -> 100.0, "15" -> 15.0. Se non specificato, metti null.
-   - "category": stringa. RIGOROSAMENTE UNA SOLA voce dalla lista fornita di Categorie. Se `type` è "income", metti "Introito" o null, a meno che non ci sia una categoria palese.
+   - "category": stringa. RIGOROSAMENTE UNA SOLA voce dalla lista fornita di Categorie. Se `type` è "income", metti null.
+   - "income_type": stringa. SOLO se `type` è "income": scegli OBBLIGATORIAMENTE una voce tra [Stipendio, Bonus, Rimborso, Regalo, Cashback, Dividendi, Affitto, Interessi, Mance, Ripetizioni, Paghetta]. Se `type` è "expense", metti null.
    - "name": stringa, breve descrizione (es. "Pizza amici", "Stipendio", "Busta Nonna"). Max 3 parole.
    - "date": stringa in formato "YYYY-MM-DD". Se non specificata, usa la data di oggi fornita.
 3. Se il messaggio NON sembra una transazione finanziaria, rispondi con: {"error": "not_expense"}
 4. NON inventare importi.
 
 ESEMPI SPESE:
-- "ieri pizza 25€" → {"type": "expense", "amount": 25.0, "category": "Ristoranti", "name": "Pizza", "date": "2026-03-20"}
-- "netflix" → {"type": "expense", "amount": null, "category": "Abbonamenti", "name": "Netflix", "date": "2026-03-21"}
-- "ho speso 67 euro al supermercato" → {"type": "expense", "amount": 67.0, "category": "Supermercato", "name": "Spesa supermercato", "date": "2026-03-21"}
+- "ieri pizza 25€" → {"type": "expense", "amount": 25.0, "category": "Ristoranti", "income_type": null, "name": "Pizza", "date": "2026-03-20"}
+- "netflix" → {"type": "expense", "amount": null, "category": "Abbonamenti", "income_type": null, "name": "Netflix", "date": "2026-03-21"}
+- "ho speso 67 euro al supermercato" → {"type": "expense", "amount": 67.0, "category": "Supermercato", "income_type": null, "name": "Spesa supermercato", "date": "2026-03-21"}
 
 ESEMPI ENTRATE:
-- "ho ricevuto lo stipendio 1500" → {"type": "income", "amount": 1500.0, "category": null, "name": "Stipendio", "date": "2026-03-22"}
-- "busta paga marzo 1800 euro" → {"type": "income", "amount": 1800.0, "category": null, "name": "Busta paga marzo", "date": "2026-03-22"}
-- "rimborso spese 120€" → {"type": "income", "amount": 120.0, "category": null, "name": "Rimborso spese", "date": "2026-03-22"}
-- "mi hanno pagato 500" → {"type": "income", "amount": 500.0, "category": null, "name": "Pagamento ricevuto", "date": "2026-03-22"}
-- "bonifico ricevuto 300 euro" → {"type": "income", "amount": 300.0, "category": null, "name": "Bonifico ricevuto", "date": "2026-03-22"}
-- "regalo compleanno 50 euro" → {"type": "income", "amount": 50.0, "category": null, "name": "Regalo compleanno", "date": "2026-03-22"}
+- "ho ricevuto lo stipendio 1500" → {"type": "income", "amount": 1500.0, "category": null, "income_type": "Stipendio", "name": "Stipendio", "date": "2026-03-22"}
+- "busta paga marzo 1800 euro" → {"type": "income", "amount": 1800.0, "category": null, "income_type": "Stipendio", "name": "Busta paga marzo", "date": "2026-03-22"}
+- "rimborso spese 120€" → {"type": "income", "amount": 120.0, "category": null, "income_type": "Rimborso", "name": "Rimborso spese", "date": "2026-03-22"}
+- "mi hanno pagato 500" → {"type": "income", "amount": 500.0, "category": null, "income_type": "Stipendio", "name": "Pagamento ricevuto", "date": "2026-03-22"}
+- "bonifico ricevuto 300 euro" → {"type": "income", "amount": 300.0, "category": null, "income_type": "Stipendio", "name": "Bonifico ricevuto", "date": "2026-03-22"}
+- "regalo compleanno 50 euro" → {"type": "income", "amount": 50.0, "category": null, "income_type": "Regalo", "name": "Regalo compleanno", "date": "2026-03-22"}
+- "cashback paypal 12 euro" → {"type": "income", "amount": 12.0, "category": null, "income_type": "Cashback", "name": "Cashback PayPal", "date": "2026-03-22"}
+- "dividendi azionari 200 euro" → {"type": "income", "amount": 200.0, "category": null, "income_type": "Dividendi", "name": "Dividendi azionari", "date": "2026-03-22"}
 """
 
 
@@ -252,10 +260,27 @@ class ExpenseParser:
         _type = parsed.get("type", "expense")
         name = parsed.get("name") or ("Entrata" if _type == "income" else "Spesa")
 
+        # Income type — valido solo per entrate, validato contro la lista ufficiale
+        income_type: str | None = None
+        if _type == "income":
+            raw_income_type = parsed.get("income_type")
+            if raw_income_type:
+                raw_lower = raw_income_type.strip().lower()
+                income_type = next(
+                    (t for t in _INCOME_TYPES if t.lower() == raw_lower),
+                    None,
+                )
+                if income_type is None:
+                    # Fuzzy match come fallback
+                    matches = difflib.get_close_matches(raw_lower, [t.lower() for t in _INCOME_TYPES], n=1, cutoff=0.6)
+                    if matches:
+                        income_type = next(t for t in _INCOME_TYPES if t.lower() == matches[0])
+
         return {
-            "type": parsed.get("type", "expense"), # per indentificare spesa o entrata 
+            "type": _type,  # per identificare spesa o entrata
             "date": expense_date,
             "amount": amount,
             "category": category,
+            "income_type": income_type,
             "name": name.strip(),
         }

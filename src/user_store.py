@@ -7,6 +7,7 @@ import logging
 from datetime import datetime, date
 import secrets
 import string
+from typing import Optional
 from sqlalchemy import Column, String, Boolean, DateTime, Integer, Date, ForeignKey, create_engine, text
 from sqlalchemy.orm import declarative_base, sessionmaker
 
@@ -25,7 +26,6 @@ class User(Base):
     username = Column(String, nullable=True)
     
     # Credenziali Notion — Opzionali nel nuovo sistema OAuth (Fase 2)
-    notion_api_key = Column(String, nullable=True)
     expense_db_id = Column(String, nullable=True)
     income_db_id = Column(String, nullable=True)
     categories_db_id = Column(String, nullable=True)
@@ -37,7 +37,7 @@ class User(Base):
     categories_schema_json = Column(String, nullable=True)
     subscriptions_schema_json = Column(String, nullable=True)
     
-    # OAuth (Fase 2)
+    # OAuth Notion
     notion_access_token = Column(String, nullable=True)
     notion_workspace_id = Column(String, nullable=True)
     
@@ -48,6 +48,9 @@ class User(Base):
     # Metadati per sapere stato di inizializzazione del template
     setup_status = Column(String, default="WAIT_ACCOUNTS")
     setup_completed_at = Column(DateTime, nullable=True)
+
+    # Backend di storage
+    storage_backend = Column(String, default="notion", nullable=False)  
     
 
     def __repr__(self):
@@ -299,6 +302,138 @@ class UserStore:
             
             session.commit()
             logger.info(f"[User {chat_id}] Schema salvato per {db_key}.")
+
+    def get_active_notion_users(self) -> list:
+        """Ritorna tutti gli utenti attivi con storage_backend Notion."""
+        with self.Session() as session:
+            return session.query(User).filter(
+                User.is_active == True,
+                User.storage_backend == "notion",
+                User.setup_status == "DONE",
+            ).all()
+
+    def get_active_postgres_users(self) -> list:
+        """Ritorna tutti gli utenti attivi con storage_backend Postgres."""
+        with self.Session() as session:
+            return session.query(User).filter(
+                User.is_active == True,
+                User.storage_backend == "postgres",
+                User.setup_status == "DONE",
+            ).all()
+
+    # --- METODI USER CATEGORIES ---
+
+    def upsert_user_categories(self, user_id: str, categories: list[dict]) -> None:
+        """Inserisce o aggiorna le categorie di un utente.
+
+        Ogni dict deve avere: name (str), average (float),
+        e opzionalmente notion_page_id (str) e synced_at (datetime).
+        """
+        user_id = str(user_id)
+        now = datetime.utcnow()
+        with self.Session() as session:
+            for cat in categories:
+                existing = session.execute(
+                    text(
+                        "SELECT id FROM user_categories "
+                        "WHERE user_id = :uid AND name = :name"
+                    ),
+                    {"uid": user_id, "name": cat["name"]},
+                ).fetchone()
+                if existing:
+                    session.execute(
+                        text(
+                            "UPDATE user_categories "
+                            "SET average = :avg, notion_page_id = :pid, synced_at = :ts "
+                            "WHERE user_id = :uid AND name = :name"
+                        ),
+                        {
+                            "avg": cat.get("average", 0.0),
+                            "pid": cat.get("notion_page_id"),
+                            "ts": cat.get("synced_at", now),
+                            "uid": user_id,
+                            "name": cat["name"],
+                        },
+                    )
+                else:
+                    session.execute(
+                        text(
+                            "INSERT INTO user_categories "
+                            "(user_id, name, average, notion_page_id, synced_at) "
+                            "VALUES (:uid, :name, :avg, :pid, :ts)"
+                        ),
+                        {
+                            "uid": user_id,
+                            "name": cat["name"],
+                            "avg": cat.get("average", 0.0),
+                            "pid": cat.get("notion_page_id"),
+                            "ts": cat.get("synced_at", now),
+                        },
+                    )
+            session.commit()
+
+    def get_user_category_names(self, user_id: str) -> list[str]:
+        """Ritorna i nomi delle categorie dell'utente."""
+        user_id = str(user_id)
+        with self.Session() as session:
+            rows = session.execute(
+                text("SELECT name FROM user_categories WHERE user_id = :uid ORDER BY name"),
+                {"uid": user_id},
+            ).fetchall()
+            return [r[0] for r in rows]
+
+    def get_category_by_notion_page_id(self, user_id: str, page_id: str) -> dict:
+        """Ritorna {name, average} per un page_id Notion. Fallback su Sconosciuta."""
+        user_id = str(user_id)
+        with self.Session() as session:
+            row = session.execute(
+                text(
+                    "SELECT name, average FROM user_categories "
+                    "WHERE user_id = :uid AND notion_page_id = :pid"
+                ),
+                {"uid": user_id, "pid": page_id},
+            ).fetchone()
+            if row:
+                return {"name": row[0], "average": row[1]}
+            return {"name": "Sconosciuta", "average": 0.0}
+
+    def get_notion_page_id_for_category(self, user_id: str, name: str) -> Optional[str]:
+        """Ritorna il notion_page_id per un nome categoria. None se non trovato."""
+        user_id = str(user_id)
+        with self.Session() as session:
+            row = session.execute(
+                text(
+                    "SELECT notion_page_id FROM user_categories "
+                    "WHERE user_id = :uid AND LOWER(name) = LOWER(:name)"
+                ),
+                {"uid": user_id, "name": name},
+            ).fetchone()
+            if row:
+                return row[0]
+            # Ricerca parziale
+            row = session.execute(
+                text(
+                    "SELECT notion_page_id FROM user_categories "
+                    "WHERE user_id = :uid AND ("
+                    "LOWER(name) LIKE LOWER(:pattern) OR LOWER(:name) LIKE LOWER('%' || name || '%')"
+                    ")"
+                ),
+                {"uid": user_id, "name": name, "pattern": f"%{name}%"},
+            ).fetchone()
+            return row[0] if row else None
+
+    def update_category_average(self, user_id: str, category_name: str, new_average: float) -> None:
+        """Aggiorna la media storica per una singola categoria."""
+        user_id = str(user_id)
+        with self.Session() as session:
+            session.execute(
+                text(
+                    "UPDATE user_categories SET average = :avg "
+                    "WHERE user_id = :uid AND name = :name"
+                ),
+                {"avg": new_average, "uid": user_id, "name": category_name},
+            )
+            session.commit()
 
     def get_database_schemas(self, chat_id: str) -> dict[str, dict]:
         """Recupera tutti gli schemi salvati per un utente, ritornando una dict {db_key: schema_data}."""

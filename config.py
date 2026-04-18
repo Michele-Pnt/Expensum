@@ -62,8 +62,8 @@ class Config:
     # --- GEMINI ---
     GEMINI_API_KEY: str = os.getenv("GEMINI_API_KEY", "")
     GEMINI_MODEL: str = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
-    GEMINI_FALLBACK_1: str = os.getenv("GEMINI_FALLBACK_1", "gemini-2.5-flash-8b")
-    GEMINI_FALLBACK_2: str = os.getenv("GEMINI_FALLBACK_2", "gemini-1.5-flash")
+    GEMINI_FALLBACK_1: str = os.getenv("GEMINI_FALLBACK_1", "gemini-1.5-flash")
+    GEMINI_FALLBACK_2: str = os.getenv("GEMINI_FALLBACK_2", "gemini-1.5-flash-8b")
 
     # --- OLLAMA ---
     OLLAMA_BASE_URL: str = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
