@@ -115,14 +115,29 @@ def test_discover_databases_strategy_0_skips_linked_views(mock_notion_client):
 # ---------------------------------------------------------------------------
 
 def test_discover_databases_strategy_1_with_template_id(mock_notion_client):
-    """Strategy 1: discovery tramite template_page_id quando Strategy 0 non trova la root."""
+    """Strategy 1: discovery tramite template_page_id.
+
+    Il flusso reale è:
+      1. _list_children("tpl_123") → trova la sub-page "Databases"
+      2. _list_children("dbs_page_id") → trova i 7 child_database
+
+    Il mock deve rispecchiare questa struttura a due livelli.
+    """
     mock_instance = mock_notion_client.return_value
 
-    # Strategy 0: search non trova la root
-    mock_instance.search.return_value = {"results": []}
+    def children_side_effect(block_id, **kwargs):
+        if block_id == "tpl_123":
+            return {
+                "results": [
+                    {"type": "child_page", "id": "dbs_page_id", "child_page": {"title": "Databases"}},
+                ],
+                "has_more": False,
+            }
+        if block_id == "dbs_page_id":
+            return {"results": _SEVEN_DATABASES, "has_more": False}
+        return {"results": [], "has_more": False}
 
-    # Strategy 1: blocks.children.list sul template_page_id restituisce i 7 DB
-    mock_instance.blocks.children.list.return_value = {"results": _SEVEN_DATABASES}
+    mock_instance.blocks.children.list.side_effect = children_side_effect
 
     discovered, candidates = NotionFinanceClient.discover_databases(
         "fake_token", template_page_id="tpl_123"

@@ -13,55 +13,35 @@ def test_oauth_callback_error_no_code(client):
     assert response.status_code == 400
     assert b"Parametri mancanti" in response.data
 
+@patch("src.dashboard.app.threading.Thread")
 @patch("src.dashboard.app.requests.post")
-@patch("src.notion_client.NotionFinanceClient.discover_db_schemas")
-@patch("src.notion_client.NotionFinanceClient.discover_databases")
 @patch("src.user_store.UserStore.get_and_delete_oauth_session")
-@patch("src.user_store.UserStore.add_user")
-def test_oauth_callback_success(mock_add_user, mock_get_sess, mock_discover, mock_discover_schemas, mock_post, client):
+def test_oauth_callback_success(mock_get_sess, mock_post, mock_thread, client):
+    """Verifica che la callback OAuth sincrona risponda 302 e avvii il thread di setup.
+
+    Il discovery (add_user, discover_databases…) avviene in background: questo test
+    verifica solo la parte sincrona — scambio token + redirect + avvio thread.
     """
-    Simula un flusso OAuth completo andato a buon fine.
-    """
-    # 1. Setup Mock
     mock_get_sess.return_value = "chat_123"
-    
-    # Mock della risposta token di Notion
-    mock_post.return_value.status_code = 200
+
+    # Mock scambio token Notion
+    mock_post.return_value.ok = True
     mock_post.return_value.json.return_value = {
         "access_token": "ntn_access_token",
         "workspace_id": "ws_123",
-        "duplicated_template_id": "tpl_456"
+        "duplicated_template_id": "tpl_456",
     }
-    
-    # Mock del discovery DB
-    mock_discover.return_value = (
-        {
-            "expense_db_id": "db_exp",
-            "income_db_id": "db_inc",
-            "categories_db_id": "db_cat",
-            "monthly_balance_db_id": "db_mb",
-            "accounts_db_id": "db_acc",
-            "subscriptions_db_id": "db_sub",
-            "pay_transfer_db_id": "db_pay"
-        },
-        ["Expenses", "Income"]
-    )
-    mock_discover_schemas.return_value = {
-        "accounts_db_id": {"title_property": "Name", "properties": {"Name": "title"}},
-        "categories_db_id": {"title_property": "Name", "properties": {"Name": "title"}},
-        "subscriptions_db_id": {"title_property": "Name", "properties": {"Name": "title"}},
-    }
-    
-    # 2. Eseguiamo la chiamata alla callback con lo state e il code
+
+    # Mock del thread: evita che parta davvero
+    mock_thread_instance = MagicMock()
+    mock_thread.return_value = mock_thread_instance
+
     response = client.get("/auth/notion/callback?code=notion_code&state=RT-magic_token")
-    
-    # 3. Verifiche
-    assert response.status_code == 200
-    assert b"Traky \xc3\xa8 Configurato" in response.data or b"Configurato" in response.data
-    
-    # Verifichiamo che i dati siano stati salvati nel DB mockato
-    assert mock_add_user.called
-    args, kwargs = mock_add_user.call_args
-    assert kwargs["chat_id"] == "chat_123"
-    assert kwargs["notion_access_token"] == "ntn_access_token"
-    assert kwargs["expense_db_id"] == "db_exp"
+
+    # La route risponde sempre con 302 → redirect verso t.me (setup in background)
+    assert response.status_code == 302
+    assert "t.me" in response.headers["Location"]
+
+    # Verifica che il thread background sia stato avviato
+    mock_thread.assert_called_once()
+    mock_thread_instance.start.assert_called_once()

@@ -6,14 +6,20 @@
 
 ## 🔥 In corso
 
-- [ ] **Testing nuovo sistema categorie + fix bug aperti** — testare end-to-end il nuovo sistema `user_categories` / `system_categories`, verificare `income_type`, risolvere i bug aperti elencati sotto. Domande architetturali da chiarire prima di procedere:
-  - Perché `system_categories` non ha FK agli utenti?
-  - Come si tracciano le spese per categoria per utente?
-  - Ha senso avvisare l'utente se prova a registrare una spesa durante l'aggiornamento notturno delle categorie (capacità ridotte temporaneamente)?
+- [ ] **Test abbonamenti e account nella MiniApp** — verificare flusso completo abbonamenti e account (aggiunta, modifica, eliminazione) tramite la MiniApp, sia con backend Notion che Postgres
+- [ ] **Test accesso e MiniApp con backend Postgres** — verificare che login, navigazione e operazioni CRUD funzionino correttamente per utenti con `storage_backend=postgres`
+- [ ] **Copertura test all'80%** — aggiungere test per `rate_limiter.py`, `report_builder.py`, `expense_parser.py` e metodi mancanti di `postgres_storage.py` / `notion_storage.py`
 
 ---
 
 ## ✅ Completati
+
+### 2026-04-20
+- [x] Creato `tests/test_category_sync_e2e.py` — 29 test E2E per `user_categories` / `system_categories`: seed DB, Postgres path, Notion path, router, upsert idempotenza, lookup helpers
+- [x] Corretti 5 test pre-esistenti falliti: `test_prompt_text_contains_total` (variabile `text` mancante), `test_very_long_history` (HISTORY_MONTHS=6 non 12), `test_negative_amounts_handling` (abs() normalizza negativi), `test_discover_databases_strategy_1_with_template_id` (mock a due livelli), `test_oauth_callback_success` (route risponde 302, non 200)
+- [x] MiniApp trasformata da strumento di setup iniziale a **strumento permanente di gestione struttura utente** (categorie, conti, abbonamenti modificabili per tutta la durata dell'utilizzo)
+- [x] Avviato restyling frontend con **Material UI**
+- [x] Suite test: 91/91 pass
 
 ### 2026-04-18
 - [x] Refactoring sistema categorie — rimossa tabella `categories`, aggiunte `system_categories` (32 categorie default condivise) e `user_categories` (per-utente, con `notion_page_id`, `average`, `synced_at`)
@@ -42,10 +48,11 @@
 
 ## 🐛 Bug aperti
 
-- [ ] **test_discover_databases_strategy_1_with_template_id** — test di discovery Notion pre-esistente, non correlato alle modifiche recenti; da investigare e risolvere
 - [ ] **Session management Postgres** — in `_get_storage()` la `Session` per utenti Postgres non viene mai chiusa esplicitamente; da implementare "Strada B" (session.close() dopo ogni operazione in `PostgresStorage`)
 - [ ] **`cat_info` unused variable** — warning a `bot.py:482`, da rimuovere
 - [ ] **Income Type non testato** — la nuova colonna è implementata ma non è stato verificato il flusso end-to-end su Notion e PostgreSQL
+- [ ] **test_aws.py e test_discovery.py** — test strutturalmente broken (import mancante `get_aws_monthly_cost`, e `test_discovery` fa chiamate reali alla Notion API); da fixare o rimuovere
+- [ ] **Copertura sotto l'80%** — moduli non testati: `rate_limiter.py` (0%), `report_builder.py` (0%), `telegram_client.py` (0%), `gemini_client.py` (0%), `ollama_client.py` (0%)
 
 ---
 
