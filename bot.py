@@ -211,7 +211,7 @@ async def cmd_setup(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     
     # URL della Mini App (usiamo lo stesso host dell'OAuth)
     # NOTA: In produzione andrà configurata l'URL pubblica
-    setup_url = f"https://bondless-charlena-bicolor.ngrok-free.dev/setup?reg_token={reg_token}"
+    setup_url = f"{Config.WEBAPP_BASE_URL}/setup?reg_token={reg_token}"
     
     keyboard = InlineKeyboardMarkup([
         [InlineKeyboardButton("🛠️ Apri Setup Form", web_app=WebAppInfo(url=setup_url))]
@@ -277,7 +277,7 @@ async def cmd_registra(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     # chi clicca per primo lo consuma e l'altro bottone resta inattivo.
     reg_token = _user_store.create_oauth_session(chat_id)
 
-    base_url = "https://bondless-charlena-bicolor.ngrok-free.dev"
+    base_url = Config.WEBAPP_BASE_URL
     notion_url = f"{base_url}/auth/notion?reg_token={reg_token}"
     postgres_url = f"{base_url}/auth/postgres?reg_token={reg_token}"
 

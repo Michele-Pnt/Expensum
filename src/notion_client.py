@@ -1584,7 +1584,8 @@ class NotionFinanceClient:
                             sub_type: str = None,
                             amount: float = None,
                             category_id: str = None,
-                            account_id: str = None) -> dict:
+                            account_id: str = None,
+                            last_billed: str = None) -> dict:
         """Crea un abbonamento nel database Subscriptions usando la title property corretta."""
         if not self.subscriptions_db_id:
             raise ValueError("Subscriptions database non configurato")
@@ -1607,6 +1608,9 @@ class NotionFinanceClient:
         if account_id:
             col = self._get_property_name("subscriptions_db_id", "rel_account", Config.NOTION_SUB_COL_ACCOUNT)
             properties[col] = {"relation": [{"id": account_id}]}
+        if last_billed:
+            col = self._get_property_name("subscriptions_db_id", "last_billed", Config.NOTION_SUB_COL_LAST_BILLED)
+            properties[col] = {"date": {"start": last_billed}}
         return self._client.pages.create(
             parent={"database_id": self.subscriptions_db_id},
             properties=properties,

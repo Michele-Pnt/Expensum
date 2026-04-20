@@ -149,8 +149,116 @@ class PostgresStorage(FinancialStorage):
         self._session.commit()
         return {"id": category.id, "name": category.name}
 
-    def create_subscription(self, name: str) -> dict:
-        subscription = Subscription(user_id=self._user_id, name=name)
+    def get_categories(self) -> list[dict]:
+        """Restituisce id e nome di tutte le categorie dell'utente."""
+        rows = self._session.query(UserCategory).filter(
+            UserCategory.user_id == self._user_id
+        ).all()
+        return [{"id": r.id, "name": r.name} for r in rows]
+
+    def fetch_subscriptions(self) -> list[dict]:
+        """Restituisce tutti gli abbonamenti dell'utente."""
+        rows = self._session.query(Subscription).filter(
+            Subscription.user_id == self._user_id
+        ).all()
+        return [
+            {
+                "id": r.id,
+                "name": r.name,
+                "last_billed": r.last_billed.isoformat() if r.last_billed else None,
+            }
+            for r in rows
+        ]
+
+    def create_subscription(self, name: str, last_billed: str | None = None) -> dict:
+        parsed_date = None
+        if last_billed:
+            from datetime import datetime as dt
+            parsed_date = dt.strptime(last_billed, "%Y-%m-%d").date()
+        subscription = Subscription(user_id=self._user_id, name=name, last_billed=parsed_date)
         self._session.add(subscription)
         self._session.commit()
-        return {"id": subscription.id, "name": subscription.name}
+        return {
+            "id": subscription.id,
+            "name": subscription.name,
+            "last_billed": subscription.last_billed.isoformat() if subscription.last_billed else None,
+        }
+
+    def delete_category(self, cat_id: int) -> bool:
+        row = self._session.query(UserCategory).filter(
+            UserCategory.id == cat_id,
+            UserCategory.user_id == self._user_id,
+        ).first()
+        if not row:
+            return False
+        self._session.delete(row)
+        self._session.commit()
+        return True
+
+    def delete_account(self, account_id: int) -> bool:
+        row = self._session.query(Account).filter(
+            Account.id == account_id,
+            Account.user_id == self._user_id,
+        ).first()
+        if not row:
+            return False
+        self._session.delete(row)
+        self._session.commit()
+        return True
+
+    def delete_subscription(self, sub_id: int) -> bool:
+        row = self._session.query(Subscription).filter(
+            Subscription.id == sub_id,
+            Subscription.user_id == self._user_id,
+        ).first()
+        if not row:
+            return False
+        self._session.delete(row)
+        self._session.commit()
+        return True
+
+    def update_account(self, account_id: int, name: str | None = None,
+                       balance: float | None = None) -> dict | None:
+        row = self._session.query(Account).filter(
+            Account.id == account_id,
+            Account.user_id == self._user_id,
+        ).first()
+        if not row:
+            return None
+        if name is not None:
+            row.name = name
+        if balance is not None:
+            row.balance = balance
+        self._session.commit()
+        return {"id": row.id, "name": row.name, "balance": row.balance}
+
+    def update_category(self, cat_id: int, name: str) -> dict | None:
+        row = self._session.query(UserCategory).filter(
+            UserCategory.id == cat_id,
+            UserCategory.user_id == self._user_id,
+        ).first()
+        if not row:
+            return None
+        row.name = name
+        self._session.commit()
+        return {"id": row.id, "name": row.name}
+
+    def update_subscription(self, sub_id: int, name: str | None = None,
+                            last_billed: str | None = None) -> dict | None:
+        row = self._session.query(Subscription).filter(
+            Subscription.id == sub_id,
+            Subscription.user_id == self._user_id,
+        ).first()
+        if not row:
+            return None
+        if name is not None:
+            row.name = name
+        if last_billed is not None:
+            from datetime import datetime as dt
+            row.last_billed = dt.strptime(last_billed, "%Y-%m-%d").date()
+        self._session.commit()
+        return {
+            "id": row.id,
+            "name": row.name,
+            "last_billed": row.last_billed.isoformat() if row.last_billed else None,
+        }

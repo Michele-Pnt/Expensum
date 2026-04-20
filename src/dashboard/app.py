@@ -7,10 +7,7 @@ from functools import wraps
 from flask import Flask, render_template, request, redirect, url_for, session, flash, jsonify
 import psutil
 from datetime import datetime, timedelta
-import boto3
-import uuid
 import requests
-from botocore.exceptions import ClientError
 from notion_client import Client as NotionClient
 
 ROOT_DIR = Path(__file__).resolve().parents[2]
@@ -21,7 +18,6 @@ from src.dashboard.aws_monitor import AWSCostMonitor
 
 from config import Config
 from src.user_store import UserStore, User, DailyUsage, Feedback
-import sqlalchemy as sa
 from src.notion_client import NotionFinanceClient
 from src.storage.notion_storage import NotionStorage
 from src.storage.postgres_storage import PostgresStorage
@@ -31,6 +27,11 @@ from src.category_sync import refresh_category_averages
 # Inizializza l'app Flask
 app = Flask(__name__)
 app.secret_key = os.urandom(24)  # Per le sessioni crittografate
+
+@app.after_request
+def skip_ngrok_interstitial(response):
+    response.headers["ngrok-skip-browser-warning"] = "true"
+    return response
 
 # Inizializza la connessione allo storage SQLite
 store = UserStore(db_url=Config.DATABASE_URL)
@@ -616,9 +617,8 @@ def setup_form():
         if user.storage_backend == "postgres":
             pg_storage = PostgresStorage(session=s, user_id=user.chat_id)
             existing_accounts = pg_storage.fetch_accounts()
-            existing_categories = [
-                {"id": None, "name": n} for n in pg_storage.get_category_names()
-            ]
+            existing_categories = pg_storage.get_categories()
+            existing_subscriptions = pg_storage.fetch_subscriptions()
             return render_template(
                 "setup_miniapp.html",
                 backend="postgres",
@@ -627,6 +627,7 @@ def setup_form():
                 user_name=user.username or "Utente",
                 available_accounts=existing_accounts,
                 available_categories=existing_categories,
+                available_subscriptions=existing_subscriptions,
                 # I col_* servono solo al ramo Notion: passiamo stringhe vuote come placeholder
                 col_accounts_initial_amount="",
                 col_accounts_type="",
@@ -706,10 +707,11 @@ def setup_form():
         except Exception as e:
             print(f"[Setup] fetch_accounts fallito: {e}")
         try:
-            nc._load_categories()
+            from src.storage.models import UserCategory
+            cat_rows = s.query(UserCategory).filter_by(user_id=user.chat_id).all()
             available_categories = [
-                {"id": pid, "name": d["name"]}
-                for pid, d in nc._category_map.items()
+                {"id": r.notion_page_id or str(r.id), "name": r.name}
+                for r in cat_rows
             ]
         except Exception as e:
             print(f"[Setup] fetch_categories fallito: {e}")
@@ -721,6 +723,7 @@ def setup_form():
                                user_name=user.username or "Utente",
                                available_accounts=available_accounts,
                                available_categories=available_categories,
+                               available_subscriptions=[],
                                col_accounts_initial_amount=Config.NOTION_ACCOUNTS_COL_INITIAL_AMOUNT,
                                col_accounts_type=Config.NOTION_ACCOUNTS_COL_TYPE,
                                col_sub_type=Config.NOTION_SUB_COL_TYPE,
@@ -754,12 +757,22 @@ def api_setup_complete():
             errors: list[str] = []
             created_count = 0
 
-            # 1. Categorie (prima delle subscriptions che possono referenziarle)
+            # 1. Categorie — deduplicazione contro esistenti e contro il payload stesso
+            existing_cat_names = {n.lower() for n in pg_storage.get_category_names()}
+            seen_cats: set[str] = set()
             for item in items_data.get("categories", []):
                 name = (item.get("name") or "").strip()
                 if not name:
                     errors.append("Nome vuoto in categories, elemento saltato")
                     continue
+                key = name.lower()
+                if key in existing_cat_names:
+                    errors.append(f"Categoria '{name}' già esistente, saltata")
+                    continue
+                if key in seen_cats:
+                    errors.append(f"Categoria '{name}' duplicata nel payload, saltata")
+                    continue
+                seen_cats.add(key)
                 try:
                     pg_storage.create_category(name)
                     created_count += 1
@@ -779,38 +792,39 @@ def api_setup_complete():
                 except Exception as e:
                     errors.append(f"Errore account '{name}': {e}")
 
-            # 3. Abbonamenti (la firma astratta espone solo 'name': vedi BACKLOG per evolutiva)
+            # 3. Abbonamenti
             for item in items_data.get("subscriptions", []):
                 name = (item.get("name") or "").strip()
                 if not name:
                     errors.append("Nome vuoto in subscriptions, elemento saltato")
                     continue
                 try:
-                    pg_storage.create_subscription(name)
+                    pg_storage.create_subscription(
+                        name,
+                        last_billed=item.get("last_billed") or None,
+                    )
                     created_count += 1
                 except Exception as e:
                     errors.append(f"Errore abbonamento '{name}': {e}")
 
             if created_count > 0 or not errors:
-                store.mark_setup_completed(user.chat_id)
-                s.delete(sess)
-                s.commit()
+                if not user.setup_completed:
+                    store.mark_setup_completed(user.chat_id)
+                    telegram_url = f"https://api.telegram.org/bot{Config.TELEGRAM_BOT_TOKEN}/sendMessage"
+                    try:
+                        requests.post(telegram_url, json={
+                            "chat_id": user.chat_id,
+                            "text": (
+                                f"✅ <b>Setup completato!</b>\n"
+                                f"Ho creato {created_count} elementi nel database interno.\n\n"
+                                f"Ora puoi iniziare a scrivermi le tue spese!"
+                            ),
+                            "parse_mode": "HTML"
+                        })
+                    except Exception:
+                        pass
 
-                telegram_url = f"https://api.telegram.org/bot{Config.TELEGRAM_BOT_TOKEN}/sendMessage"
-                try:
-                    requests.post(telegram_url, json={
-                        "chat_id": user.chat_id,
-                        "text": (
-                            f"✅ <b>Setup completato con successo!</b>\n"
-                            f"Ho creato {created_count} elementi nel database interno.\n\n"
-                            f"Ora puoi iniziare a scrivermi le tue spese!"
-                        ),
-                        "parse_mode": "HTML"
-                    })
-                except Exception:
-                    pass
-
-                return jsonify({"status": "ok", "created": created_count})
+                return jsonify({"status": "ok", "created": created_count, "details": errors})
 
             return jsonify({"error": "Setup failed", "details": errors}), 500
 
@@ -875,6 +889,15 @@ def api_setup_complete():
                 return val['__relation_ref']
             return None
 
+        def _extract_date(prop_data: dict, prop_name: str) -> str | None:
+            """Estrae la data ISO (YYYY-MM-DD) da un campo date Notion."""
+            val = prop_data.get(prop_name, {})
+            if isinstance(val, dict) and 'date' in val:
+                date_obj = val['date']
+                if isinstance(date_obj, dict):
+                    return date_obj.get('start')
+            return None
+
         def _resolve_ref(ref: str, name_to_id: dict):
             """Risolve un riferimento: se inizia con '__name__:' cerca nella mappa, altrimenti è già un UUID."""
             if not ref:
@@ -885,6 +908,7 @@ def api_setup_complete():
 
         # --- Fase 1: Categorie (devono esistere prima delle subscriptions) ---
         cat_map = {}  # nome → page_id
+        seen_cat_names: set[str] = set()
         for prop_data in items_data.get("categories_db_id", []):
             name = ''
             try:
@@ -892,6 +916,10 @@ def api_setup_complete():
                 if not name:
                     errors.append("Nome vuoto in categories_db_id, elemento saltato")
                     continue
+                if name.lower() in seen_cat_names:
+                    errors.append(f"Categoria '{name}' duplicata nel payload, saltata")
+                    continue
+                seen_cat_names.add(name.lower())
                 result = notion.create_category(name)
                 cat_map[name] = result["id"]
                 created_count += 1
@@ -939,37 +967,36 @@ def api_setup_complete():
                     account_id=_resolve_ref(
                         _extract_relation_ref(prop_data, Config.NOTION_SUB_COL_ACCOUNT), acc_map
                     ),
+                    last_billed=_extract_date(prop_data, Config.NOTION_SUB_COL_LAST_BILLED),
                 )
                 created_count += 1
             except Exception as e:
                 errors.append(f"Errore abbonamento '{name}': {e}")
         
         if created_count > 0 or not errors:
-            # Segnamo il setup come completato nel DB
-            store.mark_setup_completed(user.chat_id)
-            # Pulizia token
-            s.delete(sess)
-            s.commit()
-            
-            # Notifica via Telegram
-            telegram_url = f"https://api.telegram.org/bot{Config.TELEGRAM_BOT_TOKEN}/sendMessage"
-            requests.post(telegram_url, json={
-                "chat_id": user.chat_id,
-                "text": f"✅ <b>Setup completato con successo!</b>\nHo creato {created_count} elementi nel tuo Notion.\n\nOra puoi iniziare a scrivermi le tue spese!",
-                "parse_mode": "HTML"
-            })
-            
-            return jsonify({"status": "ok", "created": created_count})
-        
+            if not user.setup_completed:
+                store.mark_setup_completed(user.chat_id)
+                telegram_url = f"https://api.telegram.org/bot{Config.TELEGRAM_BOT_TOKEN}/sendMessage"
+                try:
+                    requests.post(telegram_url, json={
+                        "chat_id": user.chat_id,
+                        "text": (
+                            f"✅ <b>Setup completato!</b>\n"
+                            f"Ho creato {created_count} elementi nel tuo Notion.\n\n"
+                            f"Ora puoi iniziare a scrivermi le tue spese!"
+                        ),
+                        "parse_mode": "HTML"
+                    })
+                except Exception:
+                    pass
+
+            return jsonify({"status": "ok", "created": created_count, "details": errors})
+
         return jsonify({"error": "Setup failed", "details": errors}), 500
 
 @app.route("/api/delete-notion-item", methods=["DELETE"])
 def api_delete_notion_item():
-    """Archivia (soft-delete) un elemento Notion dato il suo page_id.
-
-    Body JSON atteso:
-        { "reg_token": "...", "page_id": "<notion-page-uuid>" }
-    """
+    """Legacy: archivia un elemento Notion. Mantenuto per backward compat."""
     payload = request.json or {}
     reg_token = payload.get("reg_token")
     page_id = payload.get("page_id")
@@ -995,5 +1022,234 @@ def api_delete_notion_item():
             return jsonify({"error": str(e)}), 500
 
 
+# ---------------------------------------------------------------------------
+# CRUD endpoints per la mini app di gestione
+# ---------------------------------------------------------------------------
+
+def _resolve_manage_session(reg_token: str):
+    """Risolve reg_token → (user, session_db) oppure None."""
+    from src.user_store import OAuthSession, User
+    with store.Session() as s:
+        sess = s.query(OAuthSession).filter_by(state=reg_token).first()
+        if not sess:
+            return None, None, None
+        user = s.query(User).filter_by(chat_id=sess.chat_id).first()
+        return user, sess, s
+
+
+@app.route("/api/manage/add", methods=["POST"])
+def api_manage_add():
+    """Aggiunge una singola entità (account / category / subscription).
+
+    Body JSON:
+        {
+          "reg_token": "...",
+          "entity_type": "account" | "category" | "subscription",
+          "data": { "name": "...", "initial_balance": 0.0, "last_billed": "YYYY-MM-DD" }
+        }
+    """
+    payload = request.json or {}
+    reg_token = payload.get("reg_token")
+    entity_type = payload.get("entity_type")
+    data = payload.get("data") or {}
+
+    if not reg_token or not entity_type:
+        return jsonify({"error": "Missing reg_token or entity_type"}), 400
+
+    from src.user_store import OAuthSession, User
+    with store.Session() as s:
+        sess = s.query(OAuthSession).filter_by(state=reg_token).first()
+        if not sess:
+            return jsonify({"error": "Invalid session"}), 403
+        user = s.query(User).filter_by(chat_id=sess.chat_id).first()
+        if not user:
+            return jsonify({"error": "User not found"}), 404
+
+        name = (data.get("name") or "").strip()
+        if not name:
+            return jsonify({"error": "Il campo 'name' è obbligatorio"}), 400
+
+        try:
+            if user.storage_backend == "postgres":
+                pg = PostgresStorage(session=s, user_id=user.chat_id)
+                if entity_type == "category":
+                    existing = {n.lower() for n in pg.get_category_names()}
+                    if name.lower() in existing:
+                        return jsonify({"error": f"Categoria '{name}' già esistente"}), 409
+                    result = pg.create_category(name)
+                elif entity_type == "account":
+                    result = pg.create_account(
+                        name,
+                        initial_balance=float(data.get("initial_balance") or 0.0),
+                    )
+                elif entity_type == "subscription":
+                    result = pg.create_subscription(
+                        name,
+                        last_billed=data.get("last_billed") or None,
+                    )
+                else:
+                    return jsonify({"error": f"entity_type '{entity_type}' non supportato"}), 400
+            else:
+                # Notion backend
+                notion = NotionFinanceClient(
+                    api_key=user.notion_access_token,
+                    accounts_db_id=user.accounts_db_id,
+                    categories_db_id=user.categories_db_id,
+                    subscriptions_db_id=user.subscriptions_db_id,
+                )
+                if entity_type == "category":
+                    raw = notion.create_category(name)
+                    result = {"id": raw["id"], "name": name}
+                elif entity_type == "account":
+                    raw = notion.create_account(
+                        name,
+                        initial_amount=float(data.get("initial_balance") or 0.0),
+                        account_type=data.get("account_type"),
+                    )
+                    result = {"id": raw["id"], "name": name, "balance": data.get("initial_balance") or 0.0}
+                elif entity_type == "subscription":
+                    raw = notion.create_subscription(
+                        name,
+                        sub_type=data.get("sub_type"),
+                        amount=float(data["amount"]) if data.get("amount") else None,
+                        last_billed=data.get("last_billed") or None,
+                        category_id=data.get("category_id") or None,
+                        account_id=data.get("account_id") or None,
+                    )
+                    result = {"id": raw["id"], "name": name, "last_billed": data.get("last_billed")}
+                else:
+                    return jsonify({"error": f"entity_type '{entity_type}' non supportato"}), 400
+
+            return jsonify({"status": "ok", "entity": result})
+        except Exception as e:
+            return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/manage/remove", methods=["DELETE"])
+def api_manage_remove():
+    """Rimuove una singola entità per entrambi i backend.
+
+    Body JSON:
+        {
+          "reg_token": "...",
+          "entity_type": "account" | "category" | "subscription",
+          "entity_id": <int per Postgres, page_id UUID per Notion>
+        }
+    """
+    payload = request.json or {}
+    reg_token = payload.get("reg_token")
+    entity_type = payload.get("entity_type")
+    entity_id = payload.get("entity_id")
+
+    if not reg_token or not entity_type or entity_id is None:
+        return jsonify({"error": "Missing reg_token, entity_type o entity_id"}), 400
+
+    from src.user_store import OAuthSession, User
+    with store.Session() as s:
+        sess = s.query(OAuthSession).filter_by(state=reg_token).first()
+        if not sess:
+            return jsonify({"error": "Invalid session"}), 403
+        user = s.query(User).filter_by(chat_id=sess.chat_id).first()
+        if not user:
+            return jsonify({"error": "User not found"}), 404
+
+        try:
+            if user.storage_backend == "postgres":
+                pg = PostgresStorage(session=s, user_id=user.chat_id)
+                if entity_type == "category":
+                    ok = pg.delete_category(int(entity_id))
+                elif entity_type == "account":
+                    ok = pg.delete_account(int(entity_id))
+                elif entity_type == "subscription":
+                    ok = pg.delete_subscription(int(entity_id))
+                else:
+                    return jsonify({"error": f"entity_type '{entity_type}' non supportato"}), 400
+                if not ok:
+                    return jsonify({"error": "Elemento non trovato"}), 404
+            else:
+                notion_raw = NotionClient(auth=user.notion_access_token)
+                notion_raw.pages.update(page_id=str(entity_id), archived=True)
+
+            return jsonify({"status": "ok"})
+        except Exception as e:
+            return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/manage/update", methods=["PUT"])
+def api_manage_update():
+    """Modifica un'entità esistente.
+
+    Body JSON:
+        {
+          "reg_token": "...",
+          "entity_type": "account" | "category" | "subscription",
+          "entity_id": <int per Postgres, page_id UUID per Notion>,
+          "data": { campi da aggiornare }
+        }
+    """
+    payload = request.json or {}
+    reg_token = payload.get("reg_token")
+    entity_type = payload.get("entity_type")
+    entity_id = payload.get("entity_id")
+    data = payload.get("data") or {}
+
+    if not reg_token or not entity_type or entity_id is None:
+        return jsonify({"error": "Missing reg_token, entity_type o entity_id"}), 400
+
+    from src.user_store import OAuthSession, User
+    with store.Session() as s:
+        sess = s.query(OAuthSession).filter_by(state=reg_token).first()
+        if not sess:
+            return jsonify({"error": "Invalid session"}), 403
+        user = s.query(User).filter_by(chat_id=sess.chat_id).first()
+        if not user:
+            return jsonify({"error": "User not found"}), 404
+
+        try:
+            if user.storage_backend == "postgres":
+                pg = PostgresStorage(session=s, user_id=user.chat_id)
+                if entity_type == "category":
+                    result = pg.update_category(int(entity_id), name=data.get("name"))
+                elif entity_type == "account":
+                    result = pg.update_account(
+                        int(entity_id),
+                        name=data.get("name"),
+                        balance=float(data["balance"]) if data.get("balance") is not None else None,
+                    )
+                elif entity_type == "subscription":
+                    result = pg.update_subscription(
+                        int(entity_id),
+                        name=data.get("name"),
+                        last_billed=data.get("last_billed") or None,
+                    )
+                else:
+                    return jsonify({"error": f"entity_type '{entity_type}' non supportato"}), 400
+                if result is None:
+                    return jsonify({"error": "Elemento non trovato"}), 404
+            else:
+                # Notion: aggiorna proprietà della pagina
+                notion_raw = NotionClient(auth=user.notion_access_token)
+                properties: dict = {}
+                if data.get("name"):
+                    properties["Name"] = {"title": [{"text": {"content": data["name"]}}]}
+                if data.get("last_billed"):
+                    properties[Config.NOTION_SUB_COL_LAST_BILLED] = {
+                        "date": {"start": data["last_billed"]}
+                    }
+                if data.get("amount") is not None:
+                    properties[Config.NOTION_SUB_COL_AMOUNT] = {"number": float(data["amount"])}
+                if data.get("initial_balance") is not None:
+                    properties[Config.NOTION_ACCOUNTS_COL_INITIAL_AMOUNT] = {
+                        "number": float(data["initial_balance"])
+                    }
+                if properties:
+                    notion_raw.pages.update(page_id=str(entity_id), properties=properties)
+                result = {"id": entity_id, **data}
+
+            return jsonify({"status": "ok", "entity": result})
+        except Exception as e:
+            return jsonify({"error": str(e)}), 500
+
+
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000, debug=True)
+    app.run(host="0.0.0.0", port=5000, debug=False)

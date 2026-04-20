@@ -1,7 +1,6 @@
-from datetime import date, datetime
+from datetime import datetime
 
 from sqlalchemy import Column, String, Float, Integer, Date, DateTime, ForeignKey, UniqueConstraint, Index
-from sqlalchemy.orm import relationship
 
 from src.user_store import Base
 
@@ -82,6 +81,7 @@ class Subscription(Base):
     id = Column(Integer, primary_key=True, autoincrement=True)
     user_id = Column(String, ForeignKey("users.chat_id"), nullable=False)
     name = Column(String, nullable=False)
+    last_billed = Column(Date, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
 
 

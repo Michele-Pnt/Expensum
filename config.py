@@ -26,6 +26,9 @@ class Config:
     NOTION_SUBSCRIPTIONS_DATABASE_ID: str = os.getenv("NOTION_SUBSCRIPTIONS_DATABASE_ID", "")
     NOTION_PAY_TRANSFER_DATABASE_ID: str = os.getenv("NOTION_PAY_TRANSFER_DATABASE_ID", "")
     
+    # URL pubblica della webapp Flask (ngrok in dev, dominio reale in prod)
+    WEBAPP_BASE_URL: str = os.getenv("WEBAPP_BASE_URL", "http://localhost:5000")
+
     # OAuth (Fase 2)
     NOTION_CLIENT_ID: str = os.getenv("NOTION_CLIENT_ID", "")
     NOTION_CLIENT_SECRET: str = os.getenv("NOTION_CLIENT_SECRET", "")
@@ -40,10 +43,11 @@ class Config:
     # Nomi colonne database Accounts (setup)
     NOTION_ACCOUNTS_COL_TYPE: str = os.getenv("NOTION_ACCOUNTS_COL_TYPE", "Account Type")
     # Nomi colonne database Subscriptions
-    NOTION_SUB_COL_TYPE:     str = os.getenv("NOTION_SUB_COL_TYPE", "Type")
-    NOTION_SUB_COL_AMOUNT:   str = os.getenv("NOTION_SUB_COL_AMOUNT", "Amount")
-    NOTION_SUB_COL_CATEGORY: str = os.getenv("NOTION_SUB_COL_CATEGORY", "Category")
-    NOTION_SUB_COL_ACCOUNT:  str = os.getenv("NOTION_SUB_COL_ACCOUNT", "Account")
+    NOTION_SUB_COL_TYPE:        str = os.getenv("NOTION_SUB_COL_TYPE", "Type")
+    NOTION_SUB_COL_AMOUNT:      str = os.getenv("NOTION_SUB_COL_AMOUNT", "Amount")
+    NOTION_SUB_COL_CATEGORY:    str = os.getenv("NOTION_SUB_COL_CATEGORY", "Category")
+    NOTION_SUB_COL_ACCOUNT:     str = os.getenv("NOTION_SUB_COL_ACCOUNT", "Account")
+    NOTION_SUB_COL_LAST_BILLED: str = os.getenv("NOTION_SUB_COL_LAST_BILLED", "Last Billed")
     # Nomi colonne database Accounts
     NOTION_ACCOUNTS_COL_NAME: str = os.getenv("NOTION_ACCOUNTS_COL_NAME", "Name")
     NOTION_ACCOUNTS_COL_BALANCE: str = os.getenv("NOTION_ACCOUNTS_COL_BALANCE", "Current Balance")
