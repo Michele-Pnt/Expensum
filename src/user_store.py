@@ -49,8 +49,12 @@ class User(Base):
     setup_status = Column(String, default="WAIT_ACCOUNTS")
     setup_completed_at = Column(DateTime, nullable=True)
 
+    # Autenticazione email+password
+    email = Column(String, nullable=True, unique=True)
+    password_hash = Column(String, nullable=True)
+
     # Backend di storage
-    storage_backend = Column(String, default="notion", nullable=False)  
+    storage_backend = Column(String, default="notion", nullable=False)
     
 
     def __repr__(self):
@@ -128,6 +132,8 @@ class UserStore:
             "is_active": "BOOLEAN DEFAULT 1",
             "setup_status": "TEXT DEFAULT 'WAIT_ACCOUNTS'",
             "setup_completed_at": "DATETIME",
+            "email": "TEXT",
+            "password_hash": "TEXT",
         }
 
         with self.engine.begin() as connection:
@@ -219,6 +225,36 @@ class UserStore:
             user.setup_status = "DONE"
             user.setup_completed_at = datetime.utcnow()
             session.commit()
+
+    def set_credentials(self, chat_id: str, email: str, password: str) -> None:
+        """Salva email e hash bcrypt della password per un utente."""
+        import bcrypt
+        chat_id = str(chat_id)
+        hashed = bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
+        with self.Session() as session:
+            user = session.query(User).filter(User.chat_id == chat_id).first()
+            if user:
+                user.email = email.lower().strip()
+                user.password_hash = hashed
+                session.commit()
+
+    def get_user_by_email(self, email: str) -> User | None:
+        """Cerca un utente attivo per email (case-insensitive)."""
+        with self.Session() as session:
+            return session.query(User).filter(
+                User.email == email.lower().strip(),
+                User.is_active == True,
+            ).first()
+
+    def verify_password(self, email: str, password: str) -> User | None:
+        """Verifica email+password. Ritorna l'utente se le credenziali sono corrette, None altrimenti."""
+        import bcrypt
+        user = self.get_user_by_email(email)
+        if not user or not user.password_hash:
+            return None
+        if bcrypt.checkpw(password.encode(), user.password_hash.encode()):
+            return user
+        return None
 
     def increment_usage(self, chat_id: str, msg_type: str):
         """Incrementa il contatore giornaliero per tipo di messaggio (text, voice, photo)."""

@@ -1042,6 +1042,52 @@ class NotionFinanceClient:
         logger.info(f"Accounts: {len(accounts)} conti trovati")
         return accounts
 
+    def fetch_categories(self) -> list[dict]:
+        """Recupera tutte le categorie dal database Categories di Notion.
+
+        Returns:
+            Lista di dict {id, name}.
+        """
+        db_id = self.categories_db_id
+        if not db_id:
+            logger.warning("Categories Database ID non configurato.")
+            return []
+
+        try:
+            ds_id = self._get_data_source_id(db_id)
+        except Exception as e:
+            logger.warning(f"Impossibile accedere al database Categories: {e}")
+            return []
+
+        categories: list[dict] = []
+        has_more = True
+        cursor = None
+
+        while has_more:
+            try:
+                resp = self._query_with_retry(ds_id, {}, cursor)
+            except Exception as e:
+                logger.warning(f"Errore query Categories: {e}")
+                break
+
+            for page in resp.get("results", []):
+                page_id = page.get("id", "")
+                props = page.get("properties", {})
+                name = ""
+                for prop in props.values():
+                    if prop.get("type") == "title":
+                        rich = prop.get("title", [])
+                        name = rich[0].get("plain_text", "") if rich else ""
+                        break
+                if page_id and name:
+                    categories.append({"id": page_id, "name": name})
+
+            has_more = resp.get("has_more", False)
+            cursor = resp.get("next_cursor")
+
+        logger.info(f"Categories: {len(categories)} categorie trovate")
+        return categories
+
     def _parse_account_page(self, page: dict) -> Optional[dict]:
         props = page.get("properties", {})
         page_id = page.get("id", "")
@@ -1102,10 +1148,14 @@ class NotionFinanceClient:
             total_transfer_out,
         )
 
+        type_prop = props.get(Config.NOTION_ACCOUNTS_COL_TYPE, {})
+        account_type = (type_prop.get("select") or {}).get("name") or None
+
         return {
             "id": page_id,
             "name": name,
-            "current_balance": float(current_balance)
+            "current_balance": float(current_balance),
+            "account_type": account_type,
         }
 
     def _read_account_component(

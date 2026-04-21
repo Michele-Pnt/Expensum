@@ -317,23 +317,25 @@
 </head>
 <body>
     <div class="header">
-        <h1>&#x1F437; Gestisci il tuo spazio</h1>
-        <p>Aggiungi, modifica o rimuovi conti, categorie e abbonamenti in qualsiasi momento.</p>
+        <h1>&#x1F437; {% if is_first_setup %}Configura il tuo spazio{% else %}Gestisci il tuo spazio{% endif %}</h1>
+        <p>{% if is_first_setup %}Scegli le categorie di spesa per iniziare a tracciare le tue finanze.{% else %}Aggiungi, modifica o rimuovi conti, categorie e abbonamenti in qualsiasi momento.{% endif %}</p>
     </div>
 
     <div class="tabs">
-        <button class="tab-btn active" id="tab-accounts">&#x1F3E6; Conti</button>
-        <button class="tab-btn" id="tab-categories">&#x1F4C2; Categorie</button>
-        <button class="tab-btn" id="tab-subscriptions">&#x1F501; Abbonamenti</button>
+        {% if not is_first_setup %}<button class="tab-btn" id="tab-accounts">&#x1F3E6; Conti</button>{% endif %}
+        <button class="tab-btn active" id="tab-categories">&#x1F4C2; Categorie</button>
+        {% if not is_first_setup %}<button class="tab-btn" id="tab-subscriptions">&#x1F501; Abbonamenti</button>{% endif %}
     </div>
 
-    <div id="panel-accounts" class="panel active">
+    {% if not is_first_setup %}
+    <div id="panel-accounts" class="panel">
         <div id="existing-accounts-section"></div>
         <div id="accounts-cards"></div>
         <button class="btn-add" id="add-account-btn">&#xFF0B; Aggiungi Conto</button>
     </div>
+    {% endif %}
 
-    <div id="panel-categories" class="panel">
+    <div id="panel-categories" class="panel active">
         <div id="existing-categories-section"></div>
 
         <p class="cat-section-title">Cerca e seleziona dalle categorie comuni</p>
@@ -377,6 +379,7 @@
         var schemasRaw = {{ schemas | tojson }};
         var REG_TOKEN = "{{ reg_token }}";
         var BACKEND = "{{ backend|default('notion') }}";
+        var IS_FIRST_SETUP = {{ 'true' if is_first_setup else 'false' }};
         var availableAccounts = {{ available_accounts | tojson }};
         var availableCategories = {{ available_categories | tojson }};
         var availableSubscriptions = {{ available_subscriptions | tojson }};
@@ -419,7 +422,7 @@
                             'Mensile','Annuale','Settimanale','Trimestrale','Bi-mensile'
                         ]},
                         '{{ col_sub_amount }}': { type: 'number' },
-                        'Last Billed': { type: 'date' },
+                        '{{ col_sub_last_billed }}': { type: 'date' },
                         '{{ col_sub_category }}': { type: 'relation' },
                         '{{ col_sub_account }}': { type: 'relation' }
                     }
@@ -498,10 +501,15 @@
             var form = document.createElement('div');
             form.style.cssText = 'padding:12px 0;';
             if (entityType === 'account') {
+                var typeOpts = ['Cash','Brokerage','Credit Card','Saving'];
+                var typeSelHtml = typeOpts.map(function(t) {
+                    var sel = (item.account_type === t) ? ' selected' : '';
+                    return '<option value="' + t + '"' + sel + '>' + t + '</option>';
+                }).join('');
                 form.innerHTML = '<div class="field"><label>Nome</label>'
                     + '<input type="text" class="edit-name" value="' + escapeHtml(item.name) + '"></div>'
-                    + '<div class="field"><label>Saldo (€)</label>'
-                    + '<input type="number" step="any" class="edit-balance" value="' + (item.balance || 0) + '"></div>';
+                    + '<div class="field"><label>Tipo conto</label>'
+                    + '<select class="edit-account-type"><option value="">-- Seleziona --</option>' + typeSelHtml + '</select></div>';
             } else if (entityType === 'subscription') {
                 form.innerHTML = '<div class="field"><label>Nome</label>'
                     + '<input type="text" class="edit-name" value="' + escapeHtml(item.name) + '"></div>'
@@ -522,7 +530,7 @@
             saveBtn.addEventListener('click', function() {
                 var data = { name: form.querySelector('.edit-name').value.trim() };
                 if (entityType === 'account') {
-                    data.balance = parseFloat(form.querySelector('.edit-balance').value) || 0;
+                    data.account_type = form.querySelector('.edit-account-type').value || null;
                 } else if (entityType === 'subscription') {
                     data.last_billed = form.querySelector('.edit-last-billed').value || null;
                 }
@@ -1035,7 +1043,7 @@
                                 data.account_type = item['Account Type'] || item['{{ col_accounts_type }}'];
                             }
                         } else if (entityType === 'subscription') {
-                            data.last_billed = item['Last Billed'] || null;
+                            data.last_billed = item['{{ col_sub_last_billed }}'] || item['Last Billed'] || null;
                             data.sub_type = item['Type'] || item['{{ col_sub_type }}'] || null;
                             data.amount = item['Amount'] || item['{{ col_sub_amount }}'] || null;
                             var catVal = item['{{ col_sub_category }}'] || item['Category'] || null;
@@ -1111,12 +1119,15 @@
         // ---- INIT ----
         document.addEventListener('DOMContentLoaded', function() {
             // Tab switching
-            document.getElementById('tab-accounts').addEventListener('click', function() { switchTab('accounts'); });
+            var tabAccounts = document.getElementById('tab-accounts');
+            var tabSubscriptions = document.getElementById('tab-subscriptions');
+            if (tabAccounts) tabAccounts.addEventListener('click', function() { switchTab('accounts'); });
             document.getElementById('tab-categories').addEventListener('click', function() { switchTab('categories'); });
-            document.getElementById('tab-subscriptions').addEventListener('click', function() { switchTab('subscriptions'); });
+            if (tabSubscriptions) tabSubscriptions.addEventListener('click', function() { switchTab('subscriptions'); });
 
             // Add item buttons
-            document.getElementById('add-account-btn').addEventListener('click', function() { addItem('accounts_db_id'); });
+            var addAccountBtn = document.getElementById('add-account-btn');
+            if (addAccountBtn) addAccountBtn.addEventListener('click', function() { addItem('accounts_db_id'); });
             document.getElementById('add-subscription-btn').addEventListener('click', function() { addItem('subscriptions_db_id'); });
 
             // Category search

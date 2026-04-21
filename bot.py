@@ -27,6 +27,7 @@ from apscheduler.schedulers.background import BackgroundScheduler
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update, WebAppInfo
 from telegram.constants import ParseMode
+from telegram.request import HTTPXRequest
 from google import genai
 from google.genai import types
 from telegram.ext import (
@@ -57,6 +58,7 @@ logger = logging.getLogger("financial_agent.bot")
 # Stati della conversazione
 # ---------------------------------------------------------------------------
 WAITING_INVITE_CODE, WAITING_API_KEY, WAITING_EXPENSE_DB, WAITING_INCOME_DB, WAITING_CATEGORIES_DB, WAITING_MONTHLY_DB, WAITING_ACCOUNTS_DB = range(7)
+LOGIN_WAITING_EMAIL, LOGIN_WAITING_PASSWORD = range(7, 9)
 
 # ---------------------------------------------------------------------------
 # Stati della inizializzazione del template
@@ -101,11 +103,11 @@ def _get_storage(chat_id: str) -> FinancialStorage:
           # Backend Notion — comportamento attuale
           api_key = user.notion_access_token                                                                                                                   
           db_schemas = _user_store.get_database_schemas(chat_id)
-          schemas = {}                                                                                                                                         
-          for data in db_schemas:
-              schemas[data["db_key"]] = {                                                                                                                      
-                  "raw": _safe_json_load(data["raw"]),
-                  "mapped": _safe_json_load(data["mapped"])
+          schemas = {}
+          for db_key, schema_data in db_schemas.items():
+              schemas[db_key] = {
+                  "raw": _safe_json_load(schema_data.get("properties")),
+                  "mapped": _safe_json_load(schema_data.get("mapped"))
               }
           client = NotionFinanceClient(
               api_key=api_key,                                                                                                                                 
@@ -236,7 +238,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             "👋 *Benvenuto!*\n\n"
             "Sono **Moneo** 🐷, la tua mascotte e assistente finanziario.\n"
             "Visto che sono molto geloso dei miei file, questo sistema è privato. Per poterti aiutare, devi prima configurare le tue credenziali Notion.\n\n"
-            "Digita /registra per iniziare! 🚀",
+            "Digita /registrati per creare un account, o /login se ne hai già uno! 🚀",
             parse_mode=ParseMode.MARKDOWN
         )
         return
@@ -294,6 +296,15 @@ async def cmd_registra(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         parse_mode=ParseMode.MARKDOWN,
         reply_markup=keyboard
     )
+
+async def cmd_login(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Effettua il login di un utente registrato."""
+    chat_id = str(update.effective_chat.id)
+    user = _user_store.get_user(chat_id)
+    if not user:
+        await update.message.reply_text("❌ Non sei registrato. Scrivi /registra per iniziare.")
+        return
+
 
 async def process_invite_code(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Fase 1: Verifica il codice e chiede la API Key."""
@@ -369,6 +380,80 @@ async def cancel_registra(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     """Annulla la registrazione."""
     context.user_data.clear()
     await update.message.reply_text("❌ Registrazione annullata.")
+    return ConversationHandler.END
+
+
+# ---------------------------------------------------------------------------
+# /login — Accesso con email e password
+# ---------------------------------------------------------------------------
+
+async def cmd_login(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Avvia il flusso di login: chiede l'email."""
+    chat_id = str(update.effective_chat.id)
+    user = _user_store.get_user(chat_id)
+    if user and user.email:
+        await update.message.reply_text(
+            "✅ Sei già autenticato come *" + (user.email or chat_id) + "*.\n"
+            "Usa /setup per accedere alla tua area personale.",
+            parse_mode=ParseMode.MARKDOWN,
+        )
+        return ConversationHandler.END
+    await update.message.reply_text(
+        "🔑 *Accedi a Moneo*\n\nInserisci la tua *email*:",
+        parse_mode=ParseMode.MARKDOWN,
+    )
+    return LOGIN_WAITING_EMAIL
+
+
+async def login_receive_email(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Riceve l'email e chiede la password."""
+    context.user_data["login_email"] = update.message.text.strip()
+    await update.message.reply_text("🔒 Inserisci la tua *password*:", parse_mode=ParseMode.MARKDOWN)
+    return LOGIN_WAITING_PASSWORD
+
+
+async def login_receive_password(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Verifica le credenziali e completa il login."""
+    email = context.user_data.pop("login_email", "")
+    password = update.message.text
+    context.user_data.clear()
+
+    # Elimina subito il messaggio con la password per sicurezza
+    try:
+        await update.message.delete()
+    except Exception:
+        pass
+
+    user = _user_store.verify_password(email, password)
+    if not user:
+        await update.message.reply_text(
+            "❌ Email o password errati. Riprova con /login.",
+        )
+        return ConversationHandler.END
+
+    # Aggiorna il chat_id se l'utente accede da un account diverso
+    current_chat_id = str(update.effective_chat.id)
+    if user.chat_id != current_chat_id:
+        _user_store.add_user(chat_id=current_chat_id, email=user.email, password_hash=user.password_hash,
+                             storage_backend=user.storage_backend)
+
+    reg_token = _user_store.create_oauth_session(user.chat_id)
+    base_url = Config.WEBAPP_BASE_URL
+    setup_url = f"{base_url}/setup/miniapp?reg_token={reg_token}"
+
+    await update.message.reply_text(
+        f"✅ *Login effettuato!* Benvenuto, {user.email}.\n\n"
+        f"Accedi alla tua area personale:",
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("📂 Apri Moneo", url=setup_url)]]),
+    )
+    return ConversationHandler.END
+
+
+async def cancel_login(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Annulla il login."""
+    context.user_data.clear()
+    await update.message.reply_text("❌ Login annullato.")
     return ConversationHandler.END
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -853,14 +938,25 @@ def main():
         sys.exit(1)
 
     # Crea l'applicazione
-    app = Application.builder().token(Config.TELEGRAM_BOT_TOKEN).build()
+    # http_version="1.1" evita RemoteProtocolError: NO_ERROR sui server Telegram
+    app = Application.builder().token(Config.TELEGRAM_BOT_TOKEN).request(HTTPXRequest(http_version="1.1")).build()
 
     # --- Handlers ---
     
+    login_conv = ConversationHandler(
+        entry_points=[CommandHandler("login", cmd_login)],
+        states={
+            LOGIN_WAITING_EMAIL: [MessageHandler(filters.TEXT & ~filters.COMMAND, login_receive_email)],
+            LOGIN_WAITING_PASSWORD: [MessageHandler(filters.TEXT & ~filters.COMMAND, login_receive_password)],
+        },
+        fallbacks=[CommandHandler("cancel", cancel_login)],
+    )
+
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("registrati", cmd_registra))
     app.add_handler(CommandHandler("setup", cmd_setup))
     app.add_handler(CommandHandler("feedback", cmd_feedback))
+    app.add_handler(login_conv)
     app.add_handler(CallbackQueryHandler(handle_callback))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     app.add_handler(MessageHandler(filters.VOICE & ~filters.COMMAND, handle_voice))

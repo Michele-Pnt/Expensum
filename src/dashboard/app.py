@@ -26,7 +26,7 @@ from src.category_sync import refresh_category_averages
 
 # Inizializza l'app Flask
 app = Flask(__name__)
-app.secret_key = os.urandom(24)  # Per le sessioni crittografate
+app.secret_key = os.getenv("FLASK_SECRET_KEY") or os.urandom(24)
 
 @app.after_request
 def skip_ngrok_interstitial(response):
@@ -40,9 +40,38 @@ def login_required(f):
     @wraps(f)
     def decorated_function(*args, **kwargs):
         if not session.get("logged_in"):
-            return redirect(url_for("login"))
+            return redirect(url_for("web_login"))
         return f(*args, **kwargs)
     return decorated_function
+
+
+@app.route("/login", methods=["GET", "POST"])
+def web_login():
+    """Login web con email e password."""
+    if session.get("logged_in"):
+        return redirect(url_for("setup_miniapp"))
+
+    error = None
+    if request.method == "POST":
+        email = (request.form.get("email") or "").strip()
+        password = request.form.get("password") or ""
+        user = store.verify_password(email, password)
+        if user:
+            session["logged_in"] = True
+            session["chat_id"] = user.chat_id
+            reg_token = store.create_oauth_session(user.chat_id)
+            return redirect(url_for("setup_miniapp") + f"?reg_token={reg_token}")
+        error = "Email o password errati."
+
+    return render_template("login.html", error=error)
+
+
+@app.route("/logout")
+def web_logout():
+    """Logout web."""
+    session.clear()
+    return redirect(url_for("web_login"))
+
 
 # --- API e Utilità ---
 def get_system_metrics():
@@ -469,16 +498,30 @@ def _process_postgres_background(chat_id: str) -> None:
             session.close()
 
 
-@app.route("/auth/postgres")
+@app.route("/auth/postgres", methods=["GET", "POST"])
 def auth_postgres_start():
-    """Registrazione diretta su PostgreSQL (senza OAuth).
-
-    Valida il reg_token, crea il record utente con storage_backend='postgres' e
-    avvia un thread di bootstrap che seeda i default (13 categorie + 2 conti).
-    """
-    reg_token = request.args.get("reg_token")
+    """Registrazione su PostgreSQL: raccoglie email e password prima di creare l'utente."""
+    reg_token = request.args.get("reg_token") or request.form.get("reg_token")
     if not reg_token:
         return "<h1>Accesso negato</h1><p>Manca il registration token.</p>", 403
+
+    if request.method == "GET":
+        return render_template("register_postgres.html", reg_token=reg_token, error=None)
+
+    # POST: valida e crea l'utente
+    email = (request.form.get("email") or "").strip().lower()
+    password = request.form.get("password") or ""
+    password2 = request.form.get("password2") or ""
+
+    import re
+    if not re.match(r"^[^@\s]+@[^@\s]+\.[^@\s]+$", email):
+        return render_template("register_postgres.html", reg_token=reg_token, error="Email non valida.")
+    if len(password) < 8:
+        return render_template("register_postgres.html", reg_token=reg_token, error="La password deve essere di almeno 8 caratteri.")
+    if password != password2:
+        return render_template("register_postgres.html", reg_token=reg_token, error="Le password non coincidono.")
+    if store.get_user_by_email(email):
+        return render_template("register_postgres.html", reg_token=reg_token, error="Email già registrata.")
 
     # Consuma la sessione OAuth (atomico: recupera chat_id e cancella il token)
     chat_id = store.get_and_delete_oauth_session(reg_token)
@@ -486,11 +529,8 @@ def auth_postgres_start():
         return "<h1>Token non valido o scaduto</h1><p>Riprova la registrazione dal bot.</p>", 403
 
     try:
-        store.add_user(
-            chat_id=chat_id,
-            storage_backend="postgres",
-            setup_status="WAIT_ACCOUNTS",
-        )
+        store.add_user(chat_id=chat_id, storage_backend="postgres", setup_status="WAIT_ACCOUNTS")
+        store.set_credentials(chat_id, email, password)
     except Exception as e:
         import logging as _logging
         _logging.getLogger("financial_agent.auth_postgres").error(
@@ -498,30 +538,23 @@ def auth_postgres_start():
         )
         return "<h1>Errore imprevisto</h1><p>Riprova dal bot.</p>", 500
 
-    # Notifica immediata all'utente (UX parity con OAuth Notion)
     try:
         requests.post(
             f"https://api.telegram.org/bot{Config.TELEGRAM_BOT_TOKEN}/sendMessage",
             json={
                 "chat_id": chat_id,
                 "text": (
-                    "⏳ <b>Registrazione in corso!</b>\n\n"
-                    "Sto preparando il tuo spazio nel database interno "
-                    "(categorie e conti di default).\n\n"
-                    "Tra pochi secondi potrai iniziare a loggare le tue spese. 🚀"
+                    "✅ <b>Registrazione completata!</b>\n\n"
+                    "Sto preparando il tuo spazio nel database interno.\n"
+                    "Tra pochi secondi potrai iniziare. 🚀"
                 ),
                 "parse_mode": "HTML",
             },
         )
     except Exception:
-        pass  # Non bloccare se Telegram è irraggiungibile
+        pass
 
-    threading.Thread(
-        target=_process_postgres_background,
-        args=(chat_id,),
-        daemon=True,
-    ).start()
-
+    threading.Thread(target=_process_postgres_background, args=(chat_id,), daemon=True).start()
     return redirect("https://t.me/NotionFinaceBot")
 
 
@@ -628,6 +661,7 @@ def setup_form():
                 available_accounts=existing_accounts,
                 available_categories=existing_categories,
                 available_subscriptions=existing_subscriptions,
+                is_first_setup=user.setup_completed_at is None,
                 # I col_* servono solo al ramo Notion: passiamo stringhe vuote come placeholder
                 col_accounts_initial_amount="",
                 col_accounts_type="",
@@ -635,6 +669,7 @@ def setup_form():
                 col_sub_amount="",
                 col_sub_category="",
                 col_sub_account="",
+                col_sub_last_billed="",
             )
 
         # --- Branch Notion (flusso legacy invariato) ---
@@ -707,14 +742,22 @@ def setup_form():
         except Exception as e:
             print(f"[Setup] fetch_accounts fallito: {e}")
         try:
-            from src.storage.models import UserCategory
-            cat_rows = s.query(UserCategory).filter_by(user_id=user.chat_id).all()
-            available_categories = [
-                {"id": r.notion_page_id or str(r.id), "name": r.name}
-                for r in cat_rows
-            ]
+            nc_cat = NotionFinanceClient(
+                api_key=user.notion_access_token,
+                categories_db_id=user.categories_db_id,
+            )
+            available_categories = nc_cat.fetch_categories()
         except Exception as e:
-            print(f"[Setup] fetch_categories fallito: {e}")
+            print(f"[Setup] fetch_categories da Notion fallito: {e}")
+            try:
+                from src.storage.models import UserCategory
+                cat_rows = s.query(UserCategory).filter_by(user_id=user.chat_id).all()
+                available_categories = [
+                    {"id": r.notion_page_id or str(r.id), "name": r.name}
+                    for r in cat_rows
+                ]
+            except Exception as e2:
+                print(f"[Setup] fetch_categories da DB fallito: {e2}")
 
         return render_template("setup_miniapp.html",
                                backend="notion",
@@ -724,12 +767,14 @@ def setup_form():
                                available_accounts=available_accounts,
                                available_categories=available_categories,
                                available_subscriptions=[],
+                               is_first_setup=user.setup_completed_at is None,
                                col_accounts_initial_amount=Config.NOTION_ACCOUNTS_COL_INITIAL_AMOUNT,
                                col_accounts_type=Config.NOTION_ACCOUNTS_COL_TYPE,
                                col_sub_type=Config.NOTION_SUB_COL_TYPE,
                                col_sub_amount=Config.NOTION_SUB_COL_AMOUNT,
                                col_sub_category=Config.NOTION_SUB_COL_CATEGORY,
-                               col_sub_account=Config.NOTION_SUB_COL_ACCOUNT)
+                               col_sub_account=Config.NOTION_SUB_COL_ACCOUNT,
+                               col_sub_last_billed=Config.NOTION_SUB_COL_LAST_BILLED)
 
 @app.route("/api/setup-complete", methods=["POST"])
 def api_setup_complete():
@@ -1227,23 +1272,49 @@ def api_manage_update():
                 if result is None:
                     return jsonify({"error": "Elemento non trovato"}), 404
             else:
-                # Notion: aggiorna proprietà della pagina
-                notion_raw = NotionClient(auth=user.notion_access_token)
+                # Notion: risolvi i nomi colonna reali dagli schemi salvati
+                stored_schemas = store.get_database_schemas(user.chat_id)
+                db_schemas: dict = {}
+                for db_key, schema_data in stored_schemas.items():
+                    props = schema_data.get("properties")
+                    mapped = schema_data.get("mapped")
+                    db_schemas[db_key] = {
+                        "database_id": schema_data.get("database_id"),
+                        "properties": json.loads(props) if isinstance(props, str) else (props or {}),
+                        "mapped": json.loads(mapped) if isinstance(mapped, str) else (mapped or {}),
+                    }
+                notion_client = NotionFinanceClient(
+                    api_key=user.notion_access_token,
+                    accounts_db_id=user.accounts_db_id,
+                    categories_db_id=user.categories_db_id,
+                    subscriptions_db_id=user.subscriptions_db_id,
+                    db_schemas=db_schemas,
+                )
+
                 properties: dict = {}
                 if data.get("name"):
-                    properties["Name"] = {"title": [{"text": {"content": data["name"]}}]}
+                    title_col = notion_client._resolve_title_property_name(
+                        entity_type + "s_db_id",
+                        getattr(user, entity_type + "s_db_id", None) or "",
+                    ) if entity_type in ("account", "subscription") else "Name"
+                    properties[title_col] = {"title": [{"text": {"content": data["name"]}}]}
                 if data.get("last_billed"):
-                    properties[Config.NOTION_SUB_COL_LAST_BILLED] = {
-                        "date": {"start": data["last_billed"]}
-                    }
+                    col = notion_client._get_property_name(
+                        "subscriptions_db_id", "last_billed", Config.NOTION_SUB_COL_LAST_BILLED
+                    )
+                    properties[col] = {"date": {"start": data["last_billed"]}}
                 if data.get("amount") is not None:
-                    properties[Config.NOTION_SUB_COL_AMOUNT] = {"number": float(data["amount"])}
-                if data.get("initial_balance") is not None:
-                    properties[Config.NOTION_ACCOUNTS_COL_INITIAL_AMOUNT] = {
-                        "number": float(data["initial_balance"])
-                    }
+                    col = notion_client._get_property_name(
+                        "subscriptions_db_id", "amount", Config.NOTION_SUB_COL_AMOUNT
+                    )
+                    properties[col] = {"number": float(data["amount"])}
+                if data.get("account_type"):
+                    col = notion_client._get_property_name(
+                        "accounts_db_id", "account_type", Config.NOTION_ACCOUNTS_COL_TYPE
+                    )
+                    properties[col] = {"select": {"name": data["account_type"]}}
                 if properties:
-                    notion_raw.pages.update(page_id=str(entity_id), properties=properties)
+                    notion_client._client.pages.update(page_id=str(entity_id), properties=properties)
                 result = {"id": entity_id, **data}
 
             return jsonify({"status": "ok", "entity": result})
