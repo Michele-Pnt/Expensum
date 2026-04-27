@@ -14,7 +14,7 @@
         <!-- Sidebar Navigation -->
         <nav class="sidebar glass-panel">
             <div class="logo">
-                <h2>🐷 Moneo<span>Admin</span></h2>
+                <h2>Traky / Moneo<span>Admin</span></h2>
             </div>
             <ul class="nav-links">
                 <li><a href="{{ url_for('index') }}" class="{% if request.endpoint == 'index' %}active{% endif %}">📊 Overview</a></li>
@@ -23,7 +23,7 @@
                 <li><a href="{{ url_for('logs_viewer') }}" class="{% if request.endpoint == 'logs_viewer' %}active{% endif %}">💻 Log Terminal</a></li>
             </ul>
             <div class="nav-footer">
-                <a href="{{ url_for('logout') }}" class="btn-logout">Esci</a>
+                <a href="{{ url_for('admin_logout') }}" class="btn-logout">Esci</a>
             </div>
         </nav>
 

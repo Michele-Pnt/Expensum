@@ -8,6 +8,8 @@ import pytest
 from unittest.mock import MagicMock, patch
 from src.notion_client import NotionFinanceClient
 
+pytestmark = pytest.mark.unit
+
 
 @pytest.fixture
 def mock_notion_client():

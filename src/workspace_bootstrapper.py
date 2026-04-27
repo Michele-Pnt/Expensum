@@ -35,10 +35,7 @@ DEFAULT_CATEGORIES: list[str] = [
     "Altro",
 ]
 
-DEFAULT_ACCOUNTS: list[tuple[str, float]] = [
-    ("Conto Corrente", 0.0),
-    ("Contanti", 0.0),
-]
+DEFAULT_ACCOUNTS: list[tuple[str, float]] = []
 
 # Abbonamenti di default vuoti — l'utente li aggiunge nel setup
 DEFAULT_SUBSCRIPTIONS: list[str] = []
@@ -82,9 +79,6 @@ class BootstrapResult(NamedTuple):
         elif self.skipped_accounts:
             lines.append("\n🏦 Conti: già presenti, nessuna modifica.")
 
-        lines.append(
-            "\n\n💡 Usa <b>/setup</b> per personalizzare categorie, conti e abbonamenti."
-        )
         return "\n".join(lines)
 
 

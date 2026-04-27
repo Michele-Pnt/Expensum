@@ -8,7 +8,7 @@ from datetime import datetime, date
 import secrets
 import string
 from typing import Optional
-from sqlalchemy import Column, String, Boolean, DateTime, Integer, Date, ForeignKey, create_engine, text
+from sqlalchemy import Column, String, Boolean, DateTime, Integer, BigInteger, Date, ForeignKey, create_engine, text
 from sqlalchemy.orm import declarative_base, sessionmaker
 
 logger = logging.getLogger("financial_agent.user_store")
@@ -55,6 +55,9 @@ class User(Base):
 
     # Backend di storage
     storage_backend = Column(String, default="notion", nullable=False)
+
+    # Dashboard pinnata in chat Telegram
+    pinned_dashboard_msg_id = Column(BigInteger, nullable=True)
     
 
     def __repr__(self):
@@ -69,6 +72,14 @@ class DailyUsage(Base):
     text_count = Column(Integer, default=0)
     voice_count = Column(Integer, default=0)
     photo_count = Column(Integer, default=0)
+
+# 3b. TABELLA METRICHE AI GIORNALIERE
+class DailyMetrics(Base):
+    __tablename__ = "daily_metrics"
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    metrics_date = Column(Date, default=date.today, nullable=False)
+    goal_completions = Column(Integer, default=0)   # interazioni risolte con successo
+    fallbacks = Column(Integer, default=0)          # intent non riconosciuti / fallback
 
 # 4. DEFINIAMO LA TABELLA FEEDBACK (Fase 4D)
 class Feedback(Base):
@@ -96,22 +107,29 @@ class OAuthSession(Base):
     chat_id = Column(String, nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow)
 
+# 7. TABELLA PIANI E TOKEN (Fase 2.2)
+class UserPlan(Base):
+    __tablename__ = "user_plans"
+    chat_id = Column(String, ForeignKey("users.chat_id"), primary_key=True)
+    plan_type = Column(String, default="free", nullable=False) # 'free' o 'pro'
+    tokens_remaining = Column(Integer, default=150000, nullable=False)
+    tokens_total = Column(Integer, default=150000, nullable=False)
+    tokens_reset_at = Column(DateTime, nullable=False)
+    
 # 5. IL MANAGER DEL DATABASE
 class UserStore:
     def __init__(self, db_url="sqlite:///users.db"):
         # create_engine è il "motore" che parla col database fisico
         self.engine = create_engine(db_url)
         # Questa riga crea fisicamente le tabelle se non esistono ancora
-        Base.metadata.create_all(self.engine)
+        Base.metadata.create_all(self.engine)  # crea daily_metrics se non esiste
         self._ensure_sqlite_schema()
         # sessionmaker crea le "sessioni" di lavoro (come aprire una transazione)
         self.Session = sessionmaker(bind=self.engine)
         logger.info(f"UserStore inizializzato correttamente.")
 
     def _ensure_sqlite_schema(self) -> None:
-        """Esegue migrazioni minime per SQLite aggiungendo colonne mancanti senza perdita dati."""
-        if self.engine.dialect.name != "sqlite":
-            return
+        """Esegue migrazioni minime aggiungendo colonne mancanti senza perdita dati."""
 
         expected_user_columns = {
             "username": "TEXT",
@@ -134,18 +152,46 @@ class UserStore:
             "setup_completed_at": "DATETIME",
             "email": "TEXT",
             "password_hash": "TEXT",
+            "pinned_dashboard_msg_id": "INTEGER",
         }
+
+        dialect = self.engine.dialect.name
+
+        def _existing_columns(conn, table: str) -> set[str]:
+            if dialect == "sqlite":
+                rows = conn.execute(text(f"PRAGMA table_info({table})")).mappings().all()
+                return {r["name"] for r in rows}
+            else:
+                rows = conn.execute(text(
+                    "SELECT column_name FROM information_schema.columns "
+                    "WHERE table_name = :t"
+                ), {"t": table}).mappings().all()
+                return {r["column_name"] for r in rows}
+
+        def _pg_type(sqlite_type: str) -> str:
+            """Converti tipo SQLite in tipo PostgreSQL."""
+            upper = sqlite_type.split()[0].upper()
+            mapping = {"TEXT": "TEXT", "BOOLEAN": "BOOLEAN", "DATETIME": "TIMESTAMP",
+                       "INTEGER": "INTEGER", "FLOAT": "FLOAT", "REAL": "REAL"}
+            return mapping.get(upper, "TEXT")
 
         with self.engine.begin() as connection:
             # 1. Verifica colonne tabella users
-            rows = connection.execute(text("PRAGMA table_info(users)")).mappings().all()
-            if rows:
-                existing_columns = {row["name"] for row in rows}
+            existing = _existing_columns(connection, "users")
+            if existing:
                 for column_name, column_type in expected_user_columns.items():
-                    if column_name in existing_columns:
+                    if column_name in existing:
                         continue
-                    connection.execute(text(f"ALTER TABLE users ADD COLUMN {column_name} {column_type}"))
+                    col_type = column_type if dialect == "sqlite" else _pg_type(column_type)
+                    connection.execute(text(f"ALTER TABLE users ADD COLUMN {column_name} {col_type}"))
                     logger.info(f"[DB Migration] Aggiunta colonna users.{column_name}")
+
+            # 1b. Verifica colonne tabella subscriptions
+            sub_cols = _existing_columns(connection, "subscriptions")
+            if sub_cols and "amount" not in sub_cols:
+                col_type = "REAL" if dialect == "sqlite" else "FLOAT"
+                connection.execute(text(f"ALTER TABLE subscriptions ADD COLUMN amount {col_type}"))
+                logger.info("[DB Migration] Aggiunta colonna subscriptions.amount")
 
             # 2. Migrazione dati da users a database_schemas (se necessario)
             # Verifichiamo se database_schemas ha già dati
@@ -283,6 +329,26 @@ class UserStore:
             session.commit()
             logger.debug(f"[User {chat_id}] DailyUsage aggiornato: {msg_type} (+1)")
 
+    def increment_ai_metrics(self, success: bool) -> None:
+        """Incrementa il contatore giornaliero di goal_completions o fallbacks.
+
+        Chiamare con success=True quando l'AI ha estratto correttamente l'intent
+        (es. spesa/entrata registrata), con success=False in caso di fallback
+        (es. ConversationHandler che non riesce a parsare l'importo).
+        """
+        today = date.today()
+        with self.Session() as session:
+            row = session.query(DailyMetrics).filter_by(metrics_date=today).first()
+            if not row:
+                row = DailyMetrics(metrics_date=today)
+                session.add(row)
+            if success:
+                row.goal_completions = (row.goal_completions or 0) + 1
+            else:
+                row.fallbacks = (row.fallbacks or 0) + 1
+            session.commit()
+            logger.debug(f"[AI Metrics] {'completion' if success else 'fallback'} (+1) — {today}")
+
     def save_feedback(self, chat_id: str, message: str):
         """Salva un feedback utente."""
         chat_id = str(chat_id)
@@ -355,6 +421,14 @@ class UserStore:
                 User.is_active == True,
                 User.storage_backend == "postgres",
                 User.setup_status == "DONE",
+            ).all()
+
+    def get_pro_users(self) -> list[User]:
+        """Ritorna tutti gli utenti attivi con piano PRO."""
+        with self.Session() as session:
+            return session.query(User).join(UserPlan, User.chat_id == UserPlan.chat_id).filter(
+                User.is_active == True,
+                UserPlan.plan_type == "pro"
             ).all()
 
     # --- METODI USER CATEGORIES ---
@@ -484,3 +558,189 @@ class UserStore:
                     "mapped": s.mapped_properties_json
                 }
             return result
+
+    # --- METODI DASHBOARD PINNED MESSAGE ---
+
+    def get_pinned_dashboard_msg_id(self, chat_id: str) -> int | None:
+        """Recupera l'ID del messaggio dashboard pinnato per un utente."""
+        chat_id = str(chat_id)
+        with self.Session() as session:
+            user = session.query(User).filter(User.chat_id == chat_id).first()
+            return user.pinned_dashboard_msg_id if user else None
+
+    def set_pinned_dashboard_msg_id(self, chat_id: str, msg_id: int | None) -> None:
+        """Salva (o resetta) l'ID del messaggio dashboard pinnato."""
+        chat_id = str(chat_id)
+        with self.Session() as session:
+            user = session.query(User).filter(User.chat_id == chat_id).first()
+            if user:
+                user.pinned_dashboard_msg_id = msg_id
+                session.commit()
+
+    def get_user_categories_with_averages(self, user_id: str) -> list[dict]:
+        """Ritorna nome e media storica di ogni categoria dell'utente."""
+        user_id = str(user_id)
+        with self.Session() as session:
+            rows = session.execute(
+                text("SELECT name, average FROM user_categories WHERE user_id = :uid ORDER BY name"),
+                {"uid": user_id},
+            ).fetchall()
+            return [{"name": r[0], "average": r[1] or 0.0} for r in rows]
+
+    def delete_user_completely(self, chat_id: str) -> str:
+        """Elimina l'account e tutti i dati locali dell'utente in modo atomico.
+
+        Restituisce il backend dell'utente eliminato ('notion'/'postgres') o
+        'not_found' se l'utente non esiste.
+        """
+        # Lazy import per evitare circular import (models.py importa Base da qui)
+        from src.storage.models import (
+            Expense, Income, Account, Subscription, MonthlyBalance, UserCategory
+        )
+
+        chat_id = str(chat_id)
+        with self.Session() as session:
+            user = session.query(User).filter(User.chat_id == chat_id).first()
+            if not user:
+                return "not_found"
+
+            backend = user.storage_backend or "notion"
+
+            if backend == "postgres":
+                session.query(Expense).filter(Expense.user_id == chat_id).delete()
+                session.query(Income).filter(Income.user_id == chat_id).delete()
+                session.query(Account).filter(Account.user_id == chat_id).delete()
+                session.query(Subscription).filter(Subscription.user_id == chat_id).delete()
+                session.query(MonthlyBalance).filter(MonthlyBalance.user_id == chat_id).delete()
+
+            session.query(UserCategory).filter(UserCategory.user_id == chat_id).delete()
+            session.query(DailyUsage).filter(DailyUsage.chat_id == chat_id).delete()
+            session.query(Feedback).filter(Feedback.chat_id == chat_id).delete()
+            session.query(DatabaseSchema).filter(DatabaseSchema.chat_id == chat_id).delete()
+            session.query(OAuthSession).filter(OAuthSession.chat_id == chat_id).delete()
+            session.delete(user)
+            session.commit()
+
+        return backend
+
+    def get_user_subscriptions(self, user_id: str) -> list[dict]:
+        """Ritorna gli abbonamenti dell'utente dal DB locale (tabella subscriptions)."""
+        user_id = str(user_id)
+        with self.Session() as session:
+            rows = session.execute(
+                text(
+                    "SELECT name, amount, last_billed, sub_type FROM subscriptions "
+                    "WHERE user_id = :uid ORDER BY name"
+                ),
+                {"uid": user_id},
+            ).fetchall()
+            return [
+                {
+                    "name": r[0],
+                    "amount": r[1],
+                    # SQLite restituisce date come str, Postgres come oggetto date
+                    "last_billed": (
+                        r[2].isoformat() if hasattr(r[2], "isoformat") else r[2]
+                    ) if r[2] else None,
+                    "sub_type": r[3],
+                }
+                for r in rows
+            ]
+
+    # --- METODI PIANI E TOKEN (Fase 2.2) ---
+    
+    def get_user_plan(self, chat_id: str) -> dict:
+        """Ritorna i dettagli del piano utente. Se non esiste, lo crea (Free default)."""
+        chat_id = str(chat_id)
+        now = datetime.utcnow()
+        
+        with self.Session() as session:
+            plan = session.query(UserPlan).filter_by(chat_id=chat_id).first()
+            
+            if not plan:
+                # Crea nuovo piano Free
+                # Reset al 1° del mese prossimo
+                next_month = now.month % 12 + 1
+                year_offset = now.month // 12
+                reset_date = datetime(now.year + year_offset, next_month, 1)
+                
+                plan = UserPlan(
+                    chat_id=chat_id,
+                    plan_type="free",
+                    tokens_remaining=150000,
+                    tokens_total=150000,
+                    tokens_reset_at=reset_date
+                )
+                session.add(plan)
+                session.commit()
+                
+            # Verifica se bisogna resettare i token
+            if now >= plan.tokens_reset_at:
+                # Imposta il nuovo reset al 1° del mese prossimo
+                next_month = now.month % 12 + 1
+                year_offset = now.month // 12
+                new_reset_date = datetime(now.year + year_offset, next_month, 1)
+                
+                plan.tokens_remaining = plan.tokens_total
+                plan.tokens_reset_at = new_reset_date
+                session.commit()
+                
+            return {
+                "plan_type": plan.plan_type,
+                "tokens_remaining": plan.tokens_remaining,
+                "tokens_total": plan.tokens_total,
+                "tokens_reset_at": plan.tokens_reset_at
+            }
+            
+    def consume_tokens(self, chat_id: str, amount: int) -> dict:
+        """Sottrae 'amount' token dal saldo. Ritorna il saldo aggiornato e eventuali alert."""
+        chat_id = str(chat_id)
+        with self.Session() as session:
+            plan = session.query(UserPlan).filter_by(chat_id=chat_id).first()
+            if not plan:
+                # Se non ha il piano glielo creiamo chiamando get_user_plan e ricaricando
+                self.get_user_plan(chat_id)
+                plan = session.query(UserPlan).filter_by(chat_id=chat_id).first()
+                
+            plan.tokens_remaining = max(0, plan.tokens_remaining - amount)
+            
+            # Controllo soglie (solo calcolo, il middleware deciderà se notificare)
+            percent_used = 1.0 - (plan.tokens_remaining / plan.tokens_total)
+            alert = None
+            if plan.tokens_remaining == 0:
+                alert = "exhausted"
+            elif percent_used >= 0.9:
+                alert = "warning_90"
+            elif percent_used >= 0.7:
+                alert = "warning_70"
+                
+            session.commit()
+            return {
+                "success": True,
+                "tokens_remaining": plan.tokens_remaining,
+                "alert": alert
+            }
+            
+    def set_user_plan(self, chat_id: str, plan_type: str) -> None:
+        """Aggiorna il piano dell'utente (es. 'pro'). Ricalcola subito il totale token."""
+        chat_id = str(chat_id)
+        if plan_type not in ("free", "pro"):
+            raise ValueError("Il piano deve essere 'free' o 'pro'")
+            
+        with self.Session() as session:
+            plan = session.query(UserPlan).filter_by(chat_id=chat_id).first()
+            if not plan:
+                self.get_user_plan(chat_id)
+                plan = session.query(UserPlan).filter_by(chat_id=chat_id).first()
+                
+            plan.plan_type = plan_type
+            if plan_type == "pro":
+                plan.tokens_total = 3000000
+                # Aggiunge i token al saldo rimanente (o lo riporta al totale)
+                plan.tokens_remaining = 3000000
+            else:
+                plan.tokens_total = 150000
+                plan.tokens_remaining = min(plan.tokens_remaining, 150000)
+                
+            session.commit()
+            logger.info(f"[User {chat_id}] Piano aggiornato a: {plan_type.upper()}")

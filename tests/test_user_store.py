@@ -2,6 +2,8 @@ import pytest
 from datetime import date
 from src.user_store import User, DailyUsage, Feedback, OAuthSession
 
+pytestmark = pytest.mark.integration
+
 def test_add_and_get_user(mock_db_session):
     store = mock_db_session
     chat_id = "12345"

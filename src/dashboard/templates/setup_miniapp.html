@@ -7,14 +7,16 @@
     <script src="https://telegram.org/js/telegram-web-app.js"></script>
     <style>
         :root {
-            --bg: var(--tg-theme-bg-color, #1a1a2e);
-            --text: var(--tg-theme-text-color, #e0e0e0);
-            --hint: var(--tg-theme-hint-color, #888);
-            --secondary-bg: var(--tg-theme-secondary-bg-color, #16213e);
-            --accent: #f59e0b;
-            --accent-dim: rgba(245,158,11,0.15);
+            --bg: var(--tg-theme-bg-color, #f5f7fa);
+            --text: var(--tg-theme-text-color, #111111);
+            --hint: var(--tg-theme-hint-color, #666666);
+            --secondary-bg: var(--tg-theme-secondary-bg-color, #ffffff);
+            --accent: #008080;
+            --accent-dim: rgba(0, 128, 128, 0.15);
             --danger: #ef4444;
-            --radius: 14px;
+            --radius: 16px;
+            --border: rgba(128, 128, 128, 0.2);
+            --surface: rgba(128, 128, 128, 0.05);
         }
 
         * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -32,7 +34,7 @@
             padding: calc(16px + env(safe-area-inset-top)) 20px 14px;
             text-align: center;
             background: var(--secondary-bg);
-            border-bottom: 1px solid rgba(255,255,255,0.06);
+            border-bottom: 1px solid var(--surface);
         }
         .header h1 { font-size: 22px; color: var(--accent); margin-bottom: 6px; }
         .header p { font-size: 14px; color: var(--hint); line-height: 1.5; max-width: 380px; margin: 0 auto; }
@@ -40,7 +42,7 @@
         .tabs {
             display: flex;
             background: var(--secondary-bg);
-            border-bottom: 2px solid rgba(255,255,255,0.06);
+            border-bottom: 2px solid var(--surface);
         }
 
         .tab-btn {
@@ -67,7 +69,7 @@
             border-radius: var(--radius);
             padding: 16px;
             margin-bottom: 14px;
-            border: 1px solid rgba(255,255,255,0.06);
+            border: 1px solid var(--surface);
         }
 
         .card-header {
@@ -76,7 +78,7 @@
             align-items: center;
             margin-bottom: 14px;
             padding-bottom: 10px;
-            border-bottom: 1px solid rgba(255,255,255,0.07);
+            border-bottom: 1px solid var(--border);
         }
         .card-title { font-weight: 700; font-size: 15px; color: var(--accent); }
         .btn-remove {
@@ -103,15 +105,15 @@
         .field select {
             width: 100%;
             padding: 14px 15px;
-            background: rgba(255,255,255,0.06);
-            border: 1px solid rgba(255,255,255,0.1);
+            background: var(--surface);
+            border: 1px solid var(--border);
             border-radius: 12px;
             color: var(--text);
             font-size: 16px; /* >= 16px evita zoom automatico su iOS */
             -webkit-appearance: none;
         }
         .field input:focus, .field select:focus { border-color: var(--accent); outline: none; }
-        .field select option { background: #1a1a2e; }
+        .field select option { background: var(--secondary-bg); }
 
         .btn-add {
             display: flex;
@@ -144,8 +146,8 @@
         .cat-search {
             width: 100%;
             padding: 11px 13px;
-            background: rgba(255,255,255,0.06);
-            border: 1px solid rgba(255,255,255,0.1);
+            background: var(--surface);
+            border: 1px solid var(--border);
             border-radius: 10px;
             color: var(--text);
             font-size: 15px;
@@ -165,8 +167,8 @@
         .preset-chip {
             padding: 9px 15px;
             border-radius: 22px;
-            background: rgba(255,255,255,0.07);
-            border: 1px solid rgba(255,255,255,0.1);
+            background: var(--border);
+            border: 1px solid var(--border);
             color: var(--text);
             font-size: 14px;
             cursor: pointer;
@@ -185,8 +187,8 @@
         .cat-add-manual input {
             flex: 1;
             padding: 11px 13px;
-            background: rgba(255,255,255,0.06);
-            border: 1px solid rgba(255,255,255,0.1);
+            background: var(--surface);
+            border: 1px solid var(--border);
             border-radius: 10px;
             color: var(--text);
             font-size: 15px;
@@ -223,7 +225,7 @@
             bottom: 0; left: 0; right: 0;
             padding: 10px 16px calc(10px + env(safe-area-inset-bottom));
             background: var(--bg);
-            border-top: 1px solid rgba(255,255,255,0.07);
+            border-top: 1px solid var(--border);
             z-index: 100;
         }
 
@@ -261,8 +263,8 @@
             align-items: center;
             justify-content: space-between;
             padding: 10px 14px;
-            background: rgba(255,255,255,0.04);
-            border: 1px solid rgba(255,255,255,0.07);
+            background: var(--surface);
+            border: 1px solid var(--border);
             border-radius: 10px;
             margin-bottom: 8px;
         }
@@ -300,8 +302,8 @@
             gap: 6px;
             padding: 5px 10px;
             border-radius: 20px;
-            background: rgba(255,255,255,0.06);
-            border: 1px solid rgba(255,255,255,0.12);
+            background: var(--surface);
+            border: 1px solid var(--border);
             color: var(--hint);
             font-size: 13px;
             margin: 0 6px 6px 0;
@@ -317,23 +319,21 @@
 </head>
 <body>
     <div class="header">
-        <h1>&#x1F437; {% if is_first_setup %}Configura il tuo spazio{% else %}Gestisci il tuo spazio{% endif %}</h1>
-        <p>{% if is_first_setup %}Scegli le categorie di spesa per iniziare a tracciare le tue finanze.{% else %}Aggiungi, modifica o rimuovi conti, categorie e abbonamenti in qualsiasi momento.{% endif %}</p>
+        <h1>&#x1F437; Gestisci il tuo spazio</h1>
+        <p>Aggiungi, modifica o rimuovi conti, categorie e abbonamenti in qualsiasi momento.</p>
     </div>
 
     <div class="tabs">
-        {% if not is_first_setup %}<button class="tab-btn" id="tab-accounts">&#x1F3E6; Conti</button>{% endif %}
+        <button class="tab-btn" id="tab-accounts">&#x1F3E6; Conti</button>
         <button class="tab-btn active" id="tab-categories">&#x1F4C2; Categorie</button>
-        {% if not is_first_setup %}<button class="tab-btn" id="tab-subscriptions">&#x1F501; Abbonamenti</button>{% endif %}
+        <button class="tab-btn" id="tab-subscriptions">&#x1F501; Abbonamenti</button>
     </div>
 
-    {% if not is_first_setup %}
     <div id="panel-accounts" class="panel">
         <div id="existing-accounts-section"></div>
         <div id="accounts-cards"></div>
         <button class="btn-add" id="add-account-btn">&#xFF0B; Aggiungi Conto</button>
     </div>
-    {% endif %}
 
     <div id="panel-categories" class="panel active">
         <div id="existing-categories-section"></div>
@@ -379,10 +379,10 @@
         var schemasRaw = {{ schemas | tojson }};
         var REG_TOKEN = "{{ reg_token }}";
         var BACKEND = "{{ backend|default('notion') }}";
-        var IS_FIRST_SETUP = {{ 'true' if is_first_setup else 'false' }};
         var availableAccounts = {{ available_accounts | tojson }};
         var availableCategories = {{ available_categories | tojson }};
         var availableSubscriptions = {{ available_subscriptions | tojson }};
+        var IS_FIRST_SETUP = {{ 'true' if is_first_setup else 'false' }};
 
         // Schema di default: usato quando Notion non espone le proprietà
         // (es. linked database views non condivise con l'integrazione)
@@ -394,13 +394,18 @@
                 accounts_db_id: {
                     properties: {
                         'Name': { type: 'title' },
-                        'Saldo iniziale': { type: 'number' }
+                        'Saldo iniziale': { type: 'number' },
+                        'Account Type': { type: 'select', options: ['Cash','Brokerage','Credit Card','Saving'] }
                     }
                 },
                 subscriptions_db_id: {
                     properties: {
                         'Name': { type: 'title' },
-                        'Last Billed': { type: 'date' }
+                        'Amount': { type: 'number' },
+                        'Last Billed': { type: 'date' },
+                        'Type': { type: 'select', options: ['Mensile','Annuale','Settimanale','Trimestrale','Bi-mensile'] },
+                        'Account': { type: 'relation' },
+                        'Category': { type: 'relation' }
                     }
                 }
             };
@@ -506,18 +511,37 @@
                     var sel = (item.account_type === t) ? ' selected' : '';
                     return '<option value="' + t + '"' + sel + '>' + t + '</option>';
                 }).join('');
+                var balanceHtml = '';
+                if (IS_FIRST_SETUP) {
+                    balanceHtml = '<div class="field"><label>Saldo iniziale (€)</label>'
+                        + '<input type="number" step="0.01" class="edit-balance" value="' + (item.balance != null ? item.balance : '0') + '"></div>';
+                }
                 form.innerHTML = '<div class="field"><label>Nome</label>'
                     + '<input type="text" class="edit-name" value="' + escapeHtml(item.name) + '"></div>'
+                    + balanceHtml
                     + '<div class="field"><label>Tipo conto</label>'
                     + '<select class="edit-account-type"><option value="">-- Seleziona --</option>' + typeSelHtml + '</select></div>';
             } else if (entityType === 'subscription') {
+                var subTypeOpts = ['Mensile','Annuale','Settimanale','Trimestrale','Bi-mensile'];
+                var subTypeSelHtml = subTypeOpts.map(function(t) {
+                    var sel = (item.sub_type === t) ? ' selected' : '';
+                    return '<option value="' + t + '"' + sel + '>' + t + '</option>';
+                }).join('');
                 form.innerHTML = '<div class="field"><label>Nome</label>'
                     + '<input type="text" class="edit-name" value="' + escapeHtml(item.name) + '"></div>'
-                    + '<div class="field"><label>Ultimo accredito</label>'
-                    + '<input type="date" class="edit-last-billed" value="' + (item.last_billed || '') + '"></div>';
-            } else {
-                form.innerHTML = '<div class="field"><label>Nome</label>'
-                    + '<input type="text" class="edit-name" value="' + escapeHtml(item.name) + '"></div>';
+                    + '<div class="field"><label>Importo (€)</label>'
+                    + '<input type="number" step="0.01" class="edit-amount" value="' + (item.amount != null ? item.amount : '') + '"></div>'
+                    + '<div class="field"><label>Frequenza</label>'
+                    + '<select class="edit-sub-type"><option value="">-- Seleziona --</option>' + subTypeSelHtml + '</select></div>'
+                    + '<div class="field"><label>Conto</label>'
+                    + '<select data-relation-for="Account"><option value="">-- Seleziona --</option></select></div>'
+                    + '<div class="field"><label>Categoria</label>'
+                    + '<select data-relation-for="Category"><option value="">-- Seleziona --</option></select></div>';
+            } else if (entityType === 'category') {
+                form.innerHTML = '<div class="field"><label>Nome Categoria</label>'
+                    + '<input type="text" class="edit-name" value="' + escapeHtml(item.name) + '"></div>'
+                    + '<div class="field"><label>Budget mensile (€)</label>'
+                    + '<input type="number" step="0.01" class="edit-budget" placeholder="es. 200" value="' + (item.monthly_budget != null ? item.monthly_budget : '') + '"></div>';
             }
             var btnRow = document.createElement('div');
             btnRow.style.cssText = 'display:flex; gap:8px; margin-top:8px;';
@@ -526,13 +550,27 @@
             saveBtn.style.cssText = 'flex:1; padding:10px; background:var(--accent); color:#000; border:none; border-radius:10px; font-weight:700; cursor:pointer;';
             var cancelBtn = document.createElement('button');
             cancelBtn.textContent = 'Annulla';
-            cancelBtn.style.cssText = 'flex:1; padding:10px; background:rgba(255,255,255,0.06); color:var(--text); border:1px solid rgba(255,255,255,0.12); border-radius:10px; cursor:pointer;';
+            cancelBtn.style.cssText = 'flex:1; padding:10px; background:var(--surface); color:var(--text); border:1px solid var(--border); border-radius:10px; cursor:pointer;';
             saveBtn.addEventListener('click', function() {
-                var data = { name: form.querySelector('.edit-name').value.trim() };
+                var data = {};
                 if (entityType === 'account') {
+                    data.name = form.querySelector('.edit-name').value.trim();
                     data.account_type = form.querySelector('.edit-account-type').value || null;
+                    if (IS_FIRST_SETUP) {
+                        var balVal = form.querySelector('.edit-balance').value;
+                        if (balVal !== '') data.balance = parseFloat(balVal);
+                    }
                 } else if (entityType === 'subscription') {
-                    data.last_billed = form.querySelector('.edit-last-billed').value || null;
+                    data.name = form.querySelector('.edit-name').value.trim();
+                    var amtVal = form.querySelector('.edit-amount').value;
+                    if (amtVal !== '') data.amount = parseFloat(amtVal);
+                    data.sub_type = form.querySelector('.edit-sub-type').value || null;
+                    data.account_id = form.querySelector('[data-relation-for="Account"]').value || null;
+                    data.category_id = form.querySelector('[data-relation-for="Category"]').value || null;
+                } else if (entityType === 'category') {
+                    data.name = form.querySelector('.edit-name').value.trim();
+                    var budgetVal = form.querySelector('.edit-budget').value;
+                    if (budgetVal !== '') data.monthly_budget = parseFloat(budgetVal);
                 }
                 saveBtn.disabled = true;
                 saveBtn.textContent = '...';
@@ -631,7 +669,7 @@
 
                 var topRow = document.createElement('div');
                 topRow.style.cssText = 'display:flex; justify-content:space-between; align-items:center;';
-                var meta = sub.last_billed ? ' \u2014 dal ' + sub.last_billed : '';
+                var meta = (sub.amount != null ? ' — €' + sub.amount : '') + (sub.last_billed ? ' — dal ' + sub.last_billed : '');
                 topRow.innerHTML = '<span class="existing-item-name">' + escapeHtml(sub.name)
                     + '<span class="existing-item-meta">' + escapeHtml(meta) + '</span></span>';
 
@@ -665,6 +703,12 @@
                             },
                             function() { editFormContainer.style.display = 'none'; }
                         ));
+                        // Popola i dropdown relation e poi imposta i valori correnti
+                        refreshRelationOptions();
+                        var accSel = editFormContainer.querySelector('[data-relation-for="Account"]');
+                        var catSel = editFormContainer.querySelector('[data-relation-for="Category"]');
+                        if (accSel && sub.account_id) accSel.value = sub.account_id;
+                        if (catSel && sub.category_id) catSel.value = sub.category_id;
                     } else {
                         editFormContainer.style.display = 'none';
                     }
@@ -685,22 +729,59 @@
             var section = document.getElementById('existing-categories-section');
             if (!section) return;
             if (existingCategories.length === 0) { section.innerHTML = ''; return; }
-            var html = '<p class="existing-section-title">&#x1F4C2; Categorie gi\u00e0 presenti</p>'
-                + '<div style="margin-bottom:14px;">';
-            for (var i = 0; i < existingCategories.length; i++) {
-                var c = existingCategories[i];
-                html += '<span class="existing-cat-tag">' + escapeHtml(c.name)
-                    + '<span class="existing-cat-remove" data-id="' + escapeHtml(String(c.id)) + '" title="Elimina">\u00d7</span>'
-                    + '</span>';
-            }
-            html += '</div>';
-            section.innerHTML = html;
-            section.querySelectorAll('.existing-cat-remove').forEach(function(btn) {
-                btn.addEventListener('click', function() {
-                    var itemId = this.getAttribute('data-id');
-                    confirmAction('Eliminare questa categoria?', function() {
-                        deleteItem(itemId, 'category', function() {
-                            existingCategories = existingCategories.filter(function(c) { return String(c.id) !== itemId; });
+            section.innerHTML = '<p class="existing-section-title">&#x1F4C2; Categorie gi\u00e0 presenti</p>';
+            existingCategories.forEach(function(c, idx) {
+                var row = document.createElement('div');
+                row.className = 'existing-item-row';
+                row.style.flexDirection = 'column';
+                row.style.alignItems = 'stretch';
+
+                var topRow = document.createElement('div');
+                topRow.style.cssText = 'display:flex; justify-content:space-between; align-items:center;';
+                var budgetMeta = c.monthly_budget != null ? ' \u2014 Budget: \u20ac' + c.monthly_budget + '/mese' : '';
+                topRow.innerHTML = '<span class="existing-item-name">' + escapeHtml(c.name)
+                    + '<span class="existing-item-meta">' + escapeHtml(budgetMeta) + '</span></span>';
+
+                var btnGroup = document.createElement('div');
+                btnGroup.style.cssText = 'display:flex; gap:6px;';
+                var editBtn = document.createElement('button');
+                editBtn.textContent = '\u270f\ufe0f';
+                editBtn.style.cssText = 'background:none; border:none; cursor:pointer; font-size:16px; padding:2px 4px; opacity:0.7;';
+                var delBtn = document.createElement('button');
+                delBtn.className = 'btn-delete-existing';
+                delBtn.textContent = '\u00d7';
+                delBtn.title = 'Elimina';
+
+                btnGroup.appendChild(editBtn);
+                btnGroup.appendChild(delBtn);
+                topRow.appendChild(btnGroup);
+                row.appendChild(topRow);
+
+                var editFormContainer = document.createElement('div');
+                editFormContainer.style.display = 'none';
+                row.appendChild(editFormContainer);
+                section.appendChild(row);
+
+                editBtn.addEventListener('click', function() {
+                    if (editFormContainer.style.display === 'none') {
+                        editFormContainer.style.display = 'block';
+                        editFormContainer.innerHTML = '';
+                        editFormContainer.appendChild(makeEditForm('category', c,
+                            function(updated) {
+                                existingCategories[idx] = Object.assign(c, updated);
+                                renderExistingCategories();
+                            },
+                            function() { editFormContainer.style.display = 'none'; }
+                        ));
+                    } else {
+                        editFormContainer.style.display = 'none';
+                    }
+                });
+
+                delBtn.addEventListener('click', function() {
+                    confirmAction('Eliminare la categoria "' + c.name + '"?', function() {
+                        deleteItem(c.id, 'category', function() {
+                            existingCategories.splice(idx, 1);
                             renderExistingCategories();
                             refreshRelationOptions();
                         });
@@ -799,6 +880,7 @@
         }
 
         function removeCategory(cat) {
+            delete categoryBudgets[cat];
             selectedCategories = selectedCategories.filter(function(c) { return c !== cat; });
             renderPresets();
             renderCatTags();
@@ -820,8 +902,10 @@
                     return;
                 }
                 var cat = toSave[i];
-                addItem_api('category', { name: cat }, function(res) {
-                    existingCategories.push(res.entity || { id: null, name: cat });
+                var budget = categoryBudgets[cat] || null;
+                addItem_api('category', { name: cat, monthly_budget: budget }, function(res) {
+                    existingCategories.push(res.entity || { id: null, name: cat, monthly_budget: budget });
+                    delete categoryBudgets[cat];
                     selectedCategories = selectedCategories.filter(function(c) { return c !== cat; });
                     renderCatTags();
                     renderPresets();
@@ -845,6 +929,8 @@
             container.innerHTML = '';
             for (var i = 0; i < selectedCategories.length; i++) {
                 (function(cat) {
+                    var div = document.createElement('div');
+                    div.style.cssText = 'display:flex; align-items:center; gap:8px; margin-bottom:8px; flex-wrap:wrap;';
                     var span = document.createElement('span');
                     span.className = 'cat-tag';
                     span.textContent = cat + ' ';
@@ -853,11 +939,22 @@
                     x.textContent = '\u00d7';
                     x.addEventListener('click', function() { removeCategory(cat); });
                     span.appendChild(x);
-                    container.appendChild(span);
+                    var budgetInput = document.createElement('input');
+                    budgetInput.type = 'number';
+                    budgetInput.step = '0.01';
+                    budgetInput.placeholder = 'Budget mensile (\u20ac)';
+                    budgetInput.style.cssText = 'width:160px; padding:6px 10px; background:var(--surface); border:1px solid var(--border); border-radius:8px; color:var(--text); font-size:14px;';
+                    budgetInput.value = categoryBudgets[cat] || '';
+                    budgetInput.addEventListener('input', function() {
+                        if (this.value) categoryBudgets[cat] = parseFloat(this.value);
+                        else delete categoryBudgets[cat];
+                    });
+                    div.appendChild(span);
+                    div.appendChild(budgetInput);
+                    container.appendChild(div);
                 })(selectedCategories[i]);
             }
         }
-
         function switchTab(name) {
             var names = ['accounts','categories','subscriptions'];
             var tabs = ['tab-accounts','tab-categories','tab-subscriptions'];
@@ -886,7 +983,13 @@
             'Category':      'Categoria',
             'Account':       'Conto',
             'Name':          'Nome',
+            'Initial Amount': 'Saldo iniziale',
+            'Account Type':  'Tipo conto',
+            '{{ col_accounts_initial_amount }}': 'Saldo iniziale'
         };
+
+        // Mappa nome categoria → budget mensile inserito dall'utente nel form di selezione
+        var categoryBudgets = {};
 
         function fieldLabel(name) {
             return LABEL_IT[name] || name;
@@ -923,7 +1026,14 @@
                 var fieldDiv = document.createElement('div');
                 fieldDiv.className = 'field';
                 var lbl = document.createElement('label');
-                lbl.textContent = fieldLabel(pName);
+                var lblText = fieldLabel(pName);
+                
+                if (lblText === 'Saldo iniziale') {
+                    lbl.innerHTML = 'Saldo iniziale (€) <span class="info-icon" style="cursor:help; background:var(--border); border-radius:50%; padding:0 5px; font-size:12px; margin-left:4px;" onclick="alert(&quot;Questa è la quantità di denaro attualmente posseduta al momento della registrazione per questo conto.\\n\\nEsempi:\\n- Cash (Contanti): i soldi fisici nel tuo portafoglio.\\n- Conto Corrente: il saldo attuale presso la tua banca.\\n- Prepagata: i fondi caricati sulla tua carta ricaricabile.&quot;)">(i)</span>';
+                } else {
+                    lbl.textContent = lblText;
+                }
+                
                 fieldDiv.appendChild(lbl);
 
                 var el;
@@ -1045,7 +1155,7 @@
                         } else if (entityType === 'subscription') {
                             data.last_billed = item['{{ col_sub_last_billed }}'] || item['Last Billed'] || null;
                             data.sub_type = item['Type'] || item['{{ col_sub_type }}'] || null;
-                            data.amount = item['Amount'] || item['{{ col_sub_amount }}'] || null;
+                            data.amount = item['Importo mensile'] || item['Amount'] || item['{{ col_sub_amount }}'] || null;
                             var catVal = item['{{ col_sub_category }}'] || item['Category'] || null;
                             var accVal = item['{{ col_sub_account }}'] || item['Account'] || null;
                             // Solo page_id UUID (non __name__:... che sono entità da creare)

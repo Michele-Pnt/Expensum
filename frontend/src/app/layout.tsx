@@ -1,9 +1,8 @@
 import type { Metadata } from "next";
 import { Inter } from "next/font/google";
 import "./globals.css";
-import styles from "./layout.module.css";
-import Sidebar from "@/components/Sidebar";
 import ThemeRegistry from "@/theme/ThemeRegistry";
+import { AppRouterCacheProvider } from '@mui/material-nextjs/v15-appRouter';
 
 const inter = Inter({ subsets: ["latin"] });
 
@@ -20,12 +19,11 @@ export default function RootLayout({
   return (
     <html lang="it">
       <body className={inter.className}>
-        <ThemeRegistry>
-          <div className={styles.layout}>
-            <Sidebar />
-            <main className={styles.main}>{children}</main>
-          </div>
-        </ThemeRegistry>
+        <AppRouterCacheProvider>
+          <ThemeRegistry>
+            {children}
+          </ThemeRegistry>
+        </AppRouterCacheProvider>
       </body>
     </html>
   );

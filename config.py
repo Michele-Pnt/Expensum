@@ -66,7 +66,7 @@ class Config:
     # --- GEMINI ---
     GEMINI_API_KEY: str = os.getenv("GEMINI_API_KEY", "")
     GEMINI_MODEL: str = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
-    GEMINI_FALLBACK_1: str = os.getenv("GEMINI_FALLBACK_1", "gemini-1.5-flash")
+    GEMINI_FALLBACK_1: str = os.getenv("GEMINI_FALLBACK_1", "gemini-2.0-flash")
     GEMINI_FALLBACK_2: str = os.getenv("GEMINI_FALLBACK_2", "gemini-1.5-flash-8b")
 
     # --- OLLAMA ---
@@ -84,10 +84,6 @@ class Config:
     DATABASE_URL: str = os.getenv("DATABASE_URL", "sqlite:///users.db")
 
     # --- SICUREZZA e CLOUD ---
-    # AWS Credentials for Cost Tracking (lettura dashboard)
-    AWS_ACCESS_KEY_ID: str = os.getenv("AWS_ACCESS_KEY_ID", "")
-    AWS_SECRET_ACCESS_KEY: str = os.getenv("AWS_SECRET_ACCESS_KEY", "")
-
     # Password master per la web dashboard
     DASHBOARD_PASSWORD: str = os.getenv("DASHBOARD_PASSWORD", "admin")
     # Rate Limiting: max messaggi per utente per finestra di 60 secondi

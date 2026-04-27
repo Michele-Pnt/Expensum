@@ -1,11 +1,19 @@
 "use client";
 
-import React from "react";
+import React, { useRef, useEffect } from "react";
 import { Box, Button, Container, Grid, Typography, Card, CardContent } from "@mui/material";
 import { Security, AutoGraph, AccountBalanceWallet, ChatBubbleOutline } from "@mui/icons-material";
 import Link from "next/link";
 
 export default function LandingPage() {
+  const videoRef = useRef<HTMLVideoElement>(null);
+
+  useEffect(() => {
+    if (videoRef.current) {
+      videoRef.current.play().catch(err => console.log("Video autoplay failed:", err));
+    }
+  }, []);
+
   return (
     <Box sx={{ minHeight: "100vh", display: "flex", flexDirection: "column" }}>
       {/* Navbar Minimal */}
@@ -62,6 +70,7 @@ export default function LandingPage() {
                 }}
               >
                 <video
+                  ref={videoRef}
                   autoPlay
                   loop
                   muted

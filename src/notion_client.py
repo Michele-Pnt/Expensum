@@ -488,9 +488,10 @@ class NotionFinanceClient:
                         # Accounts DB: distinguiamo initial_amount dagli altri numeri
                         if db_key == "accounts_db_id" and ("initial" in p_name_low or "iniziale" in p_name_low):
                             mapped["initial_amount"] = p_name
-                        # Subscriptions DB: importo abbonamento
                         elif db_key == "subscriptions_db_id" and ("amount" in p_name_low or "importo" in p_name_low or "cost" in p_name_low):
                             mapped["sub_amount"] = p_name
+                        elif db_key == "categories_db_id" and ("budget" in p_name_low):
+                            mapped["monthly_budget"] = p_name
                         elif "importo" in p_name_low or "amount" in p_name_low or "cost" in p_name_low or "prezzo" in p_name_low:
                             mapped["amount"] = p_name
                         elif "amount" not in mapped: # Fallback al primo numero trovato se non c'è match testuale
@@ -606,8 +607,12 @@ class NotionFinanceClient:
             logger.warning(f"Errore risoluzione title property per {db_key}: {e}")
             return default_name
 
-    def _get_property_name(self, db_key: str, logical_field: str, fallback_config_key: str = None) -> str:
-        """Helper per ottenere il nome reale della property Notion da uno schema mappato."""
+    def _get_property_name(self, db_key: str, logical_field: str, fallback_config_key: Optional[str] = None) -> Optional[str]:
+        """Helper per ottenere il nome reale della property Notion da uno schema mappato.
+
+        Ritorna None se lo schema è caricato ma nessuna colonna corrisponde, evitando
+        di inviare a Notion nomi di colonna inventati che causerebbero errori 400.
+        """
         schema = self._db_schemas.get(db_key) or {}
         mapped = schema.get("mapped") or {}
 
@@ -629,7 +634,12 @@ class NotionFinanceClient:
                 logger.debug(f"[_get_property_name] fuzzy match: {logical_field} → {prop_name}")
                 return prop_name
 
-        # 4. Fallback al valore Config (legacy/statico)
+        # 4. Se lo schema è disponibile ma nessuna colonna corrisponde, non inventare un nome
+        if properties:
+            logger.warning(f"[_get_property_name] {logical_field} non trovato nello schema {db_key}, skip")
+            return None
+
+        # 5. Nessuno schema disponibile: usa il fallback legacy (best-effort)
         return fallback_config_key or logical_field.capitalize()
 
     # ------------------------------------------------------------------
@@ -906,12 +916,43 @@ class NotionFinanceClient:
             "label": label,
         }
 
-    def _resolve_monthly_balance(self, target_date: date) -> Optional[str]:
-        """Trova il page_id del record Monthly Balance corrispondente per mese e anno."""
-        for b in self.fetch_monthly_balances():
-            if b["year"] == target_date.year and b["month"] == target_date.month:
-                return b["id"]
-        return None
+    def get_or_create_monthly_balance(self, target_date: date) -> str | None:
+        """Ritorna l'ID del record Monthly Balance. Se manca, lo crea."""
+        # 1. Cerca tra quelli esistenti
+        existing_id = self._resolve_monthly_balance(target_date)
+        if existing_id:
+            return existing_id
+            
+        # 2. Se non esiste, crealo
+        logger.info(f"[Notion] Creazione nuovo record Monthly Balance per {target_date.strftime('%m/%Y')}")
+        try:
+            return self.create_monthly_balance(target_date)
+        except Exception as e:
+            logger.error(f"[Notion] Errore creazione Monthly Balance: {e}")
+            return None
+
+    def create_monthly_balance(self, target_date: date) -> str:
+        """Crea un nuovo record Monthly Balance per il mese indicato."""
+        col_date = self._get_property_name("monthly_balance_db_id", "date", Config.NOTION_MB_DATE)
+        col_name = self._resolve_title_property_name("monthly_balance_db_id", self.monthly_balance_db_id)
+        
+        # Mapping mesi in italiano
+        mesi = [
+            "", "Gennaio", "Febbraio", "Marzo", "Aprile", "Maggio", "Giugno",
+            "Luglio", "Agosto", "Settembre", "Ottobre", "Novembre", "Dicembre"
+        ]
+        label = f"{mesi[target_date.month]} {target_date.year}"
+        
+        properties = {
+            col_name: {"title": [{"text": {"content": label}}]},
+            col_date: {"date": {"start": target_date.replace(day=1).isoformat()}}
+        }
+        
+        result = self._client.pages.create(
+            parent={"database_id": self.monthly_balance_db_id},
+            properties=properties
+        )
+        return result["id"]
 
     # ------------------------------------------------------------------
     # Fetch Income
@@ -1042,6 +1083,128 @@ class NotionFinanceClient:
         logger.info(f"Accounts: {len(accounts)} conti trovati")
         return accounts
 
+    def fetch_subscriptions(self) -> list[dict]:
+        """Recupera tutti gli abbonamenti dal database Subscriptions.
+
+        Returns:
+            Lista di dict {name, amount, sub_type, last_billed}.
+        """
+        db_id = self.subscriptions_db_id
+        if not db_id:
+            logger.warning("Subscriptions Database ID non configurato.")
+            return []
+
+        try:
+            ds_id = self._get_data_source_id(db_id)
+        except Exception as e:
+            logger.warning(f"Impossibile accedere al database Subscriptions: {e}")
+            return []
+
+        logger.info("Estrazione Subscriptions...")
+        subs: list[dict] = []
+        has_more = True
+        cursor = None
+
+        while has_more:
+            try:
+                resp = self._query_with_retry(ds_id, {}, cursor)
+            except Exception as e:
+                logger.warning(f"Errore query Subscriptions: {e}")
+                break
+
+            for page in resp.get("results", []):
+                parsed = self._parse_subscription_page(page)
+                if parsed:
+                    subs.append(parsed)
+
+            has_more = resp.get("has_more", False)
+            cursor = resp.get("next_cursor")
+
+        logger.info(f"Subscriptions: {len(subs)} abbonamenti trovati")
+        return subs
+
+    def update_subscription(
+        self,
+        sub_page_id: str,
+        last_billed: date | None = None,
+    ) -> bool:
+        """Aggiorna le proprietà di un abbonamento in Notion."""
+        properties = {}
+        
+        if last_billed:
+            # Recupera il nome reale della colonna last_billed dallo schema
+            last_billed_col = self._get_property_name("subscriptions_db_id", "last_billed", Config.NOTION_SUB_COL_LAST_BILLED)
+            if last_billed_col:
+                properties[last_billed_col] = {"date": {"start": last_billed.isoformat()}}
+        
+        if not properties:
+            return False
+            
+        try:
+            self._client.pages.update(page_id=sub_page_id, properties=properties)
+            logger.info(f"[Notion] Abbonamento {sub_page_id[:8]} aggiornato con last_billed={last_billed}")
+            return True
+        except Exception as e:
+            logger.error(f"[Notion] Errore update subscription {sub_page_id}: {e}")
+            return False
+
+    def _parse_subscription_page(self, page: dict) -> Optional[dict]:
+        """Converte una pagina Notion del database Subscriptions in dict."""
+        props = page.get("properties", {})
+        page_id = page.get("id", "")
+
+        # --- NOME ---
+        title_prop_name = self._resolve_title_property_name("subscriptions_db_id", self.subscriptions_db_id)
+        name_prop = props.get(title_prop_name, {})
+        ptype = name_prop.get("type", "")
+        rich = name_prop.get(ptype, [])
+        name = rich[0].get("plain_text", "Sconosciuto") if rich else "Sconosciuto"
+
+        # --- IMPORTO ---
+        amount_col = self._get_property_name("subscriptions_db_id", "amount", Config.NOTION_SUB_COL_AMOUNT)
+        amount_prop = props.get(amount_col, {})
+        amount = self._extract_numeric_from_notion_property(amount_prop)
+
+        # --- TIPO ---
+        type_col = self._get_property_name("subscriptions_db_id", "sub_type", Config.NOTION_SUB_COL_TYPE)
+        type_prop = props.get(type_col, {})
+        sub_type = (type_prop.get("select") or {}).get("name") or None
+
+        # --- LAST BILLED ---
+        last_billed_col = self._get_property_name("subscriptions_db_id", "last_billed", Config.NOTION_SUB_COL_LAST_BILLED)
+        last_billed_prop = props.get(last_billed_col, {})
+        last_billed_val = last_billed_prop.get("date")
+        last_billed = None
+        if last_billed_val and last_billed_val.get("start"):
+            last_billed = last_billed_val["start"]
+
+        # --- RELAZIONI ---
+        acc_col = self._get_property_name("subscriptions_db_id", "rel_account", "Conto")
+        acc_prop = props.get(acc_col, {})
+        account_id = None
+        if acc_prop.get("type") == "relation":
+            rels = acc_prop.get("relation", [])
+            if rels:
+                account_id = rels[0]["id"]
+
+        cat_col = self._get_property_name("subscriptions_db_id", "rel_category", "Categoria")
+        cat_prop = props.get(cat_col, {})
+        category_id = None
+        if cat_prop.get("type") == "relation":
+            rels = cat_prop.get("relation", [])
+            if rels:
+                category_id = rels[0]["id"]
+
+        return {
+            "id": page_id,
+            "name": name,
+            "amount": float(amount) if amount is not None else None,
+            "sub_type": sub_type,
+            "last_billed": last_billed,
+            "account_id": account_id,
+            "category_id": category_id,
+        }
+
     def fetch_categories(self) -> list[dict]:
         """Recupera tutte le categorie dal database Categories di Notion.
 
@@ -1062,6 +1225,7 @@ class NotionFinanceClient:
         categories: list[dict] = []
         has_more = True
         cursor = None
+        budget_col = self._get_property_name("categories_db_id", "monthly_budget", "Monthly Budget")
 
         while has_more:
             try:
@@ -1074,13 +1238,13 @@ class NotionFinanceClient:
                 page_id = page.get("id", "")
                 props = page.get("properties", {})
                 name = ""
-                for prop in props.values():
+                for prop_name, prop in props.items():
                     if prop.get("type") == "title":
                         rich = prop.get("title", [])
                         name = rich[0].get("plain_text", "") if rich else ""
-                        break
+                monthly_budget = self._extract_numeric_from_notion_property(props.get(budget_col))
                 if page_id and name:
-                    categories.append({"id": page_id, "name": name})
+                    categories.append({"id": page_id, "name": name, "monthly_budget": monthly_budget})
 
             has_more = resp.get("has_more", False)
             cursor = resp.get("next_cursor")
@@ -1404,6 +1568,7 @@ class NotionFinanceClient:
         name: str,
         category_name: Optional[str] = None,
         account_id: Optional[str] = None,
+        monthly_balance_id: Optional[str] = None,
         _category_page_id: Optional[str] = None,
     ) -> dict:
         """
@@ -1461,15 +1626,16 @@ class NotionFinanceClient:
             }
 
         # Risolvi Monthly Balance
-        mb_id = self._resolve_monthly_balance(expense_date)
+        mb_id = monthly_balance_id or self.get_or_create_monthly_balance(expense_date)
         if mb_id:
             col_mb = self._get_property_name("expense_db_id", "rel_monthly_balance", "Monthly Balance")
-            properties[col_mb] = {
-                "relation": [{"id": mb_id}]
-            }
-            logger.info(f"Relazione Monthly Balance ({expense_date.strftime('%m/%Y')}) risolta in page_id {mb_id[:8]}...")
+            if col_mb:
+                properties[col_mb] = {
+                    "relation": [{"id": mb_id}]
+                }
+                logger.info(f"Relazione Monthly Balance ({expense_date.strftime('%m/%Y')}) risolta in page_id {mb_id[:8]}...")
         else:
-            logger.warning(f"Attenzione: nessun Monthly Balance trovato per {expense_date.strftime('%m/%Y')}")
+            logger.warning(f"Attenzione: nessun Monthly Balance trovato o creato per {expense_date.strftime('%m/%Y')}")
 
         logger.info(
             f"Creazione spesa su Notion: {name} — €{amount:.2f} — "
@@ -1614,17 +1780,21 @@ class NotionFinanceClient:
             properties=properties,
         )
 
-    def create_category(self, category_name: str) -> dict:
+    def create_category(self, category_name: str, monthly_budget: Optional[float] = None) -> dict:
         """Crea una categoria nel database Categories usando la title property corretta."""
         if not self.categories_db_id:
             raise ValueError("Categories database non configurato")
 
         title_property = self._resolve_title_property_name("categories_db_id", self.categories_db_id)
-        properties = {
+        properties: dict = {
             title_property: {
                 "title": [{"text": {"content": category_name}}]
             }
         }
+        if monthly_budget is not None:
+            col = self._get_property_name("categories_db_id", "monthly_budget", "Monthly Budget")
+            if col:
+                properties[col] = {"number": float(monthly_budget)}
         return self._client.pages.create(
             parent={"database_id": self.categories_db_id},
             properties=properties,

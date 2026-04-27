@@ -16,6 +16,7 @@ class Expense(Base):
     name = Column(String, nullable=False)
     category_name = Column(String, nullable=False)
     account_id = Column(String, nullable=False)
+    monthly_balance_id = Column(Integer, ForeignKey("monthly_balances.id"), nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
 
 
@@ -42,6 +43,7 @@ class Account(Base):
     name = Column(String, nullable=False)
     balance = Column(Float, default=0.0)
     currency = Column(String, default="EUR")
+    account_type = Column(String, nullable=True)
 
 
 class SystemCategory(Base):
@@ -65,6 +67,7 @@ class UserCategory(Base):
     user_id = Column(String, ForeignKey("users.chat_id"), nullable=False)
     name = Column(String, nullable=False)
     average = Column(Float, nullable=False, default=0.0)
+    monthly_budget = Column(Float, nullable=True)
     notion_page_id = Column(String, nullable=True)   # None per utenti Postgres
     synced_at = Column(DateTime, nullable=True)       # None per utenti Postgres
 
@@ -81,7 +84,11 @@ class Subscription(Base):
     id = Column(Integer, primary_key=True, autoincrement=True)
     user_id = Column(String, ForeignKey("users.chat_id"), nullable=False)
     name = Column(String, nullable=False)
+    amount = Column(Float, nullable=True)
     last_billed = Column(Date, nullable=True)
+    sub_type = Column(String, nullable=True)
+    account_id = Column(Integer, nullable=True)
+    category_id = Column(Integer, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
 
 

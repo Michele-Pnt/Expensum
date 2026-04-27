@@ -3,6 +3,8 @@ from unittest.mock import patch, MagicMock
 from src.expense_parser import ExpenseParser
 from datetime import date
 
+pytestmark = pytest.mark.unit
+
 def test_expense_parser_logic_with_real_ai_option(use_real_ai):
     """
     Test del parser di spese. 

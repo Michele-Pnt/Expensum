@@ -1,61 +1,83 @@
-# 📋 Backlog — Finance Agents
-
-> File operativo. Contiene task completati, in corso, e bug aperti. Per la visione futura → ROADMAP.md
-
----
+# BACKLOG — Moneo
 
 ## 🔥 In corso
 
-- [ ] **Test abbonamenti e account nella MiniApp** — verificare flusso completo abbonamenti e account (aggiunta, modifica, eliminazione) tramite la MiniApp, sia con backend Notion che Postgres
-- [ ] **Test accesso e MiniApp con backend Postgres** — verificare che login, navigazione e operazioni CRUD funzionino correttamente per utenti con `storage_backend=postgres`
-- [ ] **Copertura test all'80%** — aggiungere test per `rate_limiter.py`, `report_builder.py`, `expense_parser.py` e metodi mancanti di `postgres_storage.py` / `notion_storage.py`
-
----
-
-## ✅ Completati
-
-### 2026-04-20
-- [x] Creato `tests/test_category_sync_e2e.py` — 29 test E2E per `user_categories` / `system_categories`: seed DB, Postgres path, Notion path, router, upsert idempotenza, lookup helpers
-- [x] Corretti 5 test pre-esistenti falliti: `test_prompt_text_contains_total` (variabile `text` mancante), `test_very_long_history` (HISTORY_MONTHS=6 non 12), `test_negative_amounts_handling` (abs() normalizza negativi), `test_discover_databases_strategy_1_with_template_id` (mock a due livelli), `test_oauth_callback_success` (route risponde 302, non 200)
-- [x] MiniApp trasformata da strumento di setup iniziale a **strumento permanente di gestione struttura utente** (categorie, conti, abbonamenti modificabili per tutta la durata dell'utilizzo)
-- [x] Avviato restyling frontend con **Material UI**
-- [x] Suite test: 91/91 pass
-
-### 2026-04-18
-- [x] Refactoring sistema categorie — rimossa tabella `categories`, aggiunte `system_categories` (32 categorie default condivise) e `user_categories` (per-utente, con `notion_page_id`, `average`, `synced_at`)
-- [x] Migration Alembic `b2c3d4e5f6a7` — crea nuove tabelle, migra dati, dropa `categories`
-- [x] Creato `src/category_sync.py` — `sync_categories_to_local()` (Notion), `compute_category_averages()` (Postgres), `refresh_category_averages()` (entry point unificata)
-- [x] Rimossa `_category_map` da `NotionFinanceClient` — le categorie non vivono più in RAM per utente
-- [x] `NotionStorage` riceve `store` + `user_id` — `get_category_names()`, `_resolve_category()`, `create_expense()` leggono da DB locale
-- [x] Rimossa cache `_parsers` da `bot.py` — `_get_parser()` legge da `user_categories` (query SQL < 1ms, nessuna RAM occupata)
-- [x] `_storage_clients` → `TTLCache(maxsize=200, ttl=1800)` — eviction automatica dopo 30 min inattività (VPS Hetzner CX23 4GB RAM)
-- [x] Trigger A post-setup (app.py) — `refresh_category_averages()` chiamato dopo `bootstrap_workspace()` per entrambi i backend
-- [x] Job notturno APScheduler alle 03:00 (bot.py) — aggiornamento medie categorie per tutti gli utenti attivi, sequenziale con 200ms sleep (VPS-friendly)
-- [x] Aggiunto `cachetools>=5.3.0` a `requirements.txt`
-
-### 2026-04-14
-- [x] Transizione storage da Notion a PostgreSQL — implementato Repository Pattern con `FinancialStorage` ABC, `NotionStorage` adapter, `PostgresStorage`
-- [x] Aggiornato flusso di registrazione utente per supportare campo `storage_backend`
-- [x] Connessione PostgreSQL configurata — produzione su Hetzner CX23 self-hosted via Unix socket
-- [x] Configurato Alembic con migration `f7b2c56cec79` applicata
-- [x] `bot.py` e `main.py` aggiornati per usare `_get_storage()` invece di `_get_notion()`
-- [x] Aggiunta colonna `Income Type` (select) al DB Notion Income — auto-categorizzazione AI via `expense_parser.py`, auto-mapping schema in `notion_client.py`, propagazione in tutti i layer
-- [x] Migration Alembic `a1b2c3d4e5f6` per colonna `income_type` su tabella `incomes`
-- [x] Fix bug: `income_type` non veniva salvato in `pending_expense` in `bot.py`
-- [x] Messaggio di conferma entrata aggiornato per mostrare il tipo rilevato dall'AI
+Nessun task in corso.
 
 ---
 
 ## 🐛 Bug aperti
 
-- [ ] **Session management Postgres** — in `_get_storage()` la `Session` per utenti Postgres non viene mai chiusa esplicitamente; da implementare "Strada B" (session.close() dopo ogni operazione in `PostgresStorage`)
-- [ ] **`cat_info` unused variable** — warning a `bot.py:482`, da rimuovere
-- [ ] **Income Type non testato** — la nuova colonna è implementata ma non è stato verificato il flusso end-to-end su Notion e PostgreSQL
-- [ ] **test_aws.py e test_discovery.py** — test strutturalmente broken (import mancante `get_aws_monthly_cost`, e `test_discovery` fa chiamate reali alla Notion API); da fixare o rimuovere
-- [ ] **Copertura sotto l'80%** — moduli non testati: `rate_limiter.py` (0%), `report_builder.py` (0%), `telegram_client.py` (0%), `gemini_client.py` (0%), `ollama_client.py` (0%)
+- [ ] ci sono dei bug sulla routine di auto gestione degli abbonamenti di utenti pro
 
 ---
 
-## 📦 Backlog (da pianificare)
+## ✅ Completati
 
-- [ ] Test flusso registrazione su Telegram
+### 2026-04-26
+- **Sistema Token Freemium**: implementazione `UserPlan`, tetti mensili (150k Free / 3M Pro), middleware in `bot.py` per limitare audio/foto agli utenti Free e scalare i token ad ogni azione AI.
+- **Job Abbonamenti Automatici**: esecuzione notturna alle 04:00 (spostata su richiesta dell'utente), creazione automatica spese, aggiornamento saldo e notifica Telegram per utenti Pro.
+- **Monthly Balance Automatico**: implementato `get_or_create_monthly_balance` per Notion e Postgres; le spese vengono ora collegate automaticamente al record del mese corretto (creandolo se necessario con nome in italiano).
+- **Integrazione Storage**: aggiornato `FinancialStorage` e gli adapter Notion/Postgres per supportare `monthly_balance_id` opzionale in `create_expense`.
+- **Nuovi Moduli**: `src/billing_utils.py` (logica date), `src/dashboard_message.py` (testo dashboard), `src/user_store.py` (modelli piani).
+- **Analytics Zero Friction**: inserito pulsante `[📊 Apri Analytics]` nella dashboard pinnata `/status`.
+
+### 2026-04-25 (aggiornamento)
+- Fix bug: crash ambiente durante esecuzione test con Claude antigravity — risolto
+
+### 2026-04-25
+- `scripts/start_dev.sh`: script bash che avvia ngrok + bot Telegram + dashboard Flask in parallelo; aggiorna automaticamente `WEBAPP_BASE_URL` e `NOTION_REDIRECT_URI` nel `.env` con l'URL ngrok rilevato
+- Modello dati esteso con migration Alembic (`d4e5f6a7b8c9_add_entity_fields`):
+  - `Account.account_type` (String, nullable)
+  - `UserCategory.monthly_budget` (Float, nullable)
+  - `Subscription`: aggiunti campi `amount`, `sub_type`, `account_id`, `category_id`
+- `PostgresStorage`: aggiunti metodi CRUD — `create_account`, `create_category`, `create_subscription`, `update_category`, `update_subscription`
+- `UserStore`: aggiunti `get/set_pinned_dashboard_msg_id`, `get_user_categories_with_averages`, `delete_user_completely`, `get_user_subscriptions`
+- `WorkspaceBootstrapper`: rimossi conti di default (`Conto Corrente`, `Contanti`) — l'utente li crea da mini app; rimosso riferimento a `/setup` nel messaggio di conferma
+- Frontend `Sidebar` migrata da CSS Module a MUI (`Drawer`, `ListItem`, icone MUI); aggiunta voce "Chat (Moneo)" nella navigazione
+- Rimossi `src/dashboard/aws_monitor.py` e `tests/test_aws.py` (AWS monitoring mai usato in produzione)
+- Rimosso `.github/workflows/deploy.yml` (workflow deploy disattivato)
+
+### 2026-04-23
+- Mini app: campo `monthly_budget` visibile e modificabile nel form modifica categorie (fix bug "campo non si vede con il primo setup")
+- Comando `/status`: invia e pinna la dashboard finanziaria in chat (saldi conti, abbonamenti con stima prossima rata, spese per categoria vs media storica); unpin automatico del messaggio precedente; `message_id` persistito in `UserStore`
+- `src/dashboard_message.py` — nuovo modulo: costruisce il testo Markdown della dashboard; stima prossima rata abbonamento per tipo (mensile, annuale, settimanale, trimestrale, bimestrale)
+- Comando `/modify` sostituisce `/setup` — apre la mini app completa per gestire conti, categorie e abbonamenti
+
+### 2026-04-22
+- Debug e fix flusso mini app utenti PostgreSQL:
+  - `KeyError: 'current_balance'` al conferma spesa: `acc['current_balance']` → `acc['balance']` in `bot.py:814`
+  - Mini app bloccata su sola tab Categorie: `user.setup_completed` (campo inesistente) → `user.setup_completed_at is None`; `mark_setup_completed` mai chiamato
+  - Link post-login puntava a `/setup/miniapp` (404) → corretto in `/setup`
+  - `url_for("setup_miniapp")` → `url_for("setup_form")` in `web_login`
+- Rimosso comando `/setup`, aggiunto `/modify` che apre mini app completa via WebApp
+- Dopo registrazione Postgres e Notion: bootstrap chiama `mark_setup_completed`, crea reg_token fresco e invia bottone "⚙️ Configura il tuo spazio" direttamente in Telegram
+- Mini app sempre in modalità completa (tutte e 3 le tab visibili): rimossa logica `is_first_setup` da template e route Flask
+- Mini app: aggiunto campo `balance` editabile nel form modifica account
+- Mini app: aggiunto campo `amount` (importo mensile) per abbonamenti — colonna aggiunta al modello `Subscription`, migration automatica SQLite+PostgreSQL in `_ensure_sqlite_schema`, storage e API aggiornati
+
+### 2026-04-21
+- Sistemati 3 bug mini app Notion:
+  - Saldo account non si aggiornava su Notion (chiave `balance` vs `initial_balance`)
+  - Dropdown categorie nel form abbonamenti mostrava solo cache locale (ora fetch diretto da Notion)
+  - `last_billed` non veniva passato correttamente (mancava `col_sub_last_billed` nel template)
+- Form modifica account: rimosso campo saldo, aggiunto campo Tipo conto (select)
+- `initial_amount` editabile solo alla creazione, non in modifica
+- Setup iniziale nuovo utente: mostra solo tab Categorie (Conti e Abbonamenti nascosti finché `setup_completed_at` è null)
+- Fix `is_first_setup`: usava `user.setup_completed` inesistente → corretto in `user.setup_completed_at is None`
+- Fix comando `/start`: indicava `/registra` invece di `/registrati`
+- Reset DB e ricreazione per test
+- Sistema autenticazione email+password:
+  - Aggiunti campi `email` e `password_hash` al modello `User` con migration automatica SQLite
+  - `UserStore`: aggiunti `set_credentials()`, `get_user_by_email()`, `verify_password()` con bcrypt
+  - `/auth/postgres`: ora raccoglie email+password via form HTML prima di creare l'utente
+  - Route Flask `/login` (GET+POST) con sessione, redirect al mini app con reg_token fresco
+  - Route Flask `/logout`
+  - `FLASK_SECRET_KEY` letta da env per sessioni stabili tra restart
+  - Comando Telegram `/login`: ConversationHandler email→password, elimina messaggio psw, invia link setup
+  - Template `login.html` e `register_postgres.html`
+  - Messaggio `/start` aggiornato: menziona `/registrati` e `/login`
+- Endpoint update Notion: usa `NotionFinanceClient` con schemi per risolvere nomi colonna reali (fix account_type non aggiornato)
+- `fetch_categories()` aggiunto a `NotionFinanceClient` (fetch diretto da Notion come `fetch_accounts`)
+- `_parse_account_page` ora include `account_type` nel dict restituito
+- Aggiunto `bcrypt` a `requirements.txt`

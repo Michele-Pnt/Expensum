@@ -1,12 +1,12 @@
 # Task List: Implementazione MUI e Ristrutturazione Frontend
 
-- [/] **Fase 1: Setup e Configurazione MUI**
-  - [/] Installare le dipendenze MUI (`@mui/material`, `@emotion/react`, `@emotion/styled`, `@mui/icons-material`) nel `frontend`.
-  - [ ] Creare il file `src/theme/theme.ts` configurando i colori richiesti (Verde acqua, Verde, Azzurro).
-  - [ ] Modificare `src/app/layout.tsx` per includere `ThemeProvider`, `AppRouterCacheProvider` (o simile per Next.js) e `CssBaseline`.
-- [ ] **Fase 2: Struttura Base e Componenti Comuni**
-  - [ ] Creare i componenti strutturali (es. Navbar/Header minimale).
-  - [ ] Adattare il layout per mantenere le pagine separate senza Sidebar forzata.
+- [x] **Fase 1: Setup e Configurazione MUI**
+  - [x] Installare le dipendenze MUI (`@mui/material`, `@emotion/react`, `@emotion/styled`, `@mui/icons-material`) nel `frontend`.
+  - [x] Creare il file `src/theme/theme.ts` configurando i colori richiesti (Verde acqua, Verde, Azzurro).
+  - [x] Modificare `src/app/layout.tsx` per includere `ThemeProvider`, `AppRouterCacheProvider` (o simile per Next.js) e `CssBaseline`.
+- [x] **Fase 2: Struttura Base e Componenti Comuni**
+  - [x] Creare i componenti strutturali (es. Navbar/Header minimale).
+  - [x] Adattare il layout per mantenere le pagine separate senza Sidebar forzata.
 - [x] **Fase 3: Refactoring delle Pagine Esistenti**
   - [x] Riscrivere `src/app/page.tsx` (Landing Page) implementando la struttura derivata dall'analisi competitor (Hero, Features).
   - [x] Refactoring di `src/app/analytics/page.tsx` usando MUI.

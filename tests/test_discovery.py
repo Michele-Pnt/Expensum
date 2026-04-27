@@ -1,6 +1,9 @@
 import sys
 import os
+import pytest
 from unittest.mock import MagicMock, patch
+
+pytestmark = pytest.mark.unit
 
 # Aggiungiamo src al path per importare notion_client
 sys.path.append(os.path.abspath(os.path.dirname(__file__)))

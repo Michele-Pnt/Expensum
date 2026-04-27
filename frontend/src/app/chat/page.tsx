@@ -1,11 +1,18 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useRef, useEffect } from "react";
 import { Box, Paper, Typography, TextField, IconButton, InputAdornment } from "@mui/material";
 import { Send, Image as ImageIcon, Mic, VideoCall } from "@mui/icons-material";
 
 export default function ChatMiniApp() {
   const [inputText, setInputText] = useState("");
+  const videoRef = useRef<HTMLVideoElement>(null);
+
+  useEffect(() => {
+    if (videoRef.current) {
+      videoRef.current.play().catch(err => console.log("Video autoplay failed:", err));
+    }
+  }, []);
 
   const chatHistory = [
     { id: 1, sender: "bot", text: "Ciao! Sono Moneo. Come posso aiutarti oggi con le tue finanze?" },
@@ -30,6 +37,7 @@ export default function ChatMiniApp() {
         }}
       >
         <video
+          ref={videoRef}
           autoPlay
           loop
           muted

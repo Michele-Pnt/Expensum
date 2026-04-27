@@ -31,12 +31,14 @@ class NotionStorage(FinancialStorage):
         name: str,
         category_name: str,
         account_id: str,
+        monthly_balance_id: str | None = None,
     ) -> dict:
         cat_page_id = None
         if self._store and self._user_id and category_name:
             cat_page_id = self._store.get_notion_page_id_for_category(self._user_id, category_name)
         return self._client.create_expense(
             expense_date, amount, name, category_name, account_id,
+            monthly_balance_id=monthly_balance_id,
             _category_page_id=cat_page_id,
         )
 
@@ -76,3 +78,12 @@ class NotionStorage(FinancialStorage):
     def create_subscription(self, name: str) -> dict:
         result = self._client.create_subscription(name)
         return {"id": result["id"], "name": name}
+
+    def fetch_subscriptions(self) -> list[dict]:
+        return self._client.fetch_subscriptions()
+
+    def update_subscription(self, sub_id: str, last_billed: date | None = None) -> bool:
+        return self._client.update_subscription(sub_id, last_billed=last_billed)
+
+    def get_or_create_monthly_balance(self, target_date: date) -> str | None:
+        return self._client.get_or_create_monthly_balance(target_date)

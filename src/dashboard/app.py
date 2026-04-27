@@ -1,9 +1,13 @@
 import os
+import re
 import sys
 import json
+import logging
 import threading
 from pathlib import Path
 from functools import wraps
+
+logger = logging.getLogger(__name__)
 from flask import Flask, render_template, request, redirect, url_for, session, flash, jsonify
 import psutil
 from datetime import datetime, timedelta
@@ -14,10 +18,8 @@ ROOT_DIR = Path(__file__).resolve().parents[2]
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
-from src.dashboard.aws_monitor import AWSCostMonitor
-
 from config import Config
-from src.user_store import UserStore, User, DailyUsage, Feedback
+from src.user_store import UserStore, User, DailyUsage, DailyMetrics, Feedback
 from src.notion_client import NotionFinanceClient
 from src.storage.notion_storage import NotionStorage
 from src.storage.postgres_storage import PostgresStorage
@@ -39,8 +41,16 @@ store = UserStore(db_url=Config.DATABASE_URL)
 def login_required(f):
     @wraps(f)
     def decorated_function(*args, **kwargs):
-        if not session.get("logged_in"):
+        if not session.get("user_logged_in"):
             return redirect(url_for("web_login"))
+        return f(*args, **kwargs)
+    return decorated_function
+
+def admin_required(f):
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        if not session.get("admin_logged_in"):
+            return redirect(url_for("admin_login"))
         return f(*args, **kwargs)
     return decorated_function
 
@@ -49,7 +59,7 @@ def login_required(f):
 def web_login():
     """Login web con email e password."""
     if session.get("logged_in"):
-        return redirect(url_for("setup_miniapp"))
+        return redirect(url_for("setup_form"))
 
     error = None
     if request.method == "POST":
@@ -57,10 +67,10 @@ def web_login():
         password = request.form.get("password") or ""
         user = store.verify_password(email, password)
         if user:
-            session["logged_in"] = True
+            session["user_logged_in"] = True
             session["chat_id"] = user.chat_id
             reg_token = store.create_oauth_session(user.chat_id)
-            return redirect(url_for("setup_miniapp") + f"?reg_token={reg_token}")
+            return redirect(url_for("setup_form") + f"?reg_token={reg_token}")
         error = "Email o password errati."
 
     return render_template("login.html", error=error)
@@ -94,61 +104,34 @@ def get_system_metrics():
         "db_size_mb": round(db_size, 2)
     }
 
-# Cache globale per l'istanza del monitor
-_aws_monitor = None
-
-def get_aws_dashboard_data() -> dict:
-    """Recupera tutti i dati AWS (Costi, EC2, RDS) per la dashboard."""
-    global _aws_monitor
-    
-    # Se mancano le chiavi, restituiamo un mock sicuro
-    if not Config.AWS_ACCESS_KEY_ID or not Config.AWS_SECRET_ACCESS_KEY:
-        return {
-            "error": "Chiavi AWS non configurate",
-            "total_cost": "N/D"
-        }
-        
-    try:
-        if _aws_monitor is None:
-            _aws_monitor = AWSCostMonitor(
-                aws_access_key_id=Config.AWS_ACCESS_KEY_ID,
-                aws_secret_access_key=Config.AWS_SECRET_ACCESS_KEY
-            )
-            
-        report = _aws_monitor.generate_dashboard_report()
-        # formatta per il template
-        report["total_cost_formatted"] = f"$ {report.get('total_cost', 0):.2f}"
-        return report
-    except Exception as e:
-        return {
-            "error": str(e),
-            "total_cost": "N/D"
-        }
-
 # --- Rotte Web (UI) ---
 
-@app.route("/login", methods=["GET", "POST"])
-def login():
+@app.route("/admin/login", methods=["GET", "POST"])
+def admin_login():
+    if session.get("admin_logged_in"):
+        return redirect(url_for("index"))
+
+    error = None
     if request.method == "POST":
         password = request.form.get("password")
         if password == Config.DASHBOARD_PASSWORD:
-            session["logged_in"] = True
+            session["admin_logged_in"] = True
             return redirect(url_for("index"))
         else:
-            flash("Password errata!", "error")
-    return render_template("login.html")
+            error = "Password amministratore errata!"
+            
+    return render_template("login.html", admin_mode=True, error=error)
 
-@app.route("/logout")
-def logout():
-    session.clear()
-    return redirect(url_for("login"))
+@app.route("/admin/logout")
+def admin_logout():
+    session.pop("admin_logged_in", None)
+    return redirect(url_for("admin_login"))
 
 @app.route("/")
-@login_required
+@admin_required
 def index():
     sys_metrics = get_system_metrics()
-    aws_data = get_aws_dashboard_data()
-    
+
     with store.Session() as s:
         # Statistiche utenti
         users_count = s.query(User).count()
@@ -178,29 +161,49 @@ def index():
         data_text = [v["text"] for v in chart_data.values()]
         data_voice = [v["voice"] for v in chart_data.values()]
         data_photo = [v["photo"] for v in chart_data.values()]
+        
+        # --- AI SaaS Metrics Calculation ---
+        total_messages = sum(data_text) + sum(data_voice) + sum(data_photo)
+        avg_msg_per_user = round(total_messages / active_users, 1) if active_users > 0 else 0
+        api_cost_estimate = round(total_messages * 0.0015, 2)  # da calcolare precisamente in secondo momento
+
+        # GCR e Fallback Rate: calcolati dai dati reali degli ultimi 10 giorni
+        ai_metrics = s.query(DailyMetrics).filter(DailyMetrics.metrics_date >= ten_days_ago).all()
+        total_completions = sum(m.goal_completions or 0 for m in ai_metrics)
+        total_fallbacks = sum(m.fallbacks or 0 for m in ai_metrics)
+        total_ai_interactions = total_completions + total_fallbacks
+        if total_ai_interactions > 0:
+            goal_completion_rate = round(total_completions / total_ai_interactions * 100, 1)
+            fallback_rate = round(total_fallbacks / total_ai_interactions * 100, 1)
+        else:
+            goal_completion_rate = None  # nessun dato ancora
+            fallback_rate = None
 
     return render_template(
         "index.html", 
         sys=sys_metrics,
-        aws_data=aws_data,
         users_count=users_count,
         active_users=active_users,
         unread_feedback=unread_feedback,
         chart_labels=labels,
         chart_text=data_text,
         chart_voice=data_voice,
-        chart_photo=data_photo
+        chart_photo=data_photo,
+        avg_msg_per_user=avg_msg_per_user,
+        api_cost_estimate=api_cost_estimate,
+        goal_completion_rate=goal_completion_rate,
+        fallback_rate=fallback_rate
     )
 
 @app.route("/users")
-@login_required
+@admin_required
 def users_list():
     with store.Session() as s:
         users = s.query(User).order_by(User.created_at.desc()).all()
     return render_template("users.html", users=users)
 
 @app.route("/api/toggle-user/<chat_id>", methods=["POST"])
-@login_required
+@admin_required
 def toggle_user(chat_id):
     with store.Session() as s:
         user = s.query(User).filter(User.chat_id == chat_id).first()
@@ -211,14 +214,14 @@ def toggle_user(chat_id):
     return jsonify({"error": "User not found"}), 404
 
 @app.route("/feedbacks")
-@login_required
+@admin_required
 def feedbacks_list():
     with store.Session() as s:
         fbs = s.query(Feedback).order_by(Feedback.created_at.desc()).all()
     return render_template("feedbacks.html", feedbacks=fbs)
 
 @app.route("/api/resolve-feedback/<int:fb_id>", methods=["POST"])
-@login_required
+@admin_required
 def resolve_feedback(fb_id):
     with store.Session() as s:
         fb = s.query(Feedback).filter(Feedback.id == fb_id).first()
@@ -229,7 +232,7 @@ def resolve_feedback(fb_id):
     return jsonify({"error": "Feedback not found"}), 404
 
 @app.route("/logs")
-@login_required
+@admin_required
 def logs_viewer():
     log_file = Config.LOG_DIR / "agent.log"
     log_lines = []
@@ -429,11 +432,34 @@ def _process_oauth_background(
                 "⚠️ <b>Attenzione</b>: Non ho trovato i database standard (Spese, Entrate, ecc.). "
                 "Assicurati di averli creati o rinominati correttamente nel tuo workspace Notion!"
             )
+            _tg(report_msg)
         else:
             for key in discovered:
                 db_name = key.replace("_db_id", "").capitalize()
                 report_msg += f"✅ {db_name}\n"
-        _tg(report_msg)
+            report_msg += (
+                "\n\n👇 <b>Inizia a usare Moneo configurando il tuo spazio:</b>\n"
+                "1️⃣ Clicca sul pulsante qui sotto.\n"
+                "2️⃣ Aggiungi i tuoi <b>Conti</b> (es. Conto Corrente, Contanti) e imposta il saldo iniziale.\n"
+                "3️⃣ Personalizza le tue <b>Categorie</b> di spesa ed eventuali budget.\n"
+                "4️⃣ Inserisci i tuoi <b>Abbonamenti</b> per tenerne traccia automaticamente."
+            )
+            reg_token_miniapp = store.create_oauth_session(chat_id)
+            miniapp_url = f"{Config.WEBAPP_BASE_URL}/setup?reg_token={reg_token_miniapp}"
+            try:
+                requests.post(telegram_url, json={
+                    "chat_id": chat_id,
+                    "text": report_msg,
+                    "parse_mode": "HTML",
+                    "reply_markup": {
+                        "inline_keyboard": [[{
+                            "text": "⚙️ Configura il tuo spazio",
+                            "web_app": {"url": miniapp_url}
+                        }]]
+                    }
+                })
+            except Exception as tg_err:
+                print(f"[OAuth-bg] Errore invio messaggio finale: {tg_err}")
 
     except Exception as e:
         import logging as _logging
@@ -475,6 +501,10 @@ def _process_postgres_background(chat_id: str) -> None:
         bootstrap_result = bootstrap_workspace(storage)
         # Trigger A: prima sincronizzazione medie categorie per utente Postgres
         refresh_category_averages(chat_id, store, session=session)
+        store.mark_setup_completed(chat_id)
+
+        reg_token = store.create_oauth_session(chat_id)
+        miniapp_url = f"{Config.WEBAPP_BASE_URL}/setup?reg_token={reg_token}"
 
         report_msg = (
             "🎊 <b>MONEO È PRONTO!</b>\n\n"
@@ -483,9 +513,29 @@ def _process_postgres_background(chat_id: str) -> None:
         bootstrap_msg = bootstrap_result.to_telegram_message()
         if bootstrap_msg:
             report_msg += "\n" + bootstrap_msg
-        else:
-            report_msg += "\n💡 Usa <b>/setup</b> per personalizzare conti, categorie e abbonamenti."
-        _tg(report_msg)
+
+        report_msg += (
+            "\n\n👇 <b>Inizia a usare Moneo configurando il tuo spazio:</b>\n"
+            "1️⃣ Clicca sul pulsante qui sotto.\n"
+            "2️⃣ Aggiungi i tuoi <b>Conti</b> (es. Conto Corrente, Contanti) e imposta il saldo iniziale.\n"
+            "3️⃣ Personalizza le tue <b>Categorie</b> di spesa ed eventuali budget.\n"
+            "4️⃣ Inserisci i tuoi <b>Abbonamenti</b> per tenerne traccia automaticamente."
+        )
+
+        try:
+            requests.post(telegram_url, json={
+                "chat_id": chat_id,
+                "text": report_msg,
+                "parse_mode": "HTML",
+                "reply_markup": {
+                    "inline_keyboard": [[{
+                        "text": "⚙️ Configura il tuo spazio",
+                        "web_app": {"url": miniapp_url}
+                    }]]
+                }
+            })
+        except Exception as tg_err:
+            print(f"[Postgres-bg] Errore invio messaggio finale: {tg_err}")
 
     except Exception as e:
         import logging as _logging
@@ -640,7 +690,7 @@ def setup_form():
         if not sess:
              # Fallback: controlliamo se l'utente esiste già ed è in stato setup
              # Altrimenti diamo errore
-             return "<h1>Sessione scaduta</h1><p>Ricomincia il setup dal bot con /setup.</p>", 403
+             return "<h1>Sessione scaduta</h1><p>Ricomincia il setup dal bot.</p>", 403
 
         user = s.query(User).filter_by(chat_id=sess.chat_id).first()
         if not user:
@@ -652,6 +702,7 @@ def setup_form():
             existing_accounts = pg_storage.fetch_accounts()
             existing_categories = pg_storage.get_categories()
             existing_subscriptions = pg_storage.fetch_subscriptions()
+            is_first_setup = user.setup_completed_at is None
             return render_template(
                 "setup_miniapp.html",
                 backend="postgres",
@@ -661,7 +712,7 @@ def setup_form():
                 available_accounts=existing_accounts,
                 available_categories=existing_categories,
                 available_subscriptions=existing_subscriptions,
-                is_first_setup=user.setup_completed_at is None,
+                is_first_setup=is_first_setup,
                 # I col_* servono solo al ramo Notion: passiamo stringhe vuote come placeholder
                 col_accounts_initial_amount="",
                 col_accounts_type="",
@@ -737,6 +788,7 @@ def setup_form():
                 api_key=user.notion_access_token,
                 accounts_db_id=user.accounts_db_id,
                 categories_db_id=user.categories_db_id,
+                db_schemas=schemas,
             )
             available_accounts = nc.fetch_accounts()
         except Exception as e:
@@ -745,6 +797,7 @@ def setup_form():
             nc_cat = NotionFinanceClient(
                 api_key=user.notion_access_token,
                 categories_db_id=user.categories_db_id,
+                db_schemas=schemas,
             )
             available_categories = nc_cat.fetch_categories()
         except Exception as e:
@@ -753,7 +806,7 @@ def setup_form():
                 from src.storage.models import UserCategory
                 cat_rows = s.query(UserCategory).filter_by(user_id=user.chat_id).all()
                 available_categories = [
-                    {"id": r.notion_page_id or str(r.id), "name": r.name}
+                    {"id": r.notion_page_id or str(r.id), "name": r.name, "monthly_budget": r.monthly_budget}
                     for r in cat_rows
                 ]
             except Exception as e2:
@@ -853,7 +906,7 @@ def api_setup_complete():
                     errors.append(f"Errore abbonamento '{name}': {e}")
 
             if created_count > 0 or not errors:
-                if not user.setup_completed:
+                if user.setup_completed_at is None:
                     store.mark_setup_completed(user.chat_id)
                     telegram_url = f"https://api.telegram.org/bot{Config.TELEGRAM_BOT_TOKEN}/sendMessage"
                     try:
@@ -1019,7 +1072,7 @@ def api_setup_complete():
                 errors.append(f"Errore abbonamento '{name}': {e}")
         
         if created_count > 0 or not errors:
-            if not user.setup_completed:
+            if user.setup_completed_at is None:
                 store.mark_setup_completed(user.chat_id)
                 telegram_url = f"https://api.telegram.org/bot{Config.TELEGRAM_BOT_TOKEN}/sendMessage"
                 try:
@@ -1121,30 +1174,48 @@ def api_manage_add():
                     existing = {n.lower() for n in pg.get_category_names()}
                     if name.lower() in existing:
                         return jsonify({"error": f"Categoria '{name}' già esistente"}), 409
-                    result = pg.create_category(name)
+                    monthly_budget = float(data["monthly_budget"]) if data.get("monthly_budget") not in (None, "") else None
+                    result = pg.create_category(name, monthly_budget=monthly_budget)
                 elif entity_type == "account":
                     result = pg.create_account(
                         name,
                         initial_balance=float(data.get("initial_balance") or 0.0),
+                        account_type=data.get("account_type") or None,
                     )
                 elif entity_type == "subscription":
                     result = pg.create_subscription(
                         name,
+                        amount=float(data["amount"]) if data.get("amount") not in (None, "", "0", 0) else None,
                         last_billed=data.get("last_billed") or None,
+                        sub_type=data.get("sub_type") or None,
+                        account_id=int(data["account_id"]) if data.get("account_id") else None,
+                        category_id=int(data["category_id"]) if data.get("category_id") else None,
                     )
                 else:
                     return jsonify({"error": f"entity_type '{entity_type}' non supportato"}), 400
             else:
                 # Notion backend
+                stored_schemas = store.get_database_schemas(user.chat_id)
+                add_db_schemas: dict = {}
+                for db_key, schema_data in stored_schemas.items():
+                    _props = schema_data.get("properties")
+                    _mapped = schema_data.get("mapped")
+                    add_db_schemas[db_key] = {
+                        "database_id": schema_data.get("database_id"),
+                        "properties": json.loads(_props) if isinstance(_props, str) else (_props or {}),
+                        "mapped": json.loads(_mapped) if isinstance(_mapped, str) else (_mapped or {}),
+                    }
                 notion = NotionFinanceClient(
                     api_key=user.notion_access_token,
                     accounts_db_id=user.accounts_db_id,
                     categories_db_id=user.categories_db_id,
                     subscriptions_db_id=user.subscriptions_db_id,
+                    db_schemas=add_db_schemas,
                 )
                 if entity_type == "category":
-                    raw = notion.create_category(name)
-                    result = {"id": raw["id"], "name": name}
+                    monthly_budget = float(data["monthly_budget"]) if data.get("monthly_budget") not in (None, "") else None
+                    raw = notion.create_category(name, monthly_budget=monthly_budget)
+                    result = {"id": raw["id"], "name": name, "monthly_budget": monthly_budget}
                 elif entity_type == "account":
                     raw = notion.create_account(
                         name,
@@ -1254,18 +1325,28 @@ def api_manage_update():
             if user.storage_backend == "postgres":
                 pg = PostgresStorage(session=s, user_id=user.chat_id)
                 if entity_type == "category":
-                    result = pg.update_category(int(entity_id), name=data.get("name"))
+                    monthly_budget = float(data["monthly_budget"]) if data.get("monthly_budget") not in (None, "") else None
+                    result = pg.update_category(
+                        int(entity_id),
+                        name=data.get("name") or None,
+                        monthly_budget=monthly_budget,
+                    )
                 elif entity_type == "account":
                     result = pg.update_account(
                         int(entity_id),
-                        name=data.get("name"),
+                        name=data.get("name") or None,
                         balance=float(data["balance"]) if data.get("balance") is not None else None,
+                        account_type=data.get("account_type") or None,
                     )
                 elif entity_type == "subscription":
                     result = pg.update_subscription(
                         int(entity_id),
-                        name=data.get("name"),
+                        name=data.get("name") or None,
+                        amount=float(data["amount"]) if data.get("amount") not in (None, "", "0", 0) else None,
                         last_billed=data.get("last_billed") or None,
+                        sub_type=data.get("sub_type") or None,
+                        account_id=int(data["account_id"]) if data.get("account_id") else None,
+                        category_id=int(data["category_id"]) if data.get("category_id") else None,
                     )
                 else:
                     return jsonify({"error": f"entity_type '{entity_type}' non supportato"}), 400
@@ -1296,7 +1377,7 @@ def api_manage_update():
                     title_col = notion_client._resolve_title_property_name(
                         entity_type + "s_db_id",
                         getattr(user, entity_type + "s_db_id", None) or "",
-                    ) if entity_type in ("account", "subscription") else "Name"
+                    )
                     properties[title_col] = {"title": [{"text": {"content": data["name"]}}]}
                 if data.get("last_billed"):
                     col = notion_client._get_property_name(
@@ -1305,7 +1386,7 @@ def api_manage_update():
                     properties[col] = {"date": {"start": data["last_billed"]}}
                 if data.get("amount") is not None:
                     col = notion_client._get_property_name(
-                        "subscriptions_db_id", "amount", Config.NOTION_SUB_COL_AMOUNT
+                        "subscriptions_db_id", "sub_amount", Config.NOTION_SUB_COL_AMOUNT
                     )
                     properties[col] = {"number": float(data["amount"])}
                 if data.get("account_type"):
@@ -1313,13 +1394,316 @@ def api_manage_update():
                         "accounts_db_id", "account_type", Config.NOTION_ACCOUNTS_COL_TYPE
                     )
                     properties[col] = {"select": {"name": data["account_type"]}}
+                if data.get("monthly_budget") is not None:
+                    col = notion_client._get_property_name(
+                        "categories_db_id", "monthly_budget", "Monthly Budget"
+                    )
+                    if col:
+                        properties[col] = {"number": float(data["monthly_budget"])}
+                if data.get("sub_type"):
+                    col = notion_client._get_property_name(
+                        "subscriptions_db_id", "sub_type", Config.NOTION_SUB_COL_TYPE
+                    )
+                    properties[col] = {"select": {"name": data["sub_type"]}}
+                if data.get("account_id"):
+                    col = notion_client._get_property_name(
+                        "subscriptions_db_id", "account", Config.NOTION_SUB_COL_ACCOUNT
+                    )
+                    properties[col] = {"relation": [{"id": str(data["account_id"])}]}
+                if data.get("category_id"):
+                    col = notion_client._get_property_name(
+                        "subscriptions_db_id", "category", Config.NOTION_SUB_COL_CATEGORY
+                    )
+                    properties[col] = {"relation": [{"id": str(data["category_id"])}]}
                 if properties:
-                    notion_client._client.pages.update(page_id=str(entity_id), properties=properties)
+                    try:
+                        notion_client._client.pages.update(page_id=str(entity_id), properties=properties)
+                    except Exception as notion_err:
+                        err_str = str(notion_err)
+                        # Se Notion rifiuta una property perché non esiste nel DB, riprova
+                        # senza le property opzionali (monthly_budget, account_type, relations)
+                        optional_cols = {
+                            notion_client._get_property_name("categories_db_id", "monthly_budget", "Monthly Budget"),
+                            notion_client._get_property_name("accounts_db_id", "account_type", Config.NOTION_ACCOUNTS_COL_TYPE),
+                            notion_client._get_property_name("subscriptions_db_id", "sub_type", Config.NOTION_SUB_COL_TYPE),
+                            notion_client._get_property_name("subscriptions_db_id", "account", Config.NOTION_SUB_COL_ACCOUNT),
+                            notion_client._get_property_name("subscriptions_db_id", "category", Config.NOTION_SUB_COL_CATEGORY),
+                        }
+                        optional_cols.discard(None)
+                        if "is not a property that exists" in err_str:
+                            # Estrai il nome della property incriminata dall'errore Notion
+                            bad_prop_match = re.search(r": (.+) is not a property that exists", err_str)
+                            if bad_prop_match:
+                                bad_prop = bad_prop_match.group(1)
+                                logger.warning(
+                                    "Notion ha rifiutato property '%s' (schema stale?), retry senza.",
+                                    bad_prop,
+                                )
+                                retry_props = {k: v for k, v in properties.items() if k != bad_prop}
+                                if retry_props:
+                                    notion_client._client.pages.update(
+                                        page_id=str(entity_id), properties=retry_props
+                                    )
+                                # Invalida il mapping stale dallo schema in memoria
+                                for db_key, schema in notion_client._db_schemas.items():
+                                    mapped = schema.get("mapped") or {}
+                                    stale_keys = [k for k, v in mapped.items() if v == bad_prop]
+                                    for k in stale_keys:
+                                        del mapped[k]
+                                    props = schema.get("properties") or {}
+                                    props.pop(bad_prop, None)
+                            else:
+                                raise
+                        else:
+                            raise
                 result = {"id": entity_id, **data}
 
             return jsonify({"status": "ok", "entity": result})
         except Exception as e:
             return jsonify({"error": str(e)}), 500
+
+
+# ---------------------------------------------------------------------------
+# API ANALYTICS — Telegram Mini App
+# ---------------------------------------------------------------------------
+import hmac
+import hashlib
+from functools import wraps
+from collections import defaultdict
+from calendar import month_abbr
+
+
+def _validate_telegram_init_data(init_data_raw: str) -> dict | None:
+    """Valida HMAC-SHA256 di Telegram WebApp initData e ritorna i campi parsati.
+
+    Spec: https://core.telegram.org/bots/webapps#validating-data-received-via-the-mini-app
+    """
+    token = Config.TELEGRAM_BOT_TOKEN.encode()
+    secret_key = hmac.new(b"WebAppData", token, hashlib.sha256).digest()
+
+    params: dict[str, str] = {}
+    received_hash: str | None = None
+    for part in init_data_raw.split("&"):
+        if "=" not in part:
+            continue
+        k, _, v = part.partition("=")
+        if k == "hash":
+            received_hash = v
+        else:
+            params[k] = v
+
+    if not received_hash:
+        return None
+
+    data_check_string = "\n".join(f"{k}={v}" for k, v in sorted(params.items()))
+    expected_hash = hmac.new(secret_key, data_check_string.encode(), hashlib.sha256).hexdigest()
+
+    if not hmac.compare_digest(expected_hash, received_hash):
+        return None
+
+    user_json = params.get("user", "{}")
+    try:
+        import json as _json
+        from urllib.parse import unquote
+        user_data = _json.loads(unquote(user_json))
+    except Exception:
+        user_data = {}
+
+    return {"user": user_data, "chat_id": str(user_data.get("id", ""))}
+
+
+def _tg_webapp_auth(f):
+    """Decorator: legge X-Telegram-Init-Data header, valida HMAC, inietta g.chat_id."""
+    from flask import g
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        init_data = request.headers.get("X-Telegram-Init-Data", "")
+        if not init_data:
+            return jsonify({"error": "Missing Telegram auth"}), 401
+        parsed = _validate_telegram_init_data(init_data)
+        if not parsed or not parsed["chat_id"]:
+            return jsonify({"error": "Invalid Telegram auth"}), 401
+        g.chat_id = parsed["chat_id"]
+        return f(*args, **kwargs)
+    return decorated
+
+
+def _month_label(year: int, month: int) -> str:
+    return f"{month_abbr[month]} {str(year)[-2:]}"
+
+
+def _start_date_for_months(months: int):
+    from datetime import date
+    today = date.today()
+    # torna all'inizio del mese N mesi fa
+    m = today.month - months
+    y = today.year + m // 12
+    m = m % 12
+    if m <= 0:
+        m += 12
+        y -= 1
+    return date(y, m, 1)
+
+
+@app.route("/api/analytics/overview")
+@_tg_webapp_auth
+def analytics_overview():
+    """Ritorna risparmio mensile e spesa mensile per account negli ultimi N mesi."""
+    from flask import g
+    months = min(int(request.args.get("months", 6)), 6)
+    start = _start_date_for_months(months)
+    from datetime import date
+    end = date.today()
+
+    with store.Session() as s:
+        storage = PostgresStorage(session=s, user_id=g.chat_id)
+
+        transactions = storage.fetch_all_transactions(start, end)
+        incomes = storage.fetch_income(start, end)
+        accounts = storage.fetch_accounts()
+
+    account_map = {a["id"]: a["name"] for a in accounts}
+
+    # Aggrega spese per (anno, mese)
+    monthly_expenses: dict[tuple, float] = defaultdict(float)
+    monthly_by_account: dict[tuple, dict[str, float]] = defaultdict(lambda: defaultdict(float))
+
+    for t in transactions:
+        d = t["date"]
+        key = (d.year, d.month)
+        monthly_expenses[key] += t["amount"]
+        acc_name = account_map.get(t["account_id"], "Altro")
+        monthly_by_account[key][acc_name] += t["amount"]
+
+    monthly_income: dict[tuple, float] = defaultdict(float)
+    for inc in incomes:
+        d = inc["date"]
+        key = (d.year, d.month)
+        monthly_income[key] += inc["amount"]
+
+    # Costruisce lista mesi ordinata
+    all_keys = sorted(set(monthly_expenses) | set(monthly_income))
+    savings = []
+    for key in all_keys:
+        y, m = key
+        inc_total = round(monthly_income.get(key, 0.0), 2)
+        exp_total = round(monthly_expenses.get(key, 0.0), 2)
+        savings.append({
+            "month": _month_label(y, m),
+            "income": inc_total,
+            "expenses": exp_total,
+            "net": round(inc_total - exp_total, 2),
+        })
+
+    totals_by_account = []
+    for key in all_keys:
+        y, m = key
+        for acc_name, amount in monthly_by_account[key].items():
+            totals_by_account.append({
+                "month": _month_label(y, m),
+                "account": acc_name,
+                "amount": round(amount, 2),
+            })
+
+    return jsonify({"savings": savings, "totals_by_account": totals_by_account})
+
+
+@app.route("/api/analytics/categories-expense")
+@_tg_webapp_auth
+def analytics_categories_expense():
+    """Ritorna spese per categoria: storico mensile e medie per ultimi N mesi."""
+    from flask import g
+    months = min(int(request.args.get("months", 6)), 6)
+    start = _start_date_for_months(months)
+    from datetime import date
+    end = date.today()
+
+    with store.Session() as s:
+        storage = PostgresStorage(session=s, user_id=g.chat_id)
+        transactions = storage.fetch_all_transactions(start, end)
+        categories = storage.get_categories()
+
+    budget_map = {c["name"]: c.get("monthly_budget") for c in categories}
+
+    # Aggrega per (anno, mese, categoria)
+    monthly_cat: dict[tuple, dict[str, float]] = defaultdict(lambda: defaultdict(float))
+    for t in transactions:
+        d = t["date"]
+        key = (d.year, d.month)
+        cat = t.get("category") or "Altro"
+        monthly_cat[key][cat] += t["amount"]
+
+    all_keys = sorted(monthly_cat.keys())
+
+    by_category = []
+    for key in all_keys:
+        y, m = key
+        label = _month_label(y, m)
+        for cat, amount in monthly_cat[key].items():
+            by_category.append({
+                "month": label,
+                "name": cat,
+                "amount": round(amount, 2),
+                "budget": budget_map.get(cat),
+            })
+
+    # Media per categoria su tutto il periodo
+    cat_totals: dict[str, list[float]] = defaultdict(list)
+    for key, cats in monthly_cat.items():
+        for cat, amount in cats.items():
+            cat_totals[cat].append(amount)
+
+    averages = [
+        {"name": cat, "avg": round(sum(vals) / len(vals), 2)}
+        for cat, vals in cat_totals.items()
+    ]
+    averages.sort(key=lambda x: x["avg"], reverse=True)
+
+    return jsonify({"by_category": by_category, "averages": averages})
+
+
+@app.route("/api/analytics/income")
+@_tg_webapp_auth
+def analytics_income():
+    """Ritorna storico entrate mensili negli ultimi N mesi."""
+    from flask import g
+    months = min(int(request.args.get("months", 6)), 6)
+    start = _start_date_for_months(months)
+    from datetime import date
+    end = date.today()
+
+    with store.Session() as s:
+        storage = PostgresStorage(session=s, user_id=g.chat_id)
+        incomes = storage.fetch_income(start, end)
+
+    monthly: dict[tuple, float] = defaultdict(float)
+    for inc in incomes:
+        d = inc["date"]
+        key = (d.year, d.month)
+        monthly[key] += inc["amount"]
+
+    result = [
+        {"month": _month_label(y, m), "total": round(amount, 2)}
+        for (y, m), amount in sorted(monthly.items())
+    ]
+    return jsonify({"monthly": result})
+
+
+@app.route("/api/analytics/wealth")
+@_tg_webapp_auth
+def analytics_wealth():
+    """Ritorna saldo corrente per account (capitale totale)."""
+    from flask import g
+    with store.Session() as s:
+        storage = PostgresStorage(session=s, user_id=g.chat_id)
+        accounts = storage.fetch_accounts()
+
+    result = [
+        {"name": a["name"], "balance": round(a["balance"] or 0.0, 2)}
+        for a in accounts
+        if (a.get("balance") or 0.0) > 0
+    ]
+    return jsonify({"accounts": result})
 
 
 if __name__ == "__main__":

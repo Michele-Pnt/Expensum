@@ -29,18 +29,11 @@ from src.category_sync import (
 
 SYSTEM_CATEGORIES_COUNT = 32  # categorie definite nella migration b2c3d4e5f6a7
 
+pytestmark = pytest.mark.integration
+
 # ---------------------------------------------------------------------------
 # Fixture condivise
 # ---------------------------------------------------------------------------
-
-@pytest.fixture
-def engine():
-    eng = create_engine("sqlite:///:memory:", echo=False)
-    Base.metadata.create_all(eng)
-    # Seed system_categories (replica ciò che fa la migration Alembic)
-    _seed_system_categories(eng)
-    return eng
-
 
 def _seed_system_categories(eng):
     names = [
@@ -58,7 +51,15 @@ def _seed_system_categories(eng):
         s.commit()
 
 
-@pytest.fixture
+@pytest.fixture(scope="module")
+def engine():
+    """Engine SQLite in-memory condiviso per tutto il modulo."""
+    eng = create_engine("sqlite:///:memory:", echo=False)
+    yield eng
+    eng.dispose()
+
+
+@pytest.fixture(scope="module")
 def store(engine):
     """UserStore connesso all'engine SQLite in-memory condiviso."""
     s = UserStore.__new__(UserStore)
@@ -69,10 +70,13 @@ def store(engine):
 
 @pytest.fixture
 def db_session(engine):
-    """Session raw per ispezione diretta delle tabelle."""
+    """Schema azzerato, system categories e utenti di test reinseriti a ogni test."""
+    Base.metadata.drop_all(engine)
+    Base.metadata.create_all(engine)
+    _seed_system_categories(engine)
+
     Session = sessionmaker(bind=engine)
     session = Session()
-
     session.add(User(chat_id="user_pg", username="pg_user", is_active=True, storage_backend="postgres"))
     session.add(User(chat_id="user_nt", username="nt_user", is_active=True, storage_backend="notion"))
     session.commit()

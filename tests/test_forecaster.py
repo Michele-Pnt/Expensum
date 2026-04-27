@@ -7,6 +7,8 @@ from datetime import date
 from src.data_processor import DataProcessor, MonthlySummary
 from src.forecaster import Forecaster, ForecastResult
 
+pytestmark = pytest.mark.unit
+
 
 @pytest.fixture
 def stable_history_transactions():

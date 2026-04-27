@@ -25,6 +25,7 @@ import threading
 from cachetools import TTLCache
 from apscheduler.schedulers.background import BackgroundScheduler
 
+from src.billing_utils import get_next_billing_date
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update, WebAppInfo
 from telegram.constants import ParseMode
 from telegram.request import HTTPXRequest
@@ -51,6 +52,7 @@ from src.storage.postgres_storage import PostgresStorage
 from src.rate_limiter import is_rate_limited
 from src.user_store import UserStore
 from src.category_sync import refresh_category_averages
+from src.dashboard_message import build_dashboard_text
 
 logger = logging.getLogger("financial_agent.bot")
 
@@ -142,6 +144,78 @@ def _is_authorized(update: Update) -> bool:
     user = _user_store.get_user(chat_id)
     return user is not None
 
+async def _check_and_consume_tokens(update: Update, chat_id: str, action_type: str) -> bool:
+    """Verifica e consuma token per un'azione. Ritorna False se bloccato, True se OK."""
+    costs = {"text": 800, "voice": 1500, "photo": 2000, "rag": 5000}
+    cost = costs.get(action_type, 0)
+    
+    plan = _user_store.get_user_plan(chat_id)
+    
+    # Blocco funzionalità Premium
+    if action_type in ["voice", "photo", "rag"] and plan["plan_type"] == "free":
+        await update.message.reply_text(
+            "🔒 *Funzione Premium*\n"
+            "Questa funzionalità (audio, foto e chat avanzata) è disponibile solo nel piano *PRO*.\n\n"
+            "Usa /piano per scoprire come sbloccarla.", 
+            parse_mode=ParseMode.MARKDOWN
+        )
+        return False
+        
+    # Blocco token esauriti
+    if plan["tokens_remaining"] < cost:
+        if plan["plan_type"] == "free":
+            await update.message.reply_text(
+                f"🛑 *Token mensili esauriti*\n"
+                f"Hai consumato tutti i tuoi {plan['tokens_total']:,} token mensili.\n\n"
+                f"Usa /piano per fare l'upgrade e continuare a usare Traky, o attendi il reset mensile.", 
+                parse_mode=ParseMode.MARKDOWN
+            )
+        else:
+            await update.message.reply_text(
+                "🛑 *Limite sistema raggiunto*\n"
+                "Hai superato il limite di sicurezza del piano PRO. Contatta l'assistenza.", 
+                parse_mode=ParseMode.MARKDOWN
+            )
+        return False
+        
+    # Consuma i token
+    res = _user_store.consume_tokens(chat_id, cost)
+    
+    # Notifiche soft
+    if res["alert"] == "warning_90":
+        await update.message.reply_text(
+            "⚠️ *Attenzione:* hai consumato il 90% dei token mensili. Usa /piano per maggiori info.", 
+            parse_mode=ParseMode.MARKDOWN
+        )
+    elif res["alert"] == "warning_70":
+        await update.message.reply_text(
+            "ℹ️ *Info:* hai consumato il 70% dei token mensili.", 
+            parse_mode=ParseMode.MARKDOWN
+        )
+        
+    return True
+
+
+def _is_premium(chat_id: str) -> bool:
+    """Ritorna True se l'utente ha un piano Pro."""
+    plan = _user_store.get_user_plan(chat_id)
+    return plan.get("plan_type") == "pro"
+
+
+def _get_dashboard_keyboard(is_premium: bool) -> InlineKeyboardMarkup | None:
+    """Ritorna la tastiera con il pulsante Analytics solo per utenti Pro."""
+    if not is_premium:
+        return None
+    base_url = Config.WEBAPP_BASE_URL
+    analytics_url = f"{base_url}/analytics"
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton(
+                text="📊 Apri Analytics",
+                web_app=WebAppInfo(url=analytics_url)
+            )
+        ]
+    ])
 
 def sanitize_letters_only(text: str) -> str:
     """Rimuove tutto tranne lettere Unicode e spazi, normalizzando gli spazi multipli."""
@@ -189,8 +263,8 @@ def _has_notion_template_binding(user) -> bool:
     ]
     return all(required_ids)
 
-async def cmd_setup(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Fornisce il link alla Mini App per il setup dinamico."""
+async def cmd_modify(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Apre la mini app per gestire conti, categorie e abbonamenti."""
     if not _is_authorized(update):
         await update.message.reply_text(
             "⚠️ *Non sei ancora registrato!*\nUsa /registrati per configurare il bot.",
@@ -199,37 +273,191 @@ async def cmd_setup(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     chat_id = str(update.effective_chat.id)
-    user = _user_store.get_user(chat_id)
-    # Il binding dei 7 DB Notion è richiesto solo per utenti con backend Notion.
-    # Gli utenti con backend postgres non hanno DB IDs da verificare.
-    if user.storage_backend == "notion" and not _has_notion_template_binding(user):
+    reg_token = _user_store.create_oauth_session(chat_id)
+    setup_url = f"{Config.WEBAPP_BASE_URL}/setup?reg_token={reg_token}"
+
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("⚙️ Gestisci il tuo spazio", web_app=WebAppInfo(url=setup_url))]
+    ])
+
+    await update.message.reply_text(
+        "⚙️ *Gestione Spazio Personale*\n\n"
+        "Modifica i tuoi conti, categorie e abbonamenti:",
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=keyboard,
+    )
+
+# ---------------------------------------------------------------------------
+# Dashboard / Status
+# ---------------------------------------------------------------------------
+
+async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Invia la dashboard finanziaria e la fissa in alto nella chat."""
+    if not _is_authorized(update):
         await update.message.reply_text(
-            "⚠️ Prima completa /registrati (binding Notion template) e poi rilancia /setup."
+            "⚠️ *Non sei ancora registrato!*\nUsa /registrati per configurare il bot.",
+            parse_mode=ParseMode.MARKDOWN,
         )
         return
 
-    # Generiamo un token sicuro per la sessione di setup
-    reg_token = _user_store.create_oauth_session(chat_id)
-    
-    # URL della Mini App (usiamo lo stesso host dell'OAuth)
-    # NOTA: In produzione andrà configurata l'URL pubblica
-    setup_url = f"{Config.WEBAPP_BASE_URL}/setup?reg_token={reg_token}"
-    
-    keyboard = InlineKeyboardMarkup([
-        [InlineKeyboardButton("🛠️ Apri Setup Form", web_app=WebAppInfo(url=setup_url))]
-    ])
-    
-    await update.message.reply_text(
-        "🚀 *Configurazione Rapida Moneo*\n\n"
-        "Ho preparato un form dinamico per impostare i tuoi **Conti**, le **Categorie** e gli **Abbonamenti** direttamente in questa chat.\n\n"
-        "È il modo più veloce per iniziare! ✨",
+    chat_id = str(update.effective_chat.id)
+    await update.message.chat.send_action("typing")
+
+    try:
+        dashboard_text = _build_dashboard_for_user(chat_id)
+    except Exception as e:
+        logger.error(f"[User {chat_id}] Errore costruzione dashboard: {e}")
+        await update.message.reply_text(
+            "⚠️ Non sono riuscito a caricare la dashboard. Riprova tra qualche secondo."
+        )
+        return
+
+    # Invia il nuovo messaggio dashboard
+    msg = await update.message.reply_text(
+        dashboard_text,
         parse_mode=ParseMode.MARKDOWN,
-        reply_markup=keyboard
+        reply_markup=_get_dashboard_keyboard(_is_premium(chat_id))
     )
+
+    # Unpin il vecchio messaggio dashboard (se esiste)
+    old_msg_id = _user_store.get_pinned_dashboard_msg_id(chat_id)
+    if old_msg_id:
+        try:
+            await context.bot.unpin_chat_message(
+                chat_id=int(chat_id), message_id=old_msg_id
+            )
+        except Exception:
+            pass  # Il messaggio potrebbe essere stato cancellato dall'utente
+
+    # Pin il nuovo messaggio
+    try:
+        await msg.pin(disable_notification=True)
+    except Exception as e:
+        logger.warning(f"[User {chat_id}] Impossibile pinnare la dashboard: {e}")
+
+    # Salva il message_id per futuri aggiornamenti
+    _user_store.set_pinned_dashboard_msg_id(chat_id, msg.message_id)
+    logger.info(f"[User {chat_id}] Dashboard inviata e pinnata (msg_id={msg.message_id})")
+
+
+def _build_dashboard_for_user(chat_id: str) -> str:
+    """Costruisce il testo della dashboard per un utente."""
+    storage = _get_storage(chat_id)
+
+    # Dati base: conti e abbonamenti
+    accounts = storage.fetch_accounts()
+    subscriptions = storage.fetch_subscriptions()
+
+    # Dati premium: spese per categoria con medie storiche
+    plan = _user_store.get_user_plan(chat_id)
+    is_premium = plan["plan_type"] == "pro"
+    categories_spending = None
+
+    if is_premium:
+        from datetime import date as _date
+        today = _date.today()
+        first_of_month = today.replace(day=1)
+
+        # Prendi tutte le transazioni del mese corrente
+        try:
+            transactions = storage.fetch_all_transactions(first_of_month, today)
+        except Exception as e:
+            logger.warning(f"[User {chat_id}] Errore fetch transazioni per dashboard: {e}")
+            transactions = []
+
+        # Raggruppa per categoria
+        spending_by_cat: dict[str, float] = {}
+        for tx in transactions:
+            cat = tx.get("category") or "Senza categoria"
+            spending_by_cat[cat] = spending_by_cat.get(cat, 0.0) + tx.get("amount", 0.0)
+
+        # Recupera le medie storiche dal DB locale
+        cat_averages = _user_store.get_user_categories_with_averages(chat_id)
+        avg_map = {c["name"]: c["average"] for c in cat_averages}
+
+        # Unisci spese attuali + medie
+        all_cat_names = set(spending_by_cat.keys()) | set(avg_map.keys())
+        categories_spending = []
+        for cat_name in sorted(all_cat_names):
+            categories_spending.append({
+                "name": cat_name,
+                "spent_this_month": spending_by_cat.get(cat_name, 0.0),
+                "average": avg_map.get(cat_name, 0.0),
+            })
+
+    return build_dashboard_text(
+        accounts=accounts,
+        subscriptions=subscriptions,
+        categories_spending=categories_spending,
+        is_premium=is_premium,
+        user_plan=plan,
+    )
+
+
+async def _refresh_pinned_dashboard(bot, chat_id: str) -> None:
+    """Aggiorna il messaggio dashboard pinnato con i dati più recenti.
+
+    Chiamata dopo ogni salvataggio (spesa/entrata) per mantenere
+    la dashboard sempre sincronizzata.
+    """
+    msg_id = _user_store.get_pinned_dashboard_msg_id(chat_id)
+    if not msg_id:
+        return  # L'utente non ha ancora una dashboard pinnata
+
+    try:
+        dashboard_text = _build_dashboard_for_user(chat_id)
+        await bot.edit_message_text(
+            chat_id=int(chat_id),
+            message_id=msg_id,
+            text=dashboard_text,
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=_get_dashboard_keyboard(_is_premium(chat_id))
+        )
+        logger.info(f"[User {chat_id}] Dashboard pinnata aggiornata (msg_id={msg_id})")
+    except Exception as e:
+        logger.warning(f"[User {chat_id}] Impossibile aggiornare dashboard pinnata: {e}")
+
 
 # ---------------------------------------------------------------------------
 # Handlers
 # ---------------------------------------------------------------------------
+
+async def cmd_piano(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Mostra i dettagli del piano e dei token mensili."""
+    chat_id = str(update.effective_chat.id)
+    if not _is_authorized(update):
+        await update.message.reply_text("Devi prima registrarti con /registrati.")
+        return
+        
+    plan = _user_store.get_user_plan(chat_id)
+    tipo = plan["plan_type"].upper()
+    rimanenti = plan["tokens_remaining"]
+    totali = plan["tokens_total"]
+    reset = plan["tokens_reset_at"].strftime("%d/%m/%Y")
+    percent = round(((totali - rimanenti) / totali) * 100) if totali > 0 else 0
+    
+    testo = (
+        f"📊 *Il tuo Piano: {tipo}*\n\n"
+        f"🔹 Token utilizzati: {percent}%\n"
+        f"🔹 Token rimanenti: {rimanenti:,} / {totali:,}\n"
+        f"🔄 Reset previsto: {reset}\n\n"
+    )
+    
+    if tipo == "FREE":
+        testo += (
+            "✨ *Passa a PRO per sbloccare:*\n"
+            "• Parsing spese da foto scontrino 📸\n"
+            "• Parsing note vocali 🎙️\n"
+            "• Abbonamenti automatici 🔄\n"
+            "• Report mensili AI 📈\n"
+            "• Conti illimitati 🏦\n\n"
+            "Puoi provare il piano PRO gratis per 1 mese!"
+        )
+        # TODO: aggiungere pulsante inline per l'upgrade (Stripe/Stars) quando integrati
+    else:
+        testo += "Grazie per essere un utente PRO! Hai accesso a tutte le funzionalità premium di Traky 🚀"
+        
+    await update.message.reply_text(testo, parse_mode=ParseMode.MARKDOWN)
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handler per /start — messaggio di benvenuto."""
@@ -257,7 +485,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def cmd_feedback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handler per /feedback — raccoglie e salva i suggerimenti/problemi dell'utente."""
     if not _is_authorized(update):
-        await update.message.reply_text("⚠️ *Non sei ancora registrato!*\nUsa /registra per configurare il bot.", parse_mode=ParseMode.MARKDOWN)
+        await update.message.reply_text("⚠️ *Non sei ancora registrato!*\nUsa /registrati per configurare il bot.", parse_mode=ParseMode.MARKDOWN)
         return
 
     chat_id = str(update.effective_chat.id)
@@ -274,6 +502,14 @@ async def cmd_feedback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 async def cmd_registra(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Fornisce due opzioni di registrazione: OAuth Notion oppure backend PostgreSQL interno."""
     chat_id = str(update.effective_chat.id)
+
+    if _user_store.get_user(chat_id):
+        await update.message.reply_text(
+            "⚠️ *Hai già un account attivo!*\n\n"
+            "Usa /status per vedere la tua dashboard, o /elimina\\_account se vuoi cancellare tutto e ripartire da zero.",
+            parse_mode=ParseMode.MARKDOWN
+        )
+        return
 
     # Un unico reg_token monouso valido per entrambi i percorsi:
     # chi clicca per primo lo consuma e l'altro bottone resta inattivo.
@@ -297,12 +533,37 @@ async def cmd_registra(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         reply_markup=keyboard
     )
 
+async def cmd_elimina_account(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handler per /elimina_account — chiede conferma prima di cancellare tutti i dati."""
+    if not _is_authorized(update):
+        await update.message.reply_text(
+            "⚠️ *Non sei ancora registrato!*\nUsa /registrati per configurare il bot.",
+            parse_mode=ParseMode.MARKDOWN
+        )
+        return
+
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("💀 Sì, elimina tutto", callback_data="delete_account_confirm")],
+        [InlineKeyboardButton("❌ Annulla", callback_data="delete_account_cancel")],
+    ])
+    await update.message.reply_text(
+        "⚠️ *Sei sicuro di voler eliminare il tuo account?*\n\n"
+        "Questa operazione è *irreversibile* e cancellerà:\n"
+        "• Tutti i tuoi dati finanziari (spese, entrate, conti, abbonamenti)\n"
+        "• Le tue categorie e impostazioni\n"
+        "• Il tuo account Moneo\n\n"
+        "I dati sul tuo workspace Notion *non* vengono toccati.",
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=keyboard
+    )
+
+
 async def cmd_login(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Effettua il login di un utente registrato."""
     chat_id = str(update.effective_chat.id)
     user = _user_store.get_user(chat_id)
     if not user:
-        await update.message.reply_text("❌ Non sei registrato. Scrivi /registra per iniziare.")
+        await update.message.reply_text("❌ Non sei registrato. Scrivi /registrati per iniziare.")
         return
 
 
@@ -393,8 +654,7 @@ async def cmd_login(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     user = _user_store.get_user(chat_id)
     if user and user.email:
         await update.message.reply_text(
-            "✅ Sei già autenticato come *" + (user.email or chat_id) + "*.\n"
-            "Usa /setup per accedere alla tua area personale.",
+            "✅ Sei già autenticato come *" + (user.email or chat_id) + "*.\n",
             parse_mode=ParseMode.MARKDOWN,
         )
         return ConversationHandler.END
@@ -439,7 +699,7 @@ async def login_receive_password(update: Update, context: ContextTypes.DEFAULT_T
 
     reg_token = _user_store.create_oauth_session(user.chat_id)
     base_url = Config.WEBAPP_BASE_URL
-    setup_url = f"{base_url}/setup/miniapp?reg_token={reg_token}"
+    setup_url = f"{base_url}/setup?reg_token={reg_token}"
 
     await update.message.reply_text(
         f"✅ *Login effettuato!* Benvenuto, {user.email}.\n\n"
@@ -462,12 +722,16 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     chat_id = str(update.effective_chat.id) #recupero id chat utente che ha fatto richiesta
 
     if not _is_authorized(update):
-        await update.message.reply_text("⚠️ *Non sei ancora registrato!*\nUsa /registra per configurare il bot.", parse_mode=ParseMode.MARKDOWN)
+        await update.message.reply_text("⚠️ *Non sei ancora registrato!*\nUsa /registrati per configurare il bot.", parse_mode=ParseMode.MARKDOWN)
         return
 
     # 🛡️ DIFESA 1: Rate Limiting (Anti-DoS)
     if is_rate_limited(chat_id, max_messages=Config.MAX_MESSAGES_PER_MINUTE):
         await update.message.reply_text("⏳ Stai inviando troppi messaggi. Aspetta un momento e riprova.")
+        return
+
+    # 🛡️ DIFESA 2: Verifica Token (Piano Free/Pro)
+    if not await _check_and_consume_tokens(update, chat_id, "text"):
         return
 
     message_text = update.message.text.strip()
@@ -546,6 +810,7 @@ async def _process_expense_text(update: Update, context: ContextTypes.DEFAULT_TY
     result = parser.parse(safe_input)
 
     if result is None:
+        _user_store.increment_ai_metrics(success=False)
         await update.message.reply_text(
             "⚠️ Non sono riuscito ad elaborare il messaggio in questo momento.\n"
             "Il servizio AI è temporaneamente sovraccarico — riprova tra qualche secondo! 🔄",
@@ -566,6 +831,7 @@ async def _process_expense_text(update: Update, context: ContextTypes.DEFAULT_TY
     
     # Se manca l'importo, chiedi chiarimento e metti in attesa
     if result["amount"] is None:
+        _user_store.increment_ai_metrics(success=False)
         context.user_data["waiting_for_amount"] = True
         cat_info = f" ({result['category']})" if result["category"] else ""
         await update.message.reply_text(
@@ -622,6 +888,10 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         await update.message.reply_text("⏳ Stai inviando troppi messaggi. Aspetta un momento.")
         return
 
+    # 🛡️ DIFESA 1.5: Verifica Token (Piano Free/Pro + Blocco Premium)
+    if not await _check_and_consume_tokens(update, chat_id, "voice"):
+        return
+
     # 🛡️ DIFESA 2: Validazione dimensione PRIMA del download
     voice = update.message.voice
     if voice.file_size and voice.file_size > Config.MAX_FILE_SIZE_MB * 1024 * 1024:
@@ -674,6 +944,10 @@ async def handle_photos(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     # 🛡️ DIFESA 1: Rate Limiting
     if is_rate_limited(chat_id, max_messages=Config.MAX_MESSAGES_PER_MINUTE):
         await update.message.reply_text("⏳ Stai inviando troppi messaggi. Aspetta un momento.")
+        return
+
+    # 🛡️ DIFESA 1.5: Verifica Token (Piano Free/Pro + Blocco Premium)
+    if not await _check_and_consume_tokens(update, chat_id, "photo"):
         return
 
     # Telegram invia la foto in varie risoluzioni → prendiamo la migliore ([-1])
@@ -766,6 +1040,13 @@ async def _save_to_notion(query, context, chat_id: str, account_id: str | None =
             )
             logger.info(f"Spesa salvata: {data['name']} €{data['amount']:.2f}")
 
+        # Aggiorna la dashboard pinnata in background (se esiste)
+        try:
+            _user_store.increment_ai_metrics(success=True)
+            await _refresh_pinned_dashboard(query._bot, chat_id)
+        except Exception as e:
+            logger.warning(f"[User {chat_id}] Errore refresh dashboard post-save: {e}")
+
     except Exception as e:
         logger.error(f"Errore salvataggio Notion: {e}")
         await query.edit_message_text(
@@ -781,6 +1062,18 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     chat_id = str(update.effective_chat.id)
 
     if not _is_authorized(update):
+        return
+
+    if query.data == "delete_account_confirm":
+        backend = _user_store.delete_user_completely(chat_id)
+        logger.info(f"[User {chat_id}] Account eliminato (backend: {backend})")
+        await query.edit_message_text(
+            "✅ Account eliminato. Tutti i tuoi dati sono stati cancellati.\n\nCiao! 👋"
+        )
+        return
+
+    if query.data == "delete_account_cancel":
+        await query.edit_message_text("❌ Eliminazione annullata. Il tuo account è al sicuro.")
         return
 
     if query.data == "cancel":
@@ -811,7 +1104,8 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         # Disegna bottoni
         keyboard = []
         for acc in accounts:
-            keyboard.append([InlineKeyboardButton(f"🏦 {acc['name']} (€{acc['current_balance']:.2f})", callback_data=f"account:{acc['id']}")])
+            bal = acc.get('balance', acc.get('current_balance', 0.0))
+            keyboard.append([InlineKeyboardButton(f"🏦 {acc['name']} (€{bal:.2f})", callback_data=f"account:{acc['id']}")])
         keyboard.append([InlineKeyboardButton("❌ Annulla", callback_data="cancel")])
         
         pending = context.user_data.get("pending_expense", {})
@@ -911,6 +1205,174 @@ def _nightly_category_sync() -> None:
     logger.info("[NightlySync] Sincronizzazione notturna completata.")
 
 
+def _daily_dashboard_job(app: Application) -> None:
+    """Job APScheduler alle 08:00 — invia una nuova dashboard giornaliera per ogni utente attivo.
+
+    Per ogni utente:
+    1. Costruisce il testo dashboard aggiornato
+    2. Invia un nuovo messaggio
+    3. Unpin il vecchio, pin il nuovo
+    4. Salva il nuovo msg_id
+    """
+    import asyncio
+
+    logger.info("[DailyDashboard] Avvio invio dashboard giornaliere.")
+
+    async def _send_dashboards():
+        bot = app.bot
+        # Recupera tutti gli utenti attivi (sia Notion che Postgres)
+        notion_users = _user_store.get_active_notion_users()
+        pg_users = _user_store.get_active_postgres_users()
+        all_users = list(notion_users) + list(pg_users)
+
+        sent = 0
+        for user in all_users:
+            chat_id = user.chat_id
+            try:
+                dashboard_text = _build_dashboard_for_user(chat_id)
+
+                # Invia nuovo messaggio
+                msg = await bot.send_message(
+                    chat_id=int(chat_id),
+                    text=dashboard_text,
+                    parse_mode=ParseMode.MARKDOWN,
+                    reply_markup=_get_dashboard_keyboard(_is_premium(chat_id)),
+                )
+
+                # Unpin vecchio
+                old_msg_id = _user_store.get_pinned_dashboard_msg_id(chat_id)
+                if old_msg_id:
+                    try:
+                        await bot.unpin_chat_message(
+                            chat_id=int(chat_id), message_id=old_msg_id
+                        )
+                    except Exception:
+                        pass
+
+                # Pin nuovo
+                try:
+                    await bot.pin_chat_message(
+                        chat_id=int(chat_id),
+                        message_id=msg.message_id,
+                        disable_notification=True,
+                    )
+                except Exception as e:
+                    logger.warning(f"[DailyDashboard] Pin fallito per {chat_id}: {e}")
+
+                # Salva
+                _user_store.set_pinned_dashboard_msg_id(chat_id, msg.message_id)
+                sent += 1
+                logger.info(f"[DailyDashboard] Dashboard inviata a {chat_id}")
+
+            except Exception as e:
+                logger.error(f"[DailyDashboard] Errore per {chat_id}: {e}")
+
+            time.sleep(0.5)  # Rate limit tra utenti
+
+        logger.info(f"[DailyDashboard] Completato: {sent}/{len(all_users)} dashboard inviate.")
+
+    # APScheduler gira in un thread separato — eseguiamo la coroutine
+    # nell'event loop dell'applicazione Telegram
+    try:
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            asyncio.ensure_future(_send_dashboards())
+        else:
+            loop.run_until_complete(_send_dashboards())
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        loop.run_until_complete(_send_dashboards())
+
+
+def _nightly_subscription_job(app: Application) -> None:
+    """Job APScheduler alle 03:00 — processa abbonamenti automatici per utenti Pro."""
+    import asyncio
+    import time
+    from datetime import date as _date
+    
+    logger.info("[NightlySubs] Avvio processing abbonamenti automatici.")
+    
+    async def _process_subs():
+        today = _date.today()
+        # Recupera tutti gli utenti PRO attivi
+        pro_users = _user_store.get_pro_users()
+        logger.info("[NightlySubs] Utenti Pro da controllare: %d", len(pro_users))
+        
+        for user in pro_users:
+            chat_id = user.chat_id
+            try:
+                storage = _get_storage(chat_id)
+                subs = storage.fetch_subscriptions()
+                
+                for sub in subs:
+                    sub_name = sub.get("name", "Abbonamento")
+                    amount = sub.get("amount", 0.0)
+                    last_billed = sub.get("last_billed")
+                    sub_type = sub.get("sub_type")
+                    account_id = sub.get("account_id")
+                    
+                    if not amount:
+                        continue
+                        
+                    next_date = get_next_billing_date(last_billed, sub_type)
+                    
+                    # Se oggi è il giorno del rinnovo (o è passato)
+                    if next_date and next_date <= today:
+                        logger.info(f"[NightlySubs] Rinnovo dovuto per {chat_id}: {sub_name} (€{amount})")
+                        
+                        # 1. Risolvi Monthly Balance
+                        mb_id = storage.get_or_create_monthly_balance(today)
+
+                        # 2. Crea la spesa
+                        storage.create_expense(
+                            expense_date=today,
+                            amount=amount,
+                            name=f"Rinnovo automatico: {sub_name}",
+                            category_name="Abbonamenti",
+                            monthly_balance_id=mb_id,
+                            account_id=str(account_id) if account_id else None
+                        )
+                        
+                        # 3. Aggiorna l'abbonamento con la nuova data
+                        storage.update_subscription(sub.get("id"), last_billed=today)
+                        
+                        # 3. Notifica l'utente
+                        try:
+                            new_next = get_next_billing_date(today, sub_type)
+                            next_str = new_next.strftime('%d/%m/%Y') if new_next else "N/D"
+                            
+                            await app.bot.send_message(
+                                chat_id=int(chat_id),
+                                text=f"✅ *Rinnovo automatico effettuato!*\n\n"
+                                     f"Ho registrato la spesa per *{sub_name}* (€{amount:,.2f}).\n"
+                                     f"Prossimo rinnovo previsto: {next_str}",
+                                parse_mode=ParseMode.MARKDOWN
+                            )
+                        except Exception as n_err:
+                            logger.error(f"[NightlySubs] Errore notifica a {chat_id}: {n_err}")
+                        
+                        # 4. Aggiorna la dashboard pinnata
+                        await update_dashboard_if_pinned(chat_id, app.bot)
+                        
+            except Exception as e:
+                logger.error(f"[NightlySubs] Errore processing abbonamenti per {chat_id}: {e}")
+            
+            time.sleep(0.5) # Rate limit tra utenti
+            
+    # Eseguo nell'event loop dell'applicazione
+    try:
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            asyncio.ensure_future(_process_subs())
+        else:
+            loop.run_until_complete(_process_subs())
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        loop.run_until_complete(_process_subs())
+
+
 def main():
     setup_logging()
 
@@ -954,8 +1416,11 @@ def main():
 
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("registrati", cmd_registra))
-    app.add_handler(CommandHandler("setup", cmd_setup))
+    app.add_handler(CommandHandler("elimina_account", cmd_elimina_account))
+    app.add_handler(CommandHandler("modify", cmd_modify))
     app.add_handler(CommandHandler("feedback", cmd_feedback))
+    app.add_handler(CommandHandler("status", cmd_status))
+    app.add_handler(CommandHandler("piano", cmd_piano))
     app.add_handler(login_conv)
     app.add_handler(CallbackQueryHandler(handle_callback))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
@@ -968,6 +1433,8 @@ def main():
     # Job notturno: aggiornamento medie categorie alle 03:00
     scheduler = BackgroundScheduler(daemon=True)
     scheduler.add_job(_nightly_category_sync, 'cron', hour=3, minute=0)
+    scheduler.add_job(_nightly_subscription_job, 'cron', hour=3, minute=5, args=[app])
+    scheduler.add_job(_daily_dashboard_job, 'cron', hour=8, minute=0, args=[app])
     scheduler.start()
     logger.info("⏰ Scheduler notturno avviato (sync categorie alle 03:00).")
 

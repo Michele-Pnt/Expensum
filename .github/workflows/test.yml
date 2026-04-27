@@ -1,47 +1,58 @@
 # .github/workflows/test.yml
-# 
-# Questo workflow esegue la "Mega Test Suite" in automatico ad ogni push o pull request.
-# 
-# 🚩 COME DISATTIVARE/ATTIVARE IL WORKFLOW:
-# Se vuoi disabilitare temporaneamente il test automatico su GitHub:
-# 1. Commenta le righe sotto 'on:' (push e pull_request).
-# 2. Oppure vai nelle impostazioni del repository (Settings -> Actions) e disabilita i workflow.
+#
+# Questo workflow esegue la test suite (unit + integration) ad ogni push o pull request.
+# I test e2e sono esclusi di default (vedi pytest.ini addopts).
+#
+# Per disabilitare temporaneamente: Settings → Actions → Disable workflow.
 
-name: Mega Test Suite
+name: Test Suite
 
 on:
   push:
     branches: [ main, master ]
   pull_request:
     branches: [ main, master ]
-  # Consente di avviare il test manualmente dalla tab "Actions" di GitHub
   workflow_dispatch:
+
+env:
+  # Forza Node.js 24 per le GitHub Actions (rimuove il deprecation warning)
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
   test:
     runs-on: ubuntu-latest
-    
+
+    env:
+      # Variabili d'ambiente mock per evitare errori di import durante la raccolta dei test.
+      # I test usano mock/fixture, non chiamate reali alle API.
+      TELEGRAM_TOKEN: mock_token
+      GEMINI_API_KEY: mock_key
+      NOTION_CLIENT_ID: mock_id
+      NOTION_CLIENT_SECRET: mock_secret
+      NOTION_REDIRECT_URI: http://localhost/callback
+      SECRET_KEY: mock_secret_key
+      DATABASE_URL: "sqlite:///:memory:"
+      FLASK_ENV: testing
+
     steps:
     - name: Checkout del codice
       uses: actions/checkout@v4
 
-    - name: Setup Python
+    - name: Setup Python 3.12
       uses: actions/setup-python@v5
       with:
         python-version: '3.12'
+        cache: 'pip'
 
     - name: Installazione dipendenze
       run: |
         python -m pip install --upgrade pip
-        pip install pytest pytest-mock pytest-flask pytest-cov
-        if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+        pip install -r requirements.txt
 
-    - name: Esecuzione Test Suite (MOCK mode)
+    - name: Esecuzione Test Suite (unit + integration, MOCK mode)
       run: |
-        # Eseguiamo i test in modalità MOCK (senza chiamare AI vere) per risparmiare crediti/token
-        # Se volessi testare con l'AI vera in CI, dovresti aggiungere i Secrets nel repository
-        # e passare il flag --real-ai
-        python -m pytest tests/ -v --cov=src --cov-report=xml
+        # addopts in pytest.ini esclude già gli e2e e applica --strict-markers
+        python -m pytest -v --cov=src --cov-report=xml --tb=short
 
     - name: Upload della coverage (Opzionale)
       uses: codecov/codecov-action@v4

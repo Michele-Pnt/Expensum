@@ -12,6 +12,8 @@ import pytest
 from datetime import date
 from src.data_processor import DataProcessor, MonthlySummary
 
+pytestmark = pytest.mark.unit
+
 
 # ---------------------------------------------------------------------------
 # Fixture: dati di test comuni

@@ -1,6 +1,8 @@
 import pytest
 from unittest.mock import patch, MagicMock
 
+pytestmark = pytest.mark.e2e
+
 def test_dashboard_home_page_redirects(client):
     """Verifica che la home (/) ridiriga al login se l'utente non è autenticato."""
     response = client.get("/")

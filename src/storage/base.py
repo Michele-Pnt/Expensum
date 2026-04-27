@@ -22,6 +22,7 @@ class FinancialStorage(ABC):
         name: str,
         category_name: str,
         account_id: str,
+        monthly_balance_id: str | None = None,
     ) -> dict:
         """Crea una nuova spesa e restituisce un dict con i dati salvati."""
         ...
@@ -71,4 +72,23 @@ class FinancialStorage(ABC):
     @abstractmethod
     def create_subscription(self, name: str) -> dict:
         """Crea un nuovo abbonamento. Restituisce dict con almeno 'id' e 'name'."""
+        ...
+
+    @abstractmethod
+    def fetch_subscriptions(self) -> list[dict]:
+        """Restituisce tutti gli abbonamenti dell'utente.
+
+        Ogni dict contiene almeno: name, amount, last_billed (ISO string o None).
+        """
+        ...
+
+    def update_subscription(self, sub_id: str, last_billed: date | None = None) -> bool:
+        """Aggiorna i dati di un abbonamento. Per ora supportiamo solo last_billed."""
+        return False
+
+    @abstractmethod
+    def get_or_create_monthly_balance(self, target_date: date) -> str | None:
+        """Ritorna l'ID del record Monthly Balance per il mese della data fornita.
+        Se non esiste, lo crea.
+        """
         ...

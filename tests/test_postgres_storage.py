@@ -15,28 +15,34 @@ from src.user_store import Base, User
 from src.storage.models import Account, UserCategory, Expense, Income, MonthlyBalance
 from src.storage.postgres_storage import PostgresStorage
 
+pytestmark = pytest.mark.integration
 
 # ---------------------------------------------------------------------------
-# Fixture: engine + session SQLite in-memory, azzerato per ogni test
+# Fixture: engine creato una volta per modulo, schema ricreato per ogni test
 # ---------------------------------------------------------------------------
+
+@pytest.fixture(scope="module")
+def db_engine():
+    """Engine SQLite in-memory condiviso per tutto il modulo."""
+    engine = create_engine("sqlite:///:memory:", echo=False)
+    yield engine
+    engine.dispose()
+
 
 @pytest.fixture
-def db_session():
-    """Session SQLite in-memory con tutte le tabelle create da zero."""
-    engine = create_engine("sqlite:///:memory:", echo=False)
-    Base.metadata.create_all(engine)
-    Session = sessionmaker(bind=engine)
+def db_session(db_engine):
+    """Schema azzerato e utente di test reinserito a ogni test."""
+    Base.metadata.drop_all(db_engine)
+    Base.metadata.create_all(db_engine)
+    Session = sessionmaker(bind=db_engine)
     session = Session()
 
-    # Utente di test — necessario per soddisfare le FK constraint delle tabelle finanziarie
-    user = User(chat_id="test_user_1", username="testuser", is_active=True)
-    session.add(user)
+    session.add(User(chat_id="test_user_1", username="testuser", is_active=True))
     session.commit()
 
     yield session
 
     session.close()
-    engine.dispose()
 
 
 @pytest.fixture
