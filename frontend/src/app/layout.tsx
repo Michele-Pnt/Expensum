@@ -17,8 +17,12 @@ export default function RootLayout({
   children: React.ReactNode;
 }>) {
   return (
-    <html lang="it">
-      <body className={inter.className}>
+    <html lang="it" suppressHydrationWarning>
+      <head>
+        <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
+        <script src="https://telegram.org/js/telegram-web-app.js"></script>
+      </head>
+      <body className={inter.className} suppressHydrationWarning>
         <AppRouterCacheProvider>
           <ThemeRegistry>
             {children}

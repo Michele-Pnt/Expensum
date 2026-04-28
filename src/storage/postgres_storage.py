@@ -313,7 +313,7 @@ class PostgresStorage(FinancialStorage):
         sub_id: int,
         name: str | None = None,
         amount: float | None = None,
-        last_billed: str | None = None,
+        last_billed: date | None = None,
         sub_type: str | None = None,
         account_id: int | None = None,
         category_id: int | None = None,
@@ -329,8 +329,7 @@ class PostgresStorage(FinancialStorage):
         if amount is not None:
             row.amount = amount
         if last_billed is not None:
-            from datetime import datetime as dt
-            row.last_billed = dt.strptime(last_billed, "%Y-%m-%d").date()
+            row.last_billed = last_billed
         if sub_type is not None:
             row.sub_type = sub_type
         if account_id is not None:

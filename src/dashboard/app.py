@@ -1478,9 +1478,14 @@ def _validate_telegram_init_data(init_data_raw: str) -> dict | None:
 
     Spec: https://core.telegram.org/bots/webapps#validating-data-received-via-the-mini-app
     """
+    import logging
+    _fh = logging.FileHandler("/tmp/tg_hmac_debug.log")
+    _fh.setLevel(logging.DEBUG)
+    logging.getLogger().addHandler(_fh)
     token = Config.TELEGRAM_BOT_TOKEN.encode()
     secret_key = hmac.new(b"WebAppData", token, hashlib.sha256).digest()
 
+    from urllib.parse import unquote
     params: dict[str, str] = {}
     received_hash: str | None = None
     for part in init_data_raw.split("&"):
@@ -1490,13 +1495,21 @@ def _validate_telegram_init_data(init_data_raw: str) -> dict | None:
         if k == "hash":
             received_hash = v
         else:
-            params[k] = v
+            params[k] = unquote(v)  # signature inclusa nel dcs (Bot API 7.0+)
 
     if not received_hash:
+        logging.warning("[HMAC] No hash field found in initData")
         return None
 
     data_check_string = "\n".join(f"{k}={v}" for k, v in sorted(params.items()))
     expected_hash = hmac.new(secret_key, data_check_string.encode(), hashlib.sha256).hexdigest()
+
+    logging.warning(f"[HMAC] token_len={len(token)}, token_first5={token[:5]!r}")
+    logging.warning(f"[HMAC] data_check_string keys={list(sorted(params.keys()))}")
+    logging.warning(f"[HMAC] data_check_string={data_check_string!r}")
+    logging.warning(f"[HMAC] init_data_raw={init_data_raw!r}")
+    logging.warning(f"[HMAC] expected={expected_hash[:16]}..., received={received_hash[:16]}...")
+    logging.warning(f"[HMAC] match={expected_hash == received_hash}")
 
     if not hmac.compare_digest(expected_hash, received_hash):
         return None
@@ -1518,10 +1531,15 @@ def _tg_webapp_auth(f):
     @wraps(f)
     def decorated(*args, **kwargs):
         init_data = request.headers.get("X-Telegram-Init-Data", "")
+        import logging
+        logging.warning(f"[TG_AUTH] init_data present: {bool(init_data)}, len: {len(init_data)}, first50: {init_data[:50]!r}")
         if not init_data:
+            logging.warning("[TG_AUTH] Missing header → 401")
             return jsonify({"error": "Missing Telegram auth"}), 401
         parsed = _validate_telegram_init_data(init_data)
+        logging.warning(f"[TG_AUTH] parsed: {parsed is not None}, chat_id: {parsed.get('chat_id') if parsed else None}")
         if not parsed or not parsed["chat_id"]:
+            logging.warning("[TG_AUTH] Invalid auth → 401")
             return jsonify({"error": "Invalid Telegram auth"}), 401
         g.chat_id = parsed["chat_id"]
         return f(*args, **kwargs)

@@ -1,6 +1,19 @@
 import type { NextConfig } from "next";
+import fs from "fs";
+import path from "path";
+
+// Carica l'URL di ngrok dal .env della root
+const envPath = path.resolve(process.cwd(), "../.env");
+let ngrokHost = "";
+if (fs.existsSync(envPath)) {
+  const envContent = fs.readFileSync(envPath, "utf-8");
+  const match = envContent.match(/^WEBAPP_BASE_URL=https:\/\/([^/\s]+)/m);
+  if (match) ngrokHost = match[1];
+}
 
 const nextConfig: NextConfig = {
+  // @ts-ignore - Necessario per alcune versioni di Next.js/Turbopack
+  allowedDevOrigins: ngrokHost ? [ngrokHost, "*.ngrok-free.app"] : ["*.ngrok-free.app"],
   async rewrites() {
     return [
       {

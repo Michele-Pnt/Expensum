@@ -1353,7 +1353,7 @@ def _nightly_subscription_job(app: Application) -> None:
                             logger.error(f"[NightlySubs] Errore notifica a {chat_id}: {n_err}")
                         
                         # 4. Aggiorna la dashboard pinnata
-                        await update_dashboard_if_pinned(chat_id, app.bot)
+                        await _refresh_pinned_dashboard(app.bot, chat_id)
                         
             except Exception as e:
                 logger.error(f"[NightlySubs] Errore processing abbonamenti per {chat_id}: {e}")

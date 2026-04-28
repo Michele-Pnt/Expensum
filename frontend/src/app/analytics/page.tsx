@@ -50,8 +50,11 @@ function makeHeaders(initData: string | null): HeadersInit {
 
 async function fetchApi<T>(path: string, initData: string | null, months: number): Promise<T> {
   const url = `${API_BASE}${path}?months=${months}`;
-  const res = await fetch(url, { headers: makeHeaders(initData) });
+  const headers = makeHeaders(initData);
+  console.log("fetchApi:", path, "initData:", initData ? initData.substring(0, 20) : "null", "headers:", headers);
+  const res = await fetch(url, { headers });
   if (!res.ok) {
+    console.error("fetchApi failed:", res.status, await res.text());
     if (res.status === 401) throw new Error("auth_401");
     throw new Error(`Errore API ${res.status}`);
   }
@@ -59,8 +62,11 @@ async function fetchApi<T>(path: string, initData: string | null, months: number
 }
 
 async function fetchWealth(initData: string | null): Promise<WealthData> {
-  const res = await fetch(`${API_BASE}/api/analytics/wealth`, { headers: makeHeaders(initData) });
+  const headers = makeHeaders(initData);
+  console.log("fetchWealth: initData:", initData ? initData.substring(0, 20) : "null", "headers:", headers);
+  const res = await fetch(`${API_BASE}/api/analytics/wealth`, { headers });
   if (!res.ok) {
+    console.error("fetchWealth failed:", res.status, await res.text());
     if (res.status === 401) throw new Error("auth_401");
     throw new Error(`Errore API ${res.status}`);
   }
@@ -286,15 +292,16 @@ export default function AnalyticsPage() {
   // Rileva contesto Telegram al mount
   useEffect(() => {
     const tg = (window as any).Telegram?.WebApp;
-    console.log("Analytics: Telegram WebApp detection:", !!tg);
+    console.log("Analytics: Telegram WebApp detected:", !!tg);
     if (tg) {
-      console.log("Analytics: initData available:", !!tg.initData);
+      console.log("Analytics: tg.initData =", JSON.stringify(tg.initData?.substring(0, 50)));
+      console.log("Analytics: tg.initData truthy:", !!tg.initData);
       tg.ready();
       tg.expand();
       setIsTelegram(true);
-      setInitData(tg.initData || null);
+      setInitData(tg.initData ?? null);  // Fix: ?? instead of || to preserve empty string
     } else {
-      console.warn("Analytics: Telegram WebApp NOT FOUND. UI will fallback to browser mode.");
+      console.warn("Analytics: Telegram WebApp NOT FOUND");
     }
     setMounted(true);
   }, []);

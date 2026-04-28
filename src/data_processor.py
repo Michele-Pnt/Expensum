@@ -16,8 +16,6 @@ from collections import defaultdict
 from datetime import date, datetime
 from typing import Optional
 
-import pandas as pd
-
 from config import Config
 
 logger = logging.getLogger("financial_agent.processor")
@@ -151,7 +149,8 @@ class DataProcessor:
     # ------------------------------------------------------------------
     # Aggregazione per mese
     # ------------------------------------------------------------------
-    def _to_dataframe(self, transactions: list[dict]) -> pd.DataFrame:
+    def _to_dataframe(self, transactions: list[dict]):
+        import pandas as pd
         df = pd.DataFrame(transactions)
         
         # Filtra le finte spese (trasferimenti/pareggi)
@@ -163,8 +162,9 @@ class DataProcessor:
         df["amount"] = df["amount"].abs()  # Normalizza a positivo
         return df
 
-    def _aggregate_by_month(self, df: pd.DataFrame) -> dict[tuple, MonthlySummary]:
+    def _aggregate_by_month(self, df) -> dict[tuple, MonthlySummary]:
         """Aggrega le transazioni per (anno, mese) e ritorna un dict di MonthlySummary."""
+        import pandas as pd
         summaries: dict[tuple, MonthlySummary] = {}
 
         for (year, month), group in df.groupby(["year", "month"]):

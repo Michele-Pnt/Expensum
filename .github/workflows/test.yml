@@ -51,8 +51,20 @@ jobs:
 
     - name: Esecuzione Test Suite (unit + integration, MOCK mode)
       run: |
-        # addopts in pytest.ini esclude già gli e2e e applica --strict-markers
-        python -m pytest -v --cov=src --cov-report=xml --tb=short
+        # addopts in pytest.ini esclude già gli e2e e applica --strict-markers.
+        # Niente --cov qui: la coverage viene raccolta nello step successivo separato
+        # per evitare che pytest-cov importi tutti i moduli src/ (inclusi quelli con
+        # dipendenze pesanti: matplotlib, seaborn, google-genai, telegram).
+        python -m pytest -v --tb=short
+
+    - name: Coverage (moduli testabili, senza dipendenze grafiche/SDK heavy)
+      run: |
+        python -m pytest \
+          --cov=src \
+          --cov-omit="src/chart_generator.py,src/telegram_client.py,src/gemini_client.py,src/notion_client.py,src/dashboard/*" \
+          --cov-report=xml \
+          --tb=short \
+          -q
 
     - name: Upload della coverage (Opzionale)
       uses: codecov/codecov-action@v4

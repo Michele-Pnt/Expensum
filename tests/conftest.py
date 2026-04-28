@@ -3,6 +3,16 @@ import sys
 import pytest
 from unittest.mock import MagicMock
 
+# Stub preventivi per dipendenze grafiche pesanti: non vengono mai usate nei test
+# (unit/integration), ma --cov=src le importerebbe tutte a collection time.
+# setdefault garantisce che moduli già caricati (es. in IDE) non vengano sostituiti.
+for _heavy in [
+    "matplotlib", "matplotlib.pyplot", "matplotlib.figure",
+    "matplotlib.axes", "matplotlib.patches",
+    "seaborn",
+]:
+    sys.modules.setdefault(_heavy, MagicMock())
+
 # Forza l'ambiente in modalità di testing PRIMA che qualsiasi altra cosa venga importata.
 # DATABASE_URL punta a sqlite in memoria per evitare di toccare users.db reale durante i test.
 os.environ["TESTING"] = "True"
@@ -17,24 +27,6 @@ if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
 from src.user_store import UserStore, Base
-
-
-def pytest_addoption(parser):
-    """
-    Aggiunge una opzione alla riga di comando di pytest:
-    --real-ai: Se presente, i test utilizzeranno le API vere di Gemini/Ollama.
-    """
-    parser.addoption(
-        "--real-ai",
-        action="store_true",
-        default=False,
-        help="Esegue i test chiamando veramente le API delle AI (Gemini/Ollama)"
-    )
-
-
-@pytest.fixture(scope="session")
-def use_real_ai(request):
-    return request.config.getoption("--real-ai")
 
 
 @pytest.fixture

@@ -1,49 +1,28 @@
 import pytest
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 from src.expense_parser import ExpenseParser
 from datetime import date
 
 pytestmark = pytest.mark.unit
 
-def test_expense_parser_logic_with_real_ai_option(use_real_ai):
+def test_expense_parser_logic_with_mocked_gemini():
     """
-    Test del parser di spese. 
-    Se lanciato con --real-ai (pytest --real-ai), interroga l'AI vera.
-    Altrimenti usa un mock pre-configurato.
+    Test del parser di spese con Gemini mockato.
     """
     categories = ["Cibo", "Trasporti", "Divertimento"]
-    
-    if not use_real_ai:
-        # --- MODALITÀ MOCK ---
-        # Mocking della chiamata all'AI (Gemini o Ollama a seconda della config)
-        with patch.object(ExpenseParser, '_call_gemini', return_value='{"type": "expense", "amount": 10.5, "category": "Cibo", "name": "Pizza", "date": "2026-03-25"}'), \
-             patch.object(ExpenseParser, '_call_ollama', return_value='{"type": "expense", "amount": 10.5, "category": "Cibo", "name": "Pizza", "date": "2026-03-25"}'):
-            
-            parser = ExpenseParser(categories)
-            res = parser.parse("Ho speso 10.50 euro per una pizza ieri")
-            
-            assert res is not None
-            assert res["amount"] == 10.5
-            assert res["category"] == "Cibo"
-            assert res["name"] == "Pizza"
-    else:
-        # --- MODALITÀ REALE (Interroghiamo AI) ---
-        # Assicurati di avere GEMINI_API_KEY nel tuo .env!
+
+    with patch.object(
+        ExpenseParser,
+        "_call_gemini",
+        return_value='{"type": "expense", "amount": 10.5, "category": "Cibo", "name": "Pizza", "date": "2026-03-25"}',
+    ):
         parser = ExpenseParser(categories)
-        
-        # Test 1: Spesa semplice
-        res = parser.parse("15 euro per il taxi")
+        res = parser.parse("Ho speso 10.50 euro per una pizza ieri")
+
         assert res is not None
-        assert res["type"] == "expense"
-        assert res["amount"] == 15.0
-        # Il nome può variare a seconda dell'AI ma dovrebbe contenere 'Taxi'
-        assert "taxi" in res["name"].lower()
-        
-        # Test 2: Entrata
-        res = parser.parse("ho ricevuto un rimborso di 50 euro")
-        assert res is not None
-        assert res["type"] == "income"
-        assert res["amount"] == 50.0
+        assert res["amount"] == 10.5
+        assert res["category"] == "Cibo"
+        assert res["name"] == "Pizza"
 
 def test_extract_json_robustness():
     """Testa se la funzione interna _extract_json è in grado di pulire l'output dell'AI."""

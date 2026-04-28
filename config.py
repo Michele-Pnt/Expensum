@@ -60,18 +60,11 @@ class Config:
     NOTION_MB_DATE: str = os.getenv("NOTION_MB_DATE", "Month")
     NOTION_MB_NET_SAVINGS: str = os.getenv("NOTION_MB_NET_SAVINGS", "Risparmio Netto")
 
-    # --- LLM PROVIDER ---
-    LLM_PROVIDER: str = os.getenv("LLM_PROVIDER", "gemini")  # "gemini" o "ollama"
-
     # --- GEMINI ---
     GEMINI_API_KEY: str = os.getenv("GEMINI_API_KEY", "")
     GEMINI_MODEL: str = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
     GEMINI_FALLBACK_1: str = os.getenv("GEMINI_FALLBACK_1", "gemini-2.0-flash")
     GEMINI_FALLBACK_2: str = os.getenv("GEMINI_FALLBACK_2", "gemini-1.5-flash-8b")
-
-    # --- OLLAMA ---
-    OLLAMA_BASE_URL: str = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
-    OLLAMA_MODEL: str = os.getenv("OLLAMA_MODEL", "qwen2.5:7b")
 
     # --- TELEGRAM ---
     TELEGRAM_BOT_TOKEN: str = os.getenv("TELEGRAM_BOT_TOKEN", "")
@@ -119,9 +112,7 @@ class Config:
             "NOTION_CLIENT_ID": cls.NOTION_CLIENT_ID,
             "NOTION_CLIENT_SECRET": cls.NOTION_CLIENT_SECRET,
         }
-        # GEMINI_API_KEY è richiesta solo se il provider è Gemini
-        if cls.LLM_PROVIDER == "gemini":
-            required["GEMINI_API_KEY"] = cls.GEMINI_API_KEY
+        required["GEMINI_API_KEY"] = cls.GEMINI_API_KEY
         missing = [k for k, v in required.items() if not v]
         if missing:
             raise EnvironmentError(

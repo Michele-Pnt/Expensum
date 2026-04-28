@@ -2,12 +2,12 @@
 src/expense_parser.py — Parser LLM per estrarre dati di spesa da testo libero.
 
 L'utente scrive come a un amico:
-  "ieri pizza con amici 25€"
-  "ho speso 67 euro al supermercato"
-  "netflix"
+    "ieri pizza con amici 25€"
+    "ho speso 67 euro al supermercato"
+    "netflix"
 
-Il parser usa il LLM (Ollama o Gemini) per estrarre un JSON strutturato:
-  {date, amount, category, name}
+Il parser usa Gemini per estrarre un JSON strutturato:
+    {date, amount, category, name}
 """
 
 import json
@@ -106,17 +106,12 @@ class ExpenseParser:
         """
         self._categories = categories or []
 
-        if Config.LLM_PROVIDER == "ollama":
-            import ollama as _ollama
-            self._ollama_client = _ollama.Client(host=Config.OLLAMA_BASE_URL)
-            self._provider = "ollama"
-        else:
-            from google import genai
-            self._gemini_client = genai.Client(api_key=Config.GEMINI_API_KEY)
-            self._provider = "gemini"
+        from google import genai
+
+        self._gemini_client = genai.Client(api_key=Config.GEMINI_API_KEY)
 
         logger.info(
-            f"ExpenseParser inizializzato con provider={self._provider}, "
+            "ExpenseParser inizializzato con provider=gemini, "
             f"{len(self._categories)} categorie"
         )
 
@@ -131,13 +126,10 @@ class ExpenseParser:
         today = date.today()
         user_prompt = _build_user_prompt(message, self._categories, today)
 
-        logger.info(f"Parsing messaggio: '{message[:50]}...' con {self._provider}")
+        logger.info(f"Parsing messaggio: '{message[:50]}...' con gemini")
 
         try:
-            if self._provider == "ollama":
-                raw_response = self._call_ollama(user_prompt)
-            else:
-                raw_response = self._call_gemini(user_prompt)
+            raw_response = self._call_gemini(user_prompt)
         except Exception as e:
             logger.error(f"Errore LLM durante il parsing: {e}")
             return None
@@ -158,19 +150,6 @@ class ExpenseParser:
         result = self._normalize(parsed, today)
         logger.info(f"Parsing completato: {result}")
         return result
-
-    def _call_ollama(self, user_prompt: str) -> str:
-        """Chiama Ollama per il parsing."""
-        response = self._ollama_client.chat(
-            model=Config.OLLAMA_MODEL,
-            messages=[
-                {"role": "system", "content": _SYSTEM_PROMPT},
-                {"role": "user", "content": user_prompt},
-            ],
-            options={"temperature": 0.1, "num_predict": 256},
-            format="json",
-        )
-        return response.message.content or ""
 
     def _call_gemini(self, user_prompt: str) -> str:
         """Chiama Gemini con exponential backoff + jitter e fallback model."""

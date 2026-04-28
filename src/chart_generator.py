@@ -5,9 +5,6 @@ src/chart_generator.py — Generazione di grafici da inviare via Telegram.
 import os
 import uuid
 import logging
-import matplotlib.pyplot as plt
-import seaborn as sns
-import pandas as pd
 
 from src.data_processor import TrendReport
 
@@ -19,19 +16,26 @@ class ChartGenerator:
     def __init__(self, output_dir: str = "/tmp"):
         self.output_dir = output_dir
         os.makedirs(self.output_dir, exist_ok=True)
-        # Imposta lo stile di base di Seaborn
-        sns.set_theme(style="darkgrid", palette="muted")
-        # Colori adatti per visualizzazione chiara anche in dark mode
-        plt.rcParams.update({
-            "text.color": "white",
-            "axes.labelcolor": "white",
-            "xtick.color": "white",
-            "ytick.color": "white",
-            "axes.edgecolor": "white",
-            "figure.facecolor": "#1e1e2e",    # Sfondo scuro elegante
-            "axes.facecolor": "#1e1e2e",
-            "font.size": 12
-        })
+        self._style_ready = False
+
+    def _load_plotting_libs(self):
+        """Carica lazily matplotlib e seaborn, configura lo stile al primo uso."""
+        import matplotlib.pyplot as plt
+        import seaborn as sns
+        if not self._style_ready:
+            sns.set_theme(style="darkgrid", palette="muted")
+            plt.rcParams.update({
+                "text.color": "white",
+                "axes.labelcolor": "white",
+                "xtick.color": "white",
+                "ytick.color": "white",
+                "axes.edgecolor": "white",
+                "figure.facecolor": "#1e1e2e",
+                "axes.facecolor": "#1e1e2e",
+                "font.size": 12
+            })
+            self._style_ready = True
+        return plt, sns
 
     def _get_filepath(self, prefix: str) -> str:
         """Genera un percorso di file univoco nella cartella di output."""
@@ -62,6 +66,7 @@ class ChartGenerator:
 
     def generate_pie_chart(self, report: TrendReport) -> str:
         """Grafico a torta delle spese del mese corrente (Top N + Altro)."""
+        plt, sns = self._load_plotting_libs()
         cur = report.current_month
         
         # Filtra categorie a zero
@@ -106,6 +111,8 @@ class ChartGenerator:
 
     def generate_bar_chart(self, report: TrendReport) -> str:
         """Grafico a barre: Confronto Spesa Attuale vs Media Notion per le Top categorie."""
+        import pandas as pd
+        plt, sns = self._load_plotting_libs()
         cur = report.current_month
         
         # Prepara dati per le categorie con spesa o con media (non a 0 entrambe)
@@ -153,6 +160,7 @@ class ChartGenerator:
 
     def generate_line_chart(self, report: TrendReport) -> str:
         """Grafico a linee del trend storico (Totale speso per mese)."""
+        plt, sns = self._load_plotting_libs()
         history_and_current = report.history + [report.current_month]
         
         # Filtra eventuali mesi vuoti

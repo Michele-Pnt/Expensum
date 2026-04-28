@@ -8,11 +8,14 @@ Nessun task in corso.
 
 ## 🐛 Bug aperti
 
-- [ ] ci sono dei bug sulla routine di auto gestione degli abbonamenti di utenti pro
+- [ ] bug nella visualizzazione della pagina della analytics della miniapp. 
 
 ---
 
 ## ✅ Completati
+
+### 2026-04-28
+- Bug fix routine abbonamenti 
 
 ### 2026-04-26
 - **Sistema Token Freemium**: implementazione `UserPlan`, tetti mensili (150k Free / 3M Pro), middleware in `bot.py` per limitare audio/foto agli utenti Free e scalare i token ad ogni azione AI.

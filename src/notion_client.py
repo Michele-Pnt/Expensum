@@ -916,6 +916,49 @@ class NotionFinanceClient:
             "label": label,
         }
 
+    def _resolve_monthly_balance(self, target_date: date) -> str | None:
+        """Risolve il page_id di un Monthly Balance per il mese della data fornita.
+
+        Args:
+            target_date: La data per cui trovare il Monthly Balance
+
+        Returns:
+            Il page_id del Monthly Balance, o None se non trovato
+        """
+        db_id = self.monthly_balance_db_id
+        if not db_id:
+            logger.warning("Monthly Balance Database ID non configurato.")
+            return None
+
+        try:
+            ds_id = self._get_data_source_id(db_id)
+        except Exception as e:
+            logger.warning(f"Impossibile accedere al database Monthly Balance: {e}")
+            return None
+
+        # Fetch tutti i Monthly Balance (il DB è piccolo, un record per mese)
+        has_more = True
+        cursor = None
+
+        while has_more:
+            try:
+                resp = self._query_with_retry(ds_id, {}, cursor)
+            except Exception as e:
+                logger.warning(f"Errore query Monthly Balance durante ricerca: {e}")
+                return None
+
+            # Cerca il record per il mese target
+            for page in resp.get("results", []):
+                parsed = self._parse_monthly_balance_page(page)
+                if parsed and parsed["year"] == target_date.year and parsed["month"] == target_date.month:
+                    return page["id"]
+
+            has_more = resp.get("has_more", False)
+            cursor = resp.get("next_cursor")
+
+        logger.info(f"Monthly Balance non trovato per {target_date.strftime('%m/%Y')}")
+        return None
+
     def get_or_create_monthly_balance(self, target_date: date) -> str | None:
         """Ritorna l'ID del record Monthly Balance. Se manca, lo crea."""
         # 1. Cerca tra quelli esistenti
