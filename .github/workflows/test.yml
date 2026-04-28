@@ -47,6 +47,7 @@ jobs:
     - name: Installazione dipendenze
       run: |
         python -m pip install --upgrade pip
+        pip install pytest pytest-cov
         pip install -r requirements.txt
 
     - name: Esecuzione Test Suite (unit + integration, MOCK mode)
@@ -61,10 +62,6 @@ jobs:
       run: |
         python -m pytest \
           --cov=src \
-          --cov-omit="src/chart_generator.py,src/telegram_client.py,src/gemini_client.py,src/notion_client.py,src/dashboard/*" \
-          --cov-report=xml \
-          --tb=short \
-          -q
 
     - name: Upload della coverage (Opzionale)
       uses: codecov/codecov-action@v4
