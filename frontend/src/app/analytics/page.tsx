@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState, useCallback, type ReactNode } from "react";
 import {
   Box, Card, CardContent, CardHeader, CircularProgress, Tab, Tabs,
   Typography, Slider, Alert,
@@ -51,13 +51,19 @@ function makeHeaders(initData: string | null): HeadersInit {
 async function fetchApi<T>(path: string, initData: string | null, months: number): Promise<T> {
   const url = `${API_BASE}${path}?months=${months}`;
   const res = await fetch(url, { headers: makeHeaders(initData) });
-  if (!res.ok) throw new Error(`API error ${res.status}`);
+  if (!res.ok) {
+    if (res.status === 401) throw new Error("auth_401");
+    throw new Error(`Errore API ${res.status}`);
+  }
   return res.json() as Promise<T>;
 }
 
 async function fetchWealth(initData: string | null): Promise<WealthData> {
   const res = await fetch(`${API_BASE}/api/analytics/wealth`, { headers: makeHeaders(initData) });
-  if (!res.ok) throw new Error(`API error ${res.status}`);
+  if (!res.ok) {
+    if (res.status === 401) throw new Error("auth_401");
+    throw new Error(`Errore API ${res.status}`);
+  }
   return res.json();
 }
 
@@ -66,7 +72,7 @@ async function fetchWealth(initData: string | null): Promise<WealthData> {
 // ---------------------------------------------------------------------------
 
 /** Trasforma totals_by_account in format pivot per Stacked BarChart */
-function pivotByAccount(rows: AccountMonthEntry[]): { month: string; [key: string]: string | number }[] {
+function pivotByAccount(rows: AccountMonthEntry[]): { month: string;[key: string]: string | number }[] {
   const map = new Map<string, Record<string, number>>();
   for (const r of rows) {
     if (!map.has(r.month)) map.set(r.month, {});
@@ -81,7 +87,7 @@ function uniqueAccounts(rows: AccountMonthEntry[]): string[] {
 
 /** Top 5 categorie per spesa totale, pivot per BarChart raggruppato */
 function pivotTopCategories(rows: CategoryEntry[]): {
-  data: { month: string; [key: string]: string | number }[];
+  data: { month: string;[key: string]: string | number }[];
   cats: string[];
 } {
   const totals: Record<string, number> = {};
@@ -125,11 +131,11 @@ function PeriodSlider({ value, onChange }: { value: number; onChange: (v: number
 // Componenti grafici
 // ---------------------------------------------------------------------------
 
-function ChartCard({ title, children }: { title: string; children: React.ReactNode }) {
+function ChartCard({ title, children }: { title: string; children: ReactNode }) {
   return (
-    <Card sx={{ mb: 3 }}>
-      <CardHeader title={title} titleTypographyProps={{ variant: "subtitle1", fontWeight: 700 }} />
-      <CardContent sx={{ height: 260, pt: 0 }}>{children}</CardContent>
+    <Card sx={{ mb: 2, borderRadius: 2 }}>
+      <CardHeader title={title} titleTypographyProps={{ variant: "subtitle2", fontWeight: 700 }} sx={{ pb: 1 }} />
+      <CardContent sx={{ height: { xs: 200, sm: 260 }, pt: 0 }}>{children}</CardContent>
     </Card>
   );
 }
@@ -141,7 +147,7 @@ function SavingsChart({ data }: { data: SavingsEntry[] }) {
         <BarChart data={data}>
           <XAxis dataKey="month" tick={{ fontSize: 11 }} />
           <YAxis tick={{ fontSize: 11 }} tickFormatter={(v) => `€${v}`} />
-          <Tooltip formatter={(v: number) => `€${v.toFixed(2)}`} />
+          <Tooltip formatter={(v: any) => `€${(v ?? 0).toFixed(2)}`} />
           <Legend />
           <Bar dataKey="income" name="Entrate" fill={INCOME_COLOR} radius={[4, 4, 0, 0]} />
           <Bar dataKey="expenses" name="Uscite" fill={EXPENSE_COLOR} radius={[4, 4, 0, 0]} />
@@ -161,7 +167,7 @@ function MonthlyByAccountChart({ rows }: { rows: AccountMonthEntry[] }) {
         <BarChart data={data}>
           <XAxis dataKey="month" tick={{ fontSize: 11 }} />
           <YAxis tick={{ fontSize: 11 }} tickFormatter={(v) => `€${v}`} />
-          <Tooltip formatter={(v: number) => `€${v.toFixed(2)}`} />
+          <Tooltip formatter={(v: any) => `€${(v ?? 0).toFixed(2)}`} />
           <Legend />
           {accounts.map((acc, i) => (
             <Bar key={acc} dataKey={acc} stackId="a" fill={PALETTE[i % PALETTE.length]} />
@@ -185,7 +191,7 @@ function CategoryPieChart({ rows }: { rows: CategoryEntry[] }) {
             innerRadius={55} outerRadius={90} paddingAngle={3}>
             {slice.map((_, i) => <Cell key={i} fill={PALETTE[i % PALETTE.length]} />)}
           </Pie>
-          <Tooltip formatter={(v: number) => `€${v.toFixed(2)}`} />
+          <Tooltip formatter={(v: any) => `€${(v ?? 0).toFixed(2)}`} />
           <Legend iconType="circle" iconSize={10} />
         </PieChart>
       </ResponsiveContainer>
@@ -201,7 +207,7 @@ function CategoryHistoryChart({ rows }: { rows: CategoryEntry[] }) {
         <BarChart data={data}>
           <XAxis dataKey="month" tick={{ fontSize: 11 }} />
           <YAxis tick={{ fontSize: 11 }} tickFormatter={(v) => `€${v}`} />
-          <Tooltip formatter={(v: number) => `€${v.toFixed(2)}`} />
+          <Tooltip formatter={(v: any) => `€${(v ?? 0).toFixed(2)}`} />
           <Legend />
           {cats.map((cat, i) => (
             <Bar key={cat} dataKey={cat} fill={PALETTE[i % PALETTE.length]} radius={[3, 3, 0, 0]} />
@@ -219,7 +225,7 @@ function CategoryAvgChart({ avgs }: { avgs: CategoryAvg[] }) {
         <BarChart data={avgs} layout="vertical">
           <XAxis type="number" tick={{ fontSize: 11 }} tickFormatter={(v) => `€${v}`} />
           <YAxis type="category" dataKey="name" tick={{ fontSize: 11 }} width={90} />
-          <Tooltip formatter={(v: number) => `€${v.toFixed(2)}`} />
+          <Tooltip formatter={(v: any) => `€${(v ?? 0).toFixed(2)}`} />
           <Bar dataKey="avg" name="Media" fill="#008080" radius={[0, 4, 4, 0]} />
         </BarChart>
       </ResponsiveContainer>
@@ -234,7 +240,7 @@ function IncomeChart({ data }: { data: IncomeEntry[] }) {
         <BarChart data={data}>
           <XAxis dataKey="month" tick={{ fontSize: 11 }} />
           <YAxis tick={{ fontSize: 11 }} tickFormatter={(v) => `€${v}`} />
-          <Tooltip formatter={(v: number) => `€${v.toFixed(2)}`} />
+          <Tooltip formatter={(v: any) => `€${(v ?? 0).toFixed(2)}`} />
           <Bar dataKey="total" name="Entrate" fill={INCOME_COLOR} radius={[4, 4, 0, 0]} />
         </BarChart>
       </ResponsiveContainer>
@@ -251,7 +257,7 @@ function WealthPieChart({ accounts }: { accounts: AccountBalance[] }) {
             innerRadius={55} outerRadius={90} paddingAngle={3}>
             {accounts.map((_, i) => <Cell key={i} fill={PALETTE[i % PALETTE.length]} />)}
           </Pie>
-          <Tooltip formatter={(v: number) => `€${v.toFixed(2)}`} />
+          <Tooltip formatter={(v: any) => `€${(v ?? 0).toFixed(2)}`} />
           <Legend iconType="circle" iconSize={10} />
         </PieChart>
       </ResponsiveContainer>
@@ -268,6 +274,7 @@ export default function AnalyticsPage() {
   const [months, setMonths] = useState(3);
   const [initData, setInitData] = useState<string | null>(null);
   const [isTelegram, setIsTelegram] = useState(false);
+  const [mounted, setMounted] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -279,12 +286,17 @@ export default function AnalyticsPage() {
   // Rileva contesto Telegram al mount
   useEffect(() => {
     const tg = (window as any).Telegram?.WebApp;
+    console.log("Analytics: Telegram WebApp detection:", !!tg);
     if (tg) {
+      console.log("Analytics: initData available:", !!tg.initData);
       tg.ready();
       tg.expand();
       setIsTelegram(true);
       setInitData(tg.initData || null);
+    } else {
+      console.warn("Analytics: Telegram WebApp NOT FOUND. UI will fallback to browser mode.");
     }
+    setMounted(true);
   }, []);
 
   const loadData = useCallback(async (m: number, id: string | null) => {
@@ -318,22 +330,33 @@ export default function AnalyticsPage() {
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
-    if (isTelegram) loadData(months, initData);
-  }, [isTelegram, initData]); // eslint-disable-line react-hooks/exhaustive-deps
+    if (isTelegram) {
+      if (!initData) {
+        setError("auth_401");
+        setLoading(false);
+      } else {
+        loadData(months, initData);
+      }
+    }
+  }, [isTelegram, initData, months, loadData]);
 
   const handleMonthsChange = (v: number) => {
     setMonths(v);
     loadData(v, initData);
   };
 
-  // Se siamo in Telegram, vogliamo una vista "pulita" solo grafici
-  const showHeader = !isTelegram;
+  // Se non siamo ancora "montati" sul browser, non renderizziamo per evitare errori di idratazione
+  if (!mounted) return null;
+
+  // Se siamo in Telegram o su un dominio ngrok (probabile Mini App), vogliamo una vista "pulita"
+  const isNgrok = typeof window !== "undefined" && window.location.hostname.includes("ngrok-free.app");
+  const showHeader = !isTelegram && !isNgrok;
 
   return (
-    <Box sx={{ 
-      p: { xs: 1, sm: 2, md: 3 }, 
-      width: "100%", 
-      maxWidth: isTelegram ? "100%" : 800, 
+    <Box sx={{
+      p: { xs: 1, sm: 2, md: 3 },
+      width: "100%",
+      maxWidth: (isTelegram || isNgrok) ? "100%" : 800,
       mx: "auto",
       overflowX: "hidden"
     }}>
@@ -351,10 +374,15 @@ export default function AnalyticsPage() {
       {/* Lo slider lo lasciamo ma più compatto su mobile */}
       <PeriodSlider value={months} onChange={handleMonthsChange} />
 
-      <Tabs value={tab} onChange={(_, v) => setTab(v)} sx={{ mb: 3 }} variant="fullWidth">
-        <Tab label="📈 Panoramica" />
-        <Tab label="💳 Spese" />
-        <Tab label="💰 Entrate & Pat." />
+      <Tabs
+        value={tab}
+        onChange={(_, v) => setTab(v)}
+        sx={{ mb: 2, minHeight: 40 }}
+        variant="fullWidth"
+      >
+        <Tab label="📈 Panoramica" sx={{ fontSize: "0.75rem", minHeight: 40 }} />
+        <Tab label="💳 Spese" sx={{ fontSize: "0.75rem", minHeight: 40 }} />
+        <Tab label="💰 Entrate" sx={{ fontSize: "0.75rem", minHeight: 40 }} />
       </Tabs>
 
       {loading && (
@@ -365,8 +393,11 @@ export default function AnalyticsPage() {
 
       {error && !loading && (
         <Alert severity="error" sx={{ mb: 2 }}>
-          {error}
-          {!isTelegram && " — Assicurati di aprire questa pagina da Telegram."}
+          {error === "auth_401"
+            ? (isTelegram
+                ? "Sessione Telegram scaduta — riapri la mini-app dal bot."
+                : "Apri questa pagina dalla mini-app Telegram.")
+            : error}
         </Alert>
       )}
 
