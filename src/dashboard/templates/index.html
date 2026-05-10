@@ -1,5 +1,13 @@
 {% extends "base.html" %}
 {% block content %}
+<!-- Tab Navigation -->
+<div style="display: flex; gap: 1rem; margin-bottom: 2rem; border-bottom: 2px solid rgba(255,255,255,0.1); padding-bottom: 1rem;">
+    <button onclick="showTab('dashboard')" id="tab-dashboard" style="background: var(--accent-primary); color: white; padding: 0.5rem 1rem; border: none; border-radius: 4px; cursor: pointer; font-weight: 500;">📊 Dashboard</button>
+    <button onclick="showTab('analytics')" id="tab-analytics" style="background: transparent; color: var(--text-secondary); padding: 0.5rem 1rem; border: none; cursor: pointer; font-weight: 500; transition: color 0.2s;">📈 Token Analytics (90gg)</button>
+</div>
+
+<!-- Tab 1: Dashboard -->
+<div id="tab-dashboard-content">
 <h1 class="page-title">Panoramica Sistema</h1>
 <p class="page-desc">Benvenuto Admin. Questa è la salute attuale del tuo agente.</p>
 
@@ -43,18 +51,22 @@
     <div class="stat-card glass-panel" style="border-left: 4px solid var(--success)">
         <div class="stat-label">Goal Completion (GCR)</div>
         <div class="stat-value" style="color: var(--success)">
-            {% if goal_completion_rate is not none %}{{ goal_completion_rate }}%{% else %}<span style="font-size:1rem;color:#aaa">N/D</span>{% endif %}
+            {% if goal_completion_rate is not none %}{{ goal_completion_rate }}%{% else %}<span
+                style="font-size:1rem;color:#aaa">N/D</span>{% endif %}
         </div>
-        <span class="stat-label" style="text-transform:none; margin-top:5px">{% if goal_completion_rate is not none %}Risoluzione automatica{% else %}Dati in raccolta...{% endif %}</span>
+        <span class="stat-label" style="text-transform:none; margin-top:5px">{% if goal_completion_rate is not none
+            %}Risoluzione automatica{% else %}Dati in raccolta...{% endif %}</span>
     </div>
     <!-- Fallback Rate -->
     <div class="stat-card glass-panel" style="border-left: 4px solid var(--warning)">
         <div class="stat-label">Fallback Rate</div>
         <div class="stat-value"
             style="color: {% if fallback_rate is not none and fallback_rate > 5 %}var(--danger){% elif fallback_rate is not none %}var(--warning){% else %}#aaa{% endif %}">
-            {% if fallback_rate is not none %}{{ fallback_rate }}%{% else %}<span style="font-size:1rem;color:#aaa">N/D</span>{% endif %}
+            {% if fallback_rate is not none %}{{ fallback_rate }}%{% else %}<span
+                style="font-size:1rem;color:#aaa">N/D</span>{% endif %}
         </div>
-        <span class="stat-label" style="text-transform:none; margin-top:5px">{% if fallback_rate is not none %}Mancata comprensione intenti{% else %}Dati in raccolta...{% endif %}</span>
+        <span class="stat-label" style="text-transform:none; margin-top:5px">{% if fallback_rate is not none %}Mancata
+            comprensione intenti{% else %}Dati in raccolta...{% endif %}</span>
     </div>
     <!-- Engagement -->
     <div class="stat-card glass-panel" style="border-left: 4px solid var(--accent-info)">
@@ -66,16 +78,16 @@
     </div>
     <!-- Cost -->
     <div class="stat-card glass-panel" style="border-left: 4px solid var(--danger)">
-        <div class="stat-label">Stima Costi API (10 gg) DA CALCOLARE PRECISAMNETE IN SECONDO MOMENTO</div>
+        <div class="stat-label">Stima Costi LLM (30 gg)</div>
         <div class="stat-value" style="color: var(--danger)">
-            ${{ api_cost_estimate }}
+            ${{ cost_month }}
         </div>
-        <span class="stat-label" style="text-transform:none; margin-top:5px">~ $0.0015 per token/msg LLM</span>
+        <span class="stat-label" style="text-transform:none; margin-top:5px">Costo totale: ${{ cost_total }}</span>
     </div>
 </div>
 
 <div class="chart-container glass-panel">
-    <h3 style="margin-bottom: 1.5rem; color: var(--text-main);">Consumo Traffico (10 Giorni)</h3>
+    <h3 style="margin-bottom: 1.5rem; color: var(--text-main);">Consumo Token LLM (10 Giorni)</h3>
     <div style="position: relative; height: 350px; width: 100%;">
         <canvas id="usageChart"></canvas>
     </div>
@@ -86,65 +98,395 @@
 
     // Gradient definitions
     const gradientSecondary = ctx.createLinearGradient(0, 0, 0, 400);
-    gradientSecondary.addColorStop(0, 'rgba(76, 175, 80, 0.5)'); // #4caf50
-    gradientSecondary.addColorStop(1, 'rgba(76, 175, 80, 0.0)');
+    gradientSecondary.addColorStop(0, 'rgba(96, 165, 250, 0.4)');
+    gradientSecondary.addColorStop(1, 'rgba(96, 165, 250, 0.0)');
 
     const gradientPrimary = ctx.createLinearGradient(0, 0, 0, 400);
-    gradientPrimary.addColorStop(0, 'rgba(0, 128, 128, 0.5)'); // #008080
-    gradientPrimary.addColorStop(1, 'rgba(0, 128, 128, 0.0)');
+    gradientPrimary.addColorStop(0, 'rgba(16, 185, 129, 0.4)');
+    gradientPrimary.addColorStop(1, 'rgba(16, 185, 129, 0.0)');
 
     const usageChart = new Chart(ctx, {
         type: 'line',
         data: {
             labels: {{ chart_labels | tojson }},
-    datasets: [
-        {
-            label: 'Messaggi Testo',
-            data: {{ chart_text | tojson }},
-        borderColor: '#008080',
-        backgroundColor: gradientPrimary,
-        borderWidth: 2,
-        tension: 0.4,
-        fill: true
+            datasets: [
+                {
+                    label: 'Prompt Tokens',
+                    data: {{ chart_prompt | tojson }},
+                    borderColor: '#10b981',
+                    backgroundColor: gradientPrimary,
+                    borderWidth: 2,
+                    tension: 0.4,
+                    fill: true
                 },
-        {
-            label: 'Vocali Spese',
-            data: {{ chart_voice | tojson }},
-        borderColor: '#4caf50',
-        backgroundColor: gradientSecondary,
-        borderWidth: 2,
-        tension: 0.4,
-        fill: true
+                {
+                    label: 'Completion Tokens',
+                    data: {{ chart_completion | tojson }},
+                    borderColor: '#60a5fa',
+                    backgroundColor: gradientSecondary,
+                    borderWidth: 2,
+                    tension: 0.4,
+                    fill: true
                 },
-        {
-            label: 'Foto Inviate',
-            data: {{ chart_photo | tojson }},
-        borderColor: '#03a9f4',
-        backgroundColor: 'transparent',
-        borderWidth: 2,
-        borderDash: [5, 5],
-        tension: 0.4,
+                {
+                    label: 'Total Tokens',
+                    data: {{ chart_total | tojson }},
+                    borderColor: '#a78bfa',
+                    backgroundColor: 'transparent',
+                    borderWidth: 2,
+                    borderDash: [5, 5],
+                    tension: 0.4,
                 }
-    ]
+            ]
         },
     options: {
         responsive: true,
             maintainAspectRatio: false,
                 plugins: {
-            legend: { labels: { color: '#666' } }
+            legend: { labels: { color: '#8b949e', font: { family: 'Outfit' } } }
         },
         scales: {
             y: {
                 beginAtZero: true,
-                    grid: { color: 'rgba(0, 0, 0, 0.05)' },
-                ticks: { color: '#666' }
+                    grid: { color: 'rgba(255,255,255,0.04)' },
+                ticks: { color: '#8b949e', font: { family: 'Outfit' } }
             },
             x: {
-                grid: { color: 'rgba(0, 0, 0, 0.05)' },
-                ticks: { color: '#666' }
+                grid: { color: 'rgba(255,255,255,0.04)' },
+                ticks: { color: '#8b949e', font: { family: 'Outfit' } }
             }
         }
     }
     });
+</script>
+</div><!-- End tab-dashboard-content -->
+
+<!-- Tab 2: Token Analytics (90 giorni) -->
+<div id="tab-analytics-content" style="display: none;">
+<h2 style="color: var(--text-main); margin-bottom: 1.5rem;">📊 Analisi Consumo Token (Ultimi 90 Giorni)</h2>
+
+<!-- Analytics Stat Cards -->
+<div class="stats-grid">
+    <div class="stat-card glass-panel">
+        <div class="stat-label">Totale Richieste</div>
+        <div class="stat-value" id="analytics-total-requests" style="color: var(--accent-primary);">—</div>
+    </div>
+    <div class="stat-card glass-panel">
+        <div class="stat-label">Avg Token/Richiesta</div>
+        <div class="stat-value" id="analytics-avg-tokens" style="color: var(--accent-info);">—</div>
+    </div>
+    <div class="stat-card glass-panel">
+        <div class="stat-label">Conversion Rate Overall</div>
+        <div class="stat-value" id="analytics-conversion-overall" style="color: var(--success);">—</div>
+    </div>
+    <div class="stat-card glass-panel">
+        <div class="stat-label">Operazioni Tracciabili</div>
+        <div class="stat-value" id="analytics-operation-count" style="color: var(--warning);">—</div>
+    </div>
+</div>
+
+<!-- Grafico 1: Richieste per Tipo (Free vs Pro) -->
+<div class="chart-container glass-panel" style="margin-top: 2rem;">
+    <h3 style="margin-bottom: 1.5rem; color: var(--text-main);">Grafico 1: Numero Richieste per Tipo (Free vs Pro)</h3>
+    <div style="position: relative; height: 350px; width: 100%;">
+        <canvas id="requestsChart"></canvas>
+    </div>
+</div>
+
+<!-- Grafico 2: Token Medio per Tipo -->
+<div class="chart-container glass-panel" style="margin-top: 2rem;">
+    <h3 style="margin-bottom: 1.5rem; color: var(--text-main);">Grafico 2: Token Medio Consumato per Tipo (Free vs Pro)</h3>
+    <div style="position: relative; height: 350px; width: 100%;">
+        <canvas id="tokenStatsChart"></canvas>
+    </div>
+</div>
+
+<!-- Grafico 3: Conversion Rate per Tipo -->
+<div class="chart-container glass-panel" style="margin-top: 2rem;">
+    <h3 style="margin-bottom: 1.5rem; color: var(--text-main);">Grafico 3: Conversion Rate per Tipo (%)</h3>
+    <div style="position: relative; height: 350px; width: 100%;">
+        <canvas id="conversionChart"></canvas>
+    </div>
+</div>
+
+<!-- Tabella Dettagli -->
+<div class="chart-container glass-panel" style="margin-top: 2rem;">
+    <h3 style="margin-bottom: 1.5rem; color: var(--text-main);">Dettagli Operazioni</h3>
+    <div id="analyticsTableContainer" style="overflow-x: auto;">
+        <table style="width: 100%; border-collapse: collapse; color: #8b949e; font-family: Outfit;">
+            <thead>
+                <tr style="border-bottom: 2px solid rgba(255,255,255,0.1);">
+                    <th style="text-align: left; padding: 0.75rem; color: var(--text-main);">Operazione</th>
+                    <th style="text-align: center; padding: 0.75rem; color: var(--text-main);">Free: Richieste</th>
+                    <th style="text-align: center; padding: 0.75rem; color: var(--text-main);">Pro: Richieste</th>
+                    <th style="text-align: center; padding: 0.75rem; color: var(--text-main);">Avg Token (Free)</th>
+                    <th style="text-align: center; padding: 0.75rem; color: var(--text-main);">Avg Token (Pro)</th>
+                    <th style="text-align: center; padding: 0.75rem; color: var(--text-main);">Conv. Rate (Free)</th>
+                    <th style="text-align: center; padding: 0.75rem; color: var(--text-main);">Conv. Rate (Pro)</th>
+                </tr>
+            </thead>
+            <tbody id="analyticsTableBody">
+            </tbody>
+        </table>
+    </div>
+</div>
+
+    <!-- Tabella consumo per utente -->
+    <h3 style="color: var(--text-main); margin: 2rem 0 1rem; font-family: Outfit;">Consumo per Utente (storico)</h3>
+    <div style="overflow-x: auto;">
+        <table style="width: 100%; border-collapse: collapse; color: #8b949e; font-family: Outfit;">
+            <thead>
+                <tr style="border-bottom: 2px solid rgba(255,255,255,0.1);">
+                    <th style="text-align: left; padding: 0.75rem; color: var(--text-main);">Utente</th>
+                    <th style="text-align: center; padding: 0.75rem; color: var(--text-main);">Richieste</th>
+                    <th style="text-align: center; padding: 0.75rem; color: var(--text-main);">Token Totali</th>
+                    <th style="text-align: center; padding: 0.75rem; color: var(--text-main);">Costo Stimato</th>
+                    <th style="text-align: center; padding: 0.75rem; color: var(--text-main);">Ultima Attività</th>
+                </tr>
+            </thead>
+            <tbody id="userTokenTableBody">
+                <tr><td colspan="5" style="text-align:center; padding: 1rem; color: #555;">Caricamento...</td></tr>
+            </tbody>
+        </table>
+    </div>
+</div>
+
+</div><!-- End tab-analytics-content -->
+
+<script>
+// Parse analytics data from backend
+const analyticsData = JSON.parse('{{ analytics_json_str | safe }}');
+
+function showTab(tabName) {
+    // Hide all tabs
+    document.getElementById('tab-dashboard-content').style.display = 'none';
+    document.getElementById('tab-analytics-content').style.display = 'none';
+    
+    // Reset buttons
+    document.getElementById('tab-dashboard').style.background = 'transparent';
+    document.getElementById('tab-dashboard').style.color = 'var(--text-secondary)';
+    document.getElementById('tab-analytics').style.background = 'transparent';
+    document.getElementById('tab-analytics').style.color = 'var(--text-secondary)';
+    
+    // Show selected tab
+    document.getElementById('tab-' + tabName + '-content').style.display = 'block';
+    document.getElementById('tab-' + tabName).style.background = 'var(--accent-primary)';
+    document.getElementById('tab-' + tabName).style.color = 'white';
+    
+    // If analytics tab, initialize charts
+    if (tabName === 'analytics') {
+        setTimeout(() => {
+            initializeAnalyticsCharts();
+            populateAnalyticsTable();
+            updateAnalyticsStats();
+            loadUserTokenTable();
+        }, 100);
+    }
+}
+
+function loadUserTokenTable() {
+    const tbody = document.getElementById('userTokenTableBody');
+    if (!tbody || tbody.dataset.loaded) return;
+    fetch('/api/users/token-usage')
+        .then(r => r.json())
+        .then(rows => {
+            if (!rows.length) {
+                tbody.innerHTML = '<tr><td colspan="5" style="text-align:center;padding:1rem;color:#555;">Nessun dato</td></tr>';
+                return;
+            }
+            tbody.innerHTML = rows.map(u => `
+                <tr style="border-bottom: 1px solid rgba(255,255,255,0.05);">
+                    <td style="padding: 0.75rem; color: var(--text-main);">@${u.username}</td>
+                    <td style="text-align:center; padding: 0.75rem;">${u.req_count}</td>
+                    <td style="text-align:center; padding: 0.75rem;">${u.total_tokens.toLocaleString()}</td>
+                    <td style="text-align:center; padding: 0.75rem;">$${u.total_cost_usd}</td>
+                    <td style="text-align:center; padding: 0.75rem; font-size:0.85em;">${u.last_seen}</td>
+                </tr>`).join('');
+            tbody.dataset.loaded = '1';
+        })
+        .catch(() => {
+            tbody.innerHTML = '<tr><td colspan="5" style="text-align:center;padding:1rem;color:#f87171;">Errore caricamento</td></tr>';
+        });
+}
+
+function initializeAnalyticsCharts() {
+    const operations = Object.keys(analyticsData.token_stats);
+    
+    // Grafico 1: Richieste per tipo
+    const requestsCtx = document.getElementById('requestsChart')?.getContext('2d');
+    if (requestsCtx && !window.requestsChartInstance) {
+        const requestsData = {};
+        for (const op of operations) {
+            requestsData[op] = {free: 0, pro: 0};
+            for (const date in analyticsData.requests_by_operation[op] || {}) {
+                requestsData[op].free += analyticsData.requests_by_operation[op][date].free || 0;
+                requestsData[op].pro += analyticsData.requests_by_operation[op][date].pro || 0;
+            }
+        }
+        
+        window.requestsChartInstance = new Chart(requestsCtx, {
+            type: 'bar',
+            data: {
+                labels: operations,
+                datasets: [
+                    {
+                        label: 'Free',
+                        data: operations.map(op => requestsData[op].free),
+                        backgroundColor: '#60a5fa',
+                    },
+                    {
+                        label: 'Pro',
+                        data: operations.map(op => requestsData[op].pro),
+                        backgroundColor: '#10b981',
+                    }
+                ]
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                indexAxis: 'x',
+                plugins: {
+                    legend: { labels: { color: '#8b949e', font: { family: 'Outfit' } } }
+                },
+                scales: {
+                    x: { stacked: false, grid: { color: 'rgba(255,255,255,0.04)' }, ticks: { color: '#8b949e' } },
+                    y: { stacked: false, beginAtZero: true, grid: { color: 'rgba(255,255,255,0.04)' }, ticks: { color: '#8b949e' } }
+                }
+            }
+        });
+    }
+    
+    // Grafico 2: Token medio per tipo
+    const tokenCtx = document.getElementById('tokenStatsChart')?.getContext('2d');
+    if (tokenCtx && !window.tokenStatsChartInstance) {
+        window.tokenStatsChartInstance = new Chart(tokenCtx, {
+            type: 'bar',
+            data: {
+                labels: operations,
+                datasets: [
+                    {
+                        label: 'Free (avg tokens)',
+                        data: operations.map(op => analyticsData.token_stats[op]?.free || 0),
+                        backgroundColor: '#60a5fa',
+                    },
+                    {
+                        label: 'Pro (avg tokens)',
+                        data: operations.map(op => analyticsData.token_stats[op]?.pro || 0),
+                        backgroundColor: '#10b981',
+                    }
+                ]
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                indexAxis: 'x',
+                plugins: {
+                    legend: { labels: { color: '#8b949e', font: { family: 'Outfit' } } }
+                },
+                scales: {
+                    x: { stacked: false, grid: { color: 'rgba(255,255,255,0.04)' }, ticks: { color: '#8b949e' } },
+                    y: { stacked: false, beginAtZero: true, grid: { color: 'rgba(255,255,255,0.04)' }, ticks: { color: '#8b949e' } }
+                }
+            }
+        });
+    }
+    
+    // Grafico 3: Conversion rate per tipo
+    const convCtx = document.getElementById('conversionChart')?.getContext('2d');
+    if (convCtx && !window.conversionChartInstance) {
+        window.conversionChartInstance = new Chart(convCtx, {
+            type: 'bar',
+            data: {
+                labels: operations,
+                datasets: [
+                    {
+                        label: 'Free (%)',
+                        data: operations.map(op => analyticsData.conversion_rates[op]?.free || 0),
+                        backgroundColor: '#60a5fa',
+                    },
+                    {
+                        label: 'Pro (%)',
+                        data: operations.map(op => analyticsData.conversion_rates[op]?.pro || 0),
+                        backgroundColor: '#10b981',
+                    }
+                ]
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                indexAxis: 'x',
+                plugins: {
+                    legend: { labels: { color: '#8b949e', font: { family: 'Outfit' } } }
+                },
+                scales: {
+                    x: { stacked: false, grid: { color: 'rgba(255,255,255,0.04)' }, ticks: { color: '#8b949e' } },
+                    y: { stacked: false, beginAtZero: true, max: 100, grid: { color: 'rgba(255,255,255,0.04)' }, ticks: { color: '#8b949e' } }
+                }
+            }
+        });
+    }
+}
+
+function populateAnalyticsTable() {
+    const tbody = document.getElementById('analyticsTableBody');
+    tbody.innerHTML = '';
+    
+    const operations = Object.keys(analyticsData.token_stats);
+    for (const op of operations) {
+        const requestsData = {free: 0, pro: 0};
+        for (const date in analyticsData.requests_by_operation[op] || {}) {
+            requestsData.free += analyticsData.requests_by_operation[op][date].free || 0;
+            requestsData.pro += analyticsData.requests_by_operation[op][date].pro || 0;
+        }
+        
+        const row = document.createElement('tr');
+        row.style.borderBottom = '1px solid rgba(255,255,255,0.05)';
+        row.innerHTML = `
+            <td style="padding: 0.75rem; color: var(--accent-primary);"><strong>${op}</strong></td>
+            <td style="text-align: center; padding: 0.75rem;">${requestsData.free}</td>
+            <td style="text-align: center; padding: 0.75rem;">${requestsData.pro}</td>
+            <td style="text-align: center; padding: 0.75rem;">${analyticsData.token_stats[op]?.free || 0}</td>
+            <td style="text-align: center; padding: 0.75rem;">${analyticsData.token_stats[op]?.pro || 0}</td>
+            <td style="text-align: center; padding: 0.75rem; color: #60a5fa;">${analyticsData.conversion_rates[op]?.free || 0}%</td>
+            <td style="text-align: center; padding: 0.75rem; color: #10b981;">${analyticsData.conversion_rates[op]?.pro || 0}%</td>
+        `;
+        tbody.appendChild(row);
+    }
+}
+
+function updateAnalyticsStats() {
+    const operations = Object.keys(analyticsData.token_stats);
+    
+    // Total requests
+    let totalRequests = 0;
+    let totalTokens = 0;
+    let totalSuccesses = 0;
+    
+    for (const op of operations) {
+        for (const date in analyticsData.requests_by_operation[op] || {}) {
+            totalRequests += analyticsData.requests_by_operation[op][date].total || 0;
+        }
+        totalTokens += (analyticsData.token_stats[op]?.total || 0) * totalRequests;
+    }
+    
+    // Recalculate for correct total
+    totalTokens = 0;
+    totalRequests = 0;
+    for (const op of operations) {
+        for (const date in analyticsData.requests_by_operation[op] || {}) {
+            const requestsThisOp = analyticsData.requests_by_operation[op][date].total || 0;
+            totalRequests += requestsThisOp;
+            totalTokens += (analyticsData.token_stats[op]?.total || 0) * (requestsThisOp > 0 ? 1 : 0);
+        }
+    }
+    
+    const avgTokens = totalRequests > 0 ? Math.round(totalTokens / totalRequests) : 0;
+    const conversionOverall = totalRequests > 0 ? (totalSuccesses / totalRequests * 100).toFixed(1) : 0;
+    
+    document.getElementById('analytics-total-requests').textContent = totalRequests;
+    document.getElementById('analytics-avg-tokens').textContent = avgTokens;
+    document.getElementById('analytics-conversion-overall').textContent = conversionOverall + '%';
+    document.getElementById('analytics-operation-count').textContent = operations.length;
+}
 </script>
 {% endblock %}

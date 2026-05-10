@@ -19,12 +19,13 @@ if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
 from config import Config
-from src.user_store import UserStore, User, DailyUsage, DailyMetrics, Feedback
+from src.user_store import UserStore, User, LlmUsageEvent, LlmPricing, DailyMetrics, Feedback
 from src.notion_client import NotionFinanceClient
 from src.storage.notion_storage import NotionStorage
 from src.storage.postgres_storage import PostgresStorage
 from src.workspace_bootstrapper import bootstrap_workspace
 from src.category_sync import refresh_category_averages
+from src.dashboard_message import build_dashboard_text
 
 # Inizializza l'app Flask
 app = Flask(__name__)
@@ -37,6 +38,124 @@ def skip_ngrok_interstitial(response):
 
 # Inizializza la connessione allo storage SQLite
 store = UserStore(db_url=Config.DATABASE_URL)
+
+
+def _get_session_chat_id() -> str | None:
+    """Ritorna il chat_id della sessione browser se valida."""
+    if not session.get("user_logged_in"):
+        return None
+    chat_id = session.get("chat_id")
+    if not chat_id:
+        return None
+    return str(chat_id)
+
+
+def _get_user_by_chat_id(chat_id: str):
+    from src.user_store import User
+
+    with store.Session() as s:
+        return s.query(User).filter_by(chat_id=chat_id).first()
+
+
+def _build_setup_redirect(chat_id: str) -> str:
+    reg_token = store.create_oauth_session(chat_id)
+    return url_for("setup_form") + f"?reg_token={reg_token}"
+
+
+def _resolve_authenticated_redirect(chat_id: str) -> str:
+    """Instrada un utente autenticato verso setup o home app."""
+    user = _get_user_by_chat_id(chat_id)
+    if not user:
+        session.clear()
+        return url_for("web_login")
+    if user.setup_completed_at is None:
+        return _build_setup_redirect(chat_id)
+    return "/chat"
+
+
+def _resolve_request_chat_id() -> tuple[str | None, str | None]:
+    """Risolvi utente autenticato via Telegram WebApp o sessione browser."""
+    init_data = request.headers.get("X-Telegram-Init-Data", "")
+    if init_data:
+        parsed = _validate_telegram_init_data(init_data)
+        if parsed and parsed.get("chat_id"):
+            return str(parsed["chat_id"]), "telegram"
+
+    chat_id = _get_session_chat_id()
+    if not chat_id:
+        return None, None
+
+    user = _get_user_by_chat_id(chat_id)
+    if not user:
+        session.clear()
+        return None, None
+    return chat_id, "browser"
+
+
+def _forbidden_setup_response():
+    return "<h1>Accesso negato</h1><p>Link non valido o sessione non autorizzata.</p>", 403
+
+
+def _trigger_dashboard_refresh(user: "User", s) -> None:
+    """Aggiorna il messaggio dashboard pinnato dopo una modifica da web app.
+
+    Best-effort: gli errori vengono loggati ma non propagati al caller.
+    Chiamata dopo add/update/remove di abbonamenti, conti e categorie.
+    """
+    try:
+        msg_id = store.get_pinned_dashboard_msg_id(user.chat_id)
+        if not msg_id:
+            return
+
+        if user.storage_backend == "postgres":
+            pg = PostgresStorage(session=s, user_id=user.chat_id)
+            accounts = pg.fetch_accounts()
+            subscriptions = pg.fetch_subscriptions()
+        else:
+            notion_client = NotionFinanceClient(
+                api_key=user.notion_access_token,
+                accounts_db_id=user.accounts_db_id,
+                subscriptions_db_id=user.subscriptions_db_id,
+                categories_db_id=user.categories_db_id,
+            )
+            storage = NotionStorage(notion_client, store=store, user_id=user.chat_id)
+            accounts = storage.fetch_accounts()
+            subscriptions = storage.fetch_subscriptions()
+
+        plan = store.get_user_plan(user.chat_id)
+        is_premium = plan.get("plan_type") == "pro"
+
+        dashboard_text = build_dashboard_text(
+            accounts=accounts,
+            subscriptions=subscriptions,
+            is_premium=is_premium,
+            user_plan=plan,
+        )
+
+        payload: dict = {
+            "chat_id": int(user.chat_id),
+            "message_id": msg_id,
+            "text": dashboard_text,
+            "parse_mode": "Markdown",
+        }
+        if is_premium:
+            payload["reply_markup"] = {
+                "inline_keyboard": [[{
+                    "text": "📊 Apri Analytics",
+                    "web_app": {"url": f"{Config.WEBAPP_BASE_URL}/analytics"},
+                }]]
+            }
+
+        resp = requests.post(
+            f"https://api.telegram.org/bot{Config.TELEGRAM_BOT_TOKEN}/editMessageText",
+            json=payload,
+            timeout=5,
+        )
+        if not resp.ok and "message is not modified" not in resp.text:
+            logger.warning("Telegram editMessageText failed: %s", resp.text)
+    except Exception:
+        logger.exception("Errore nel refresh dashboard dopo modifica web app (user=%s)", user.chat_id)
+
 
 def login_required(f):
     @wraps(f)
@@ -55,22 +174,40 @@ def admin_required(f):
     return decorated_function
 
 
+@app.route("/app")
+@app.route("/dashboard")
+def web_app_entry():
+    """Ingresso pubblico della web app.
+
+    - utente autenticato: porta alla home app Next.js
+    - utente anonimo: porta al login Flask
+    """
+    chat_id = _get_session_chat_id()
+    if chat_id:
+        return redirect(_resolve_authenticated_redirect(chat_id))
+    return redirect(url_for("web_login"))
+
+
 @app.route("/login", methods=["GET", "POST"])
 def web_login():
     """Login web con email e password."""
-    if session.get("logged_in"):
-        return redirect(url_for("setup_form"))
+    chat_id = _get_session_chat_id()
+    if chat_id:
+        return redirect(_resolve_authenticated_redirect(chat_id))
 
     error = None
     if request.method == "POST":
         email = (request.form.get("email") or "").strip()
         password = request.form.get("password") or ""
         user = store.verify_password(email, password)
+        if not user:
+            user = store.verify_password_any_status(email, password)
+            if user:
+                store.reactivate_user(user.chat_id)
         if user:
             session["user_logged_in"] = True
             session["chat_id"] = user.chat_id
-            reg_token = store.create_oauth_session(user.chat_id)
-            return redirect(url_for("setup_form") + f"?reg_token={reg_token}")
+            return redirect(_resolve_authenticated_redirect(user.chat_id))
         error = "Email o password errati."
 
     return render_template("login.html", error=error)
@@ -130,45 +267,86 @@ def admin_logout():
 @app.route("/")
 @admin_required
 def index():
+    from sqlalchemy import func, text
     sys_metrics = get_system_metrics()
+    # Soglia storica ledger: solo dati dal 2026-05-01 in avanti
+    LEDGER_EPOCH = datetime(2026, 5, 1)
 
     with store.Session() as s:
         # Statistiche utenti
         users_count = s.query(User).count()
         active_users = s.query(User).filter(User.is_active == True).count()
-        
+
         # Statistiche feedback
         unread_feedback = s.query(Feedback).filter(Feedback.status == "unread").count()
-        
-        # Recupera daily usage degli ultimi 10 giorni
-        ten_days_ago = datetime.utcnow().date() - timedelta(days=10)
-        daily_stats = s.query(DailyUsage).filter(DailyUsage.usage_date >= ten_days_ago).all()
-        
-        # Aggrega dati per il grafico (Date -> totali)
+
+        # --- TOKEN LEDGER KPI (da LEDGER_EPOCH in avanti) ---
+        ten_days_ago = datetime.utcnow() - timedelta(days=10)
+        thirty_days_ago = datetime.utcnow() - timedelta(days=30)
+
+        # Token usati oggi
+        today_start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+        tokens_today = s.query(
+            func.coalesce(func.sum(LlmUsageEvent.total_tokens), 0)
+        ).filter(LlmUsageEvent.occurred_at >= today_start).scalar() or 0
+
+        # Token usati negli ultimi 30 giorni
+        tokens_month = s.query(
+            func.coalesce(func.sum(LlmUsageEvent.total_tokens), 0)
+        ).filter(
+            LlmUsageEvent.occurred_at >= max(thirty_days_ago, LEDGER_EPOCH)
+        ).scalar() or 0
+
+        # Costo stimato mese corrente
+        cost_month = s.query(
+            func.coalesce(func.sum(LlmUsageEvent.estimated_cost_amount), 0.0)
+        ).filter(
+            LlmUsageEvent.occurred_at >= max(thirty_days_ago, LEDGER_EPOCH)
+        ).scalar() or 0.0
+
+        # Costo totale storico (da LEDGER_EPOCH)
+        cost_total = s.query(
+            func.coalesce(func.sum(LlmUsageEvent.estimated_cost_amount), 0.0)
+        ).filter(
+            LlmUsageEvent.occurred_at >= LEDGER_EPOCH
+        ).scalar() or 0.0
+
+        # Breakdown token per giorno (ultimi 10 giorni) per grafico
+        ledger_rows = s.execute(
+            text(
+                "SELECT DATE(occurred_at) as d, "
+                "SUM(prompt_tokens) as pt, SUM(completion_tokens) as ct, SUM(total_tokens) as tt "
+                "FROM llm_usage_events "
+                "WHERE occurred_at >= :since "
+                "GROUP BY d ORDER BY d"
+            ),
+            {"since": max(ten_days_ago, LEDGER_EPOCH).isoformat()},
+        ).fetchall()
+
+        # Costruisci chart_data 10 giorni
         chart_data = {}
         for x in range(10):
-            d = ten_days_ago + timedelta(days=x)
-            chart_data[d.isoformat()] = {"text": 0, "voice": 0, "photo": 0}
-            
-        for stat in daily_stats:
-            d_str = stat.usage_date.isoformat()
+            d = (datetime.utcnow() - timedelta(days=9 - x)).date()
+            chart_data[d.isoformat()] = {"prompt": 0, "completion": 0, "total": 0}
+        for row in ledger_rows:
+            d_str = str(row[0])
             if d_str in chart_data:
-                chart_data[d_str]["text"] += stat.text_count
-                chart_data[d_str]["voice"] += stat.voice_count
-                chart_data[d_str]["photo"] += stat.photo_count
-            
-        labels = list(chart_data.keys())
-        data_text = [v["text"] for v in chart_data.values()]
-        data_voice = [v["voice"] for v in chart_data.values()]
-        data_photo = [v["photo"] for v in chart_data.values()]
-        
-        # --- AI SaaS Metrics Calculation ---
-        total_messages = sum(data_text) + sum(data_voice) + sum(data_photo)
-        avg_msg_per_user = round(total_messages / active_users, 1) if active_users > 0 else 0
-        api_cost_estimate = round(total_messages * 0.0015, 2)  # da calcolare precisamente in secondo momento
+                chart_data[d_str]["prompt"] += row[1] or 0
+                chart_data[d_str]["completion"] += row[2] or 0
+                chart_data[d_str]["total"] += row[3] or 0
 
-        # GCR e Fallback Rate: calcolati dai dati reali degli ultimi 10 giorni
-        ai_metrics = s.query(DailyMetrics).filter(DailyMetrics.metrics_date >= ten_days_ago).all()
+        labels = list(chart_data.keys())
+        data_prompt = [v["prompt"] for v in chart_data.values()]
+        data_completion = [v["completion"] for v in chart_data.values()]
+        data_total = [v["total"] for v in chart_data.values()]
+
+        # Totale messaggi (proxy: eventi ledger ultimi 10gg)
+        total_messages = sum(data_total)
+        avg_msg_per_user = round(total_messages / active_users, 0) if active_users > 0 else 0
+
+        # GCR e Fallback Rate: calcolati dai DailyMetrics (invariato)
+        ten_days_ago_date = datetime.utcnow().date() - timedelta(days=10)
+        ai_metrics = s.query(DailyMetrics).filter(DailyMetrics.metrics_date >= ten_days_ago_date).all()
         total_completions = sum(m.goal_completions or 0 for m in ai_metrics)
         total_fallbacks = sum(m.fallbacks or 0 for m in ai_metrics)
         total_ai_interactions = total_completions + total_fallbacks
@@ -176,24 +354,178 @@ def index():
             goal_completion_rate = round(total_completions / total_ai_interactions * 100, 1)
             fallback_rate = round(total_fallbacks / total_ai_interactions * 100, 1)
         else:
-            goal_completion_rate = None  # nessun dato ancora
+            goal_completion_rate = None
             fallback_rate = None
 
+        # --- TOKEN ANALYTICS (90 giorni, disaggregato per operazione e plan_type) ---
+        ninety_days_ago = datetime.utcnow() - timedelta(days=90)
+        
+        # Raw query: raggruppa per data, operazione, e plan_type
+        analytics_rows = s.execute(
+            text(
+                "SELECT "
+                "DATE(e.occurred_at) as d, "
+                "e.operation, "
+                "COALESCE(p.plan_type, 'free') as plan_type, "
+                "COUNT(*) as req_count, "
+                "AVG(CAST(e.total_tokens AS FLOAT)) as avg_tokens, "
+                "SUM(CASE WHEN e.total_tokens > 0 THEN 1 ELSE 0 END) as success_count "
+                "FROM llm_usage_events e "
+                "LEFT JOIN user_plans p ON e.chat_id = p.chat_id "
+                "WHERE e.occurred_at >= :since "
+                "GROUP BY DATE(e.occurred_at), e.operation, COALESCE(p.plan_type, 'free') "
+                "ORDER BY d DESC, e.operation, plan_type"
+            ),
+            {"since": max(ninety_days_ago, LEDGER_EPOCH).isoformat()},
+        ).fetchall()
+        
+        # Aggregazione 1: Richieste per tipo (Free vs Pro)
+        requests_by_op_date = {}
+        for row in analytics_rows:
+            date_str = str(row[0])
+            op = row[1]
+            plan = row[2]
+            count = row[3]
+            
+            if op not in requests_by_op_date:
+                requests_by_op_date[op] = {}
+            if date_str not in requests_by_op_date[op]:
+                requests_by_op_date[op][date_str] = {"free": 0, "pro": 0, "total": 0}
+            
+            requests_by_op_date[op][date_str][plan] = count
+            requests_by_op_date[op][date_str]["total"] += count
+        
+        # Aggregazione 2: Token medio per tipo (Free vs Pro)
+        token_stats_by_op = {}
+        for op in set(row[1] for row in analytics_rows):
+            token_stats_by_op[op] = {
+                "free": {"total_tokens": 0, "count": 0, "avg": 0},
+                "pro": {"total_tokens": 0, "count": 0, "avg": 0},
+            }
+        
+        for row in analytics_rows:
+            op = row[1]
+            plan = row[2]
+            count = row[3]
+            avg_tokens = row[4]
+            
+            if avg_tokens and op in token_stats_by_op:
+                token_stats_by_op[op][plan]["total_tokens"] += (avg_tokens * count)
+                token_stats_by_op[op][plan]["count"] += count
+        
+        # Calcola media finale
+        token_stats_display = {}
+        for op, plans in token_stats_by_op.items():
+            token_stats_display[op] = {}
+            grand_total = 0
+            grand_count = 0
+            
+            for plan in ["free", "pro"]:
+                if plans[plan]["count"] > 0:
+                    avg = round(plans[plan]["total_tokens"] / plans[plan]["count"], 0)
+                    token_stats_display[op][plan] = int(avg)
+                    grand_total += plans[plan]["total_tokens"]
+                    grand_count += plans[plan]["count"]
+                else:
+                    token_stats_display[op][plan] = 0
+            
+            token_stats_display[op]["total"] = int(round(grand_total / grand_count, 0)) if grand_count > 0 else 0
+        
+        # Aggregazione 3: Conversion rate per tipo (success = token > 0)
+        conversion_rates_by_op = {}
+        for op in set(row[1] for row in analytics_rows):
+            conversion_rates_by_op[op] = {
+                "free": {"success": 0, "total": 0},
+                "pro": {"success": 0, "total": 0},
+            }
+        
+        for row in analytics_rows:
+            op = row[1]
+            plan = row[2]
+            req_count = row[3]
+            success_count = row[5]
+            
+            if op in conversion_rates_by_op:
+                conversion_rates_by_op[op][plan]["success"] += success_count
+                conversion_rates_by_op[op][plan]["total"] += req_count
+        
+        # Calcola percentuali
+        conversion_display = {}
+        for op, plans in conversion_rates_by_op.items():
+            conversion_display[op] = {}
+            grand_success = 0
+            grand_total = 0
+            
+            for plan in ["free", "pro"]:
+                total = plans[plan]["total"]
+                success = plans[plan]["success"]
+                pct = round(100 * success / total, 1) if total > 0 else 0
+                conversion_display[op][plan] = pct
+                grand_success += success
+                grand_total += total
+            
+            conversion_display[op]["total"] = round(100 * grand_success / grand_total, 1) if grand_total > 0 else 0
+        
+        # Prepara JSON per template
+        import json
+        analytics_json_str = json.dumps({
+            "requests_by_operation": {k: {str(date): v for date, v in dates.items()} for k, dates in requests_by_op_date.items()},
+            "token_stats": token_stats_display,
+            "conversion_rates": conversion_display,
+        })
+
     return render_template(
-        "index.html", 
+        "index.html",
         sys=sys_metrics,
         users_count=users_count,
         active_users=active_users,
         unread_feedback=unread_feedback,
+        # Grafici token ledger
         chart_labels=labels,
-        chart_text=data_text,
-        chart_voice=data_voice,
-        chart_photo=data_photo,
+        chart_prompt=data_prompt,
+        chart_completion=data_completion,
+        chart_total=data_total,
+        # KPI token
+        tokens_today=tokens_today,
+        tokens_month=tokens_month,
+        cost_month=round(cost_month, 4),
+        cost_total=round(cost_total, 4),
         avg_msg_per_user=avg_msg_per_user,
-        api_cost_estimate=api_cost_estimate,
         goal_completion_rate=goal_completion_rate,
-        fallback_rate=fallback_rate
+        fallback_rate=fallback_rate,
+        # Token Analytics (90 giorni)
+        analytics_json_str=analytics_json_str,
     )
+
+@app.route("/api/users/token-usage")
+@admin_required
+def users_token_usage():
+    """Restituisce il consumo token per ogni utente nel ciclo corrente."""
+    from sqlalchemy import func, text
+    rows = []
+    with store.Session() as s:
+        result = s.execute(text(
+            "SELECT e.chat_id, u.username, "
+            "COUNT(*) as req_count, "
+            "SUM(e.total_tokens) as total_tokens, "
+            "SUM(COALESCE(e.estimated_cost_amount, 0)) as total_cost, "
+            "MAX(e.occurred_at) as last_seen "
+            "FROM llm_usage_events e "
+            "LEFT JOIN users u ON u.chat_id = e.chat_id "
+            "GROUP BY e.chat_id, u.username "
+            "ORDER BY total_tokens DESC"
+        )).fetchall()
+        for r in result:
+            rows.append({
+                "chat_id": r[0],
+                "username": r[1] or r[0],
+                "req_count": r[2],
+                "total_tokens": r[3] or 0,
+                "total_cost_usd": round(r[4] or 0, 6),
+                "last_seen": str(r[5])[:16] if r[5] else "—",
+            })
+    return jsonify(rows)
+
 
 @app.route("/users")
 @admin_required
@@ -325,6 +657,7 @@ def _process_oauth_background(
         # 3. Salviamo utente + database IDs
         store.add_user(
             chat_id=chat_id,
+            storage_backend="notion",
             notion_access_token=access_token,
             notion_workspace_id=workspace_id,
             expense_db_id=valid_discovered.get("expense_db_id"),
@@ -675,6 +1008,70 @@ def auth_notion_callback():
 
     return redirect("https://t.me/NotionFinaceBot")
 
+# --- LOGIN MINI APP (Telegram WebApp) ---
+
+@app.route("/auth/telegram-login", methods=["GET", "POST"])
+def telegram_login_miniapp():
+    """Form di login ottimizzato per Telegram WebApp. Aperto tramite /login nel bot."""
+    from src.user_store import OAuthSession
+
+    state = request.args.get("state") or request.form.get("state", "")
+
+    # Verifica che il token di sessione esista
+    with store.Session() as s:
+        sess = s.query(OAuthSession).filter_by(state=state).first()
+        if not sess:
+            return render_template("telegram_login.html", expired=True)
+        chat_id = sess.chat_id
+
+    if request.method == "GET":
+        return render_template("telegram_login.html", state=state)
+
+    # POST: verifica credenziali
+    email = (request.form.get("email") or "").strip()
+    password = request.form.get("password") or ""
+
+    user = store.verify_password(email, password)
+    was_suspended = False
+    if not user:
+        user = store.verify_password_any_status(email, password)
+        if user:
+            was_suspended = True
+        else:
+            return render_template("telegram_login.html", state=state, error="Email o password errati.")
+
+    # Riattiva l'account se era sospeso
+    if was_suspended:
+        store.reactivate_user(user.chat_id)
+
+    # Gestisce accesso da chat_id diverso (cambio account Telegram)
+    final_chat_id = chat_id
+    if user.chat_id != chat_id:
+        try:
+            store.reassign_user_chat_id(user.chat_id, chat_id)
+        except ValueError:
+            return render_template(
+                "telegram_login.html",
+                state=state,
+                error="Questo account Telegram e gia associato a un altro profilo.",
+            )
+
+    # Consuma il token di sessione
+    store.get_and_delete_oauth_session(state)
+
+    # Notifica l'utente su Telegram
+    msg = "✅ *Account riattivato!* Bentornato." if was_suspended else "✅ *Login effettuato!* Bentornato."
+    try:
+        requests.post(
+            f"https://api.telegram.org/bot{Config.TELEGRAM_BOT_TOKEN}/sendMessage",
+            json={"chat_id": final_chat_id, "text": msg, "parse_mode": "Markdown"},
+        )
+    except Exception:
+        pass
+
+    return render_template("telegram_login.html", success=True)
+
+
 # --- SETUP MINI APP (Fase 6) ---
 
 @app.route("/setup")
@@ -682,19 +1079,17 @@ def setup_form():
     """Mostra il form dinamico per il setup iniziale."""
     reg_token = request.args.get("reg_token")
     if not reg_token:
-        return "<h1>Accesso negato</h1><p>Manca il token di configurazione.</p>", 403
+        return _forbidden_setup_response()
         
     with store.Session() as s:
         from src.user_store import OAuthSession, User
         sess = s.query(OAuthSession).filter_by(state=reg_token).first()
         if not sess:
-             # Fallback: controlliamo se l'utente esiste già ed è in stato setup
-             # Altrimenti diamo errore
-             return "<h1>Sessione scaduta</h1><p>Ricomincia il setup dal bot.</p>", 403
+             return _forbidden_setup_response()
 
         user = s.query(User).filter_by(chat_id=sess.chat_id).first()
         if not user:
-            return "<h1>Utente non trovato</h1><p>Esegui prima /registrati dal bot.</p>", 403
+            return _forbidden_setup_response()
 
         # --- Branch PostgreSQL: niente schemi Notion, form semplificato ---
         if user.storage_backend == "postgres":
@@ -725,7 +1120,7 @@ def setup_form():
 
         # --- Branch Notion (flusso legacy invariato) ---
         if not user.notion_access_token:
-            return "<h1>Utente non autorizzato</h1><p>Devi prima connettere Notion con /registrati.</p>", 403
+            return _forbidden_setup_response()
 
         # I 3 DB che ci servono per il setup
         setup_db_keys = ["accounts_db_id", "categories_db_id", "subscriptions_db_id"]
@@ -812,6 +1207,18 @@ def setup_form():
             except Exception as e2:
                 print(f"[Setup] fetch_categories da DB fallito: {e2}")
 
+        available_subscriptions = []
+        try:
+            nc_sub = NotionFinanceClient(
+                api_key=user.notion_access_token,
+                subscriptions_db_id=user.subscriptions_db_id,
+                categories_db_id=user.categories_db_id,
+                db_schemas=schemas,
+            )
+            available_subscriptions = nc_sub.fetch_subscriptions()
+        except Exception as e:
+            print(f"[Setup] fetch_subscriptions da Notion fallito: {e}")
+
         return render_template("setup_miniapp.html",
                                backend="notion",
                                schemas=schemas,
@@ -819,7 +1226,7 @@ def setup_form():
                                user_name=user.username or "Utente",
                                available_accounts=available_accounts,
                                available_categories=available_categories,
-                               available_subscriptions=[],
+                               available_subscriptions=available_subscriptions,
                                is_first_setup=user.setup_completed_at is None,
                                col_accounts_initial_amount=Config.NOTION_ACCOUNTS_COL_INITIAL_AMOUNT,
                                col_accounts_type=Config.NOTION_ACCOUNTS_COL_TYPE,
@@ -843,16 +1250,17 @@ def api_setup_complete():
         from src.user_store import OAuthSession, User
         sess = s.query(OAuthSession).filter_by(state=reg_token).first()
         if not sess:
-            return jsonify({"error": "Invalid session"}), 403
+            return jsonify({"error": "Access denied"}), 403
 
         user = s.query(User).filter_by(chat_id=sess.chat_id).first()
         if not user:
-            return jsonify({"error": "User not found"}), 404
+            return jsonify({"error": "Access denied"}), 403
 
         # --- Branch PostgreSQL: payload piatto, creazione diretta via PostgresStorage ---
         if user.storage_backend == "postgres":
             pg_storage = PostgresStorage(session=s, user_id=user.chat_id)
             errors: list[str] = []
+            fatal_errors: list[str] = []
             created_count = 0
 
             # 1. Categorie — deduplicazione contro esistenti e contro il payload stesso
@@ -875,7 +1283,9 @@ def api_setup_complete():
                     pg_storage.create_category(name)
                     created_count += 1
                 except Exception as e:
-                    errors.append(f"Errore categoria '{name}': {e}")
+                    msg = f"Errore categoria '{name}': {e}"
+                    errors.append(msg)
+                    fatal_errors.append(msg)
 
             # 2. Conti
             for item in items_data.get("accounts", []):
@@ -888,7 +1298,9 @@ def api_setup_complete():
                     pg_storage.create_account(name, initial_balance=initial_balance)
                     created_count += 1
                 except Exception as e:
-                    errors.append(f"Errore account '{name}': {e}")
+                    msg = f"Errore account '{name}': {e}"
+                    errors.append(msg)
+                    fatal_errors.append(msg)
 
             # 3. Abbonamenti
             for item in items_data.get("subscriptions", []):
@@ -903,9 +1315,11 @@ def api_setup_complete():
                     )
                     created_count += 1
                 except Exception as e:
-                    errors.append(f"Errore abbonamento '{name}': {e}")
+                    msg = f"Errore abbonamento '{name}': {e}"
+                    errors.append(msg)
+                    fatal_errors.append(msg)
 
-            if created_count > 0 or not errors:
+            if not fatal_errors:
                 if user.setup_completed_at is None:
                     store.mark_setup_completed(user.chat_id)
                     telegram_url = f"https://api.telegram.org/bot{Config.TELEGRAM_BOT_TOKEN}/sendMessage"
@@ -1106,11 +1520,11 @@ def api_delete_notion_item():
         from src.user_store import OAuthSession, User
         sess = s.query(OAuthSession).filter_by(state=reg_token).first()
         if not sess:
-            return jsonify({"error": "Invalid session"}), 403
+            return jsonify({"error": "Access denied"}), 403
 
         user = s.query(User).filter_by(chat_id=sess.chat_id).first()
         if not user:
-            return jsonify({"error": "User not found"}), 404
+            return jsonify({"error": "Access denied"}), 403
 
         try:
             notion_raw = NotionClient(auth=user.notion_access_token)
@@ -1158,10 +1572,10 @@ def api_manage_add():
     with store.Session() as s:
         sess = s.query(OAuthSession).filter_by(state=reg_token).first()
         if not sess:
-            return jsonify({"error": "Invalid session"}), 403
+            return jsonify({"error": "Access denied"}), 403
         user = s.query(User).filter_by(chat_id=sess.chat_id).first()
         if not user:
-            return jsonify({"error": "User not found"}), 404
+            return jsonify({"error": "Access denied"}), 403
 
         name = (data.get("name") or "").strip()
         if not name:
@@ -1236,6 +1650,7 @@ def api_manage_add():
                 else:
                     return jsonify({"error": f"entity_type '{entity_type}' non supportato"}), 400
 
+            _trigger_dashboard_refresh(user, s)
             return jsonify({"status": "ok", "entity": result})
         except Exception as e:
             return jsonify({"error": str(e)}), 500
@@ -1264,10 +1679,10 @@ def api_manage_remove():
     with store.Session() as s:
         sess = s.query(OAuthSession).filter_by(state=reg_token).first()
         if not sess:
-            return jsonify({"error": "Invalid session"}), 403
+            return jsonify({"error": "Access denied"}), 403
         user = s.query(User).filter_by(chat_id=sess.chat_id).first()
         if not user:
-            return jsonify({"error": "User not found"}), 404
+            return jsonify({"error": "Access denied"}), 403
 
         try:
             if user.storage_backend == "postgres":
@@ -1286,6 +1701,7 @@ def api_manage_remove():
                 notion_raw = NotionClient(auth=user.notion_access_token)
                 notion_raw.pages.update(page_id=str(entity_id), archived=True)
 
+            _trigger_dashboard_refresh(user, s)
             return jsonify({"status": "ok"})
         except Exception as e:
             return jsonify({"error": str(e)}), 500
@@ -1316,10 +1732,10 @@ def api_manage_update():
     with store.Session() as s:
         sess = s.query(OAuthSession).filter_by(state=reg_token).first()
         if not sess:
-            return jsonify({"error": "Invalid session"}), 403
+            return jsonify({"error": "Access denied"}), 403
         user = s.query(User).filter_by(chat_id=sess.chat_id).first()
         if not user:
-            return jsonify({"error": "User not found"}), 404
+            return jsonify({"error": "Access denied"}), 403
 
         try:
             if user.storage_backend == "postgres":
@@ -1458,6 +1874,7 @@ def api_manage_update():
                             raise
                 result = {"id": entity_id, **data}
 
+            _trigger_dashboard_refresh(user, s)
             return jsonify({"status": "ok", "entity": result})
         except Exception as e:
             return jsonify({"error": str(e)}), 500
@@ -1526,24 +1943,33 @@ def _validate_telegram_init_data(init_data_raw: str) -> dict | None:
 
 
 def _tg_webapp_auth(f):
-    """Decorator: legge X-Telegram-Init-Data header, valida HMAC, inietta g.chat_id."""
+    """Decorator: autentica via Telegram WebApp o sessione browser."""
     from flask import g
     @wraps(f)
     def decorated(*args, **kwargs):
-        init_data = request.headers.get("X-Telegram-Init-Data", "")
-        import logging
-        logging.warning(f"[TG_AUTH] init_data present: {bool(init_data)}, len: {len(init_data)}, first50: {init_data[:50]!r}")
-        if not init_data:
-            logging.warning("[TG_AUTH] Missing header → 401")
-            return jsonify({"error": "Missing Telegram auth"}), 401
-        parsed = _validate_telegram_init_data(init_data)
-        logging.warning(f"[TG_AUTH] parsed: {parsed is not None}, chat_id: {parsed.get('chat_id') if parsed else None}")
-        if not parsed or not parsed["chat_id"]:
-            logging.warning("[TG_AUTH] Invalid auth → 401")
-            return jsonify({"error": "Invalid Telegram auth"}), 401
-        g.chat_id = parsed["chat_id"]
+        chat_id, auth_mode = _resolve_request_chat_id()
+        if not chat_id:
+            return jsonify({"error": "Unauthorized"}), 401
+        g.chat_id = chat_id
+        g.auth_mode = auth_mode
         return f(*args, **kwargs)
     return decorated
+
+
+@app.route("/api/auth/session", methods=["GET"])
+def api_auth_session():
+    """Verifica se la richiesta appartiene a un utente autenticato."""
+    chat_id, auth_mode = _resolve_request_chat_id()
+    if not chat_id:
+        return jsonify({"authorized": False}), 401
+
+    redirect_to = _resolve_authenticated_redirect(chat_id)
+    return jsonify({
+        "authorized": True,
+        "auth_mode": auth_mode,
+        "chat_id": chat_id,
+        "redirect_to": None if redirect_to == "/chat" else redirect_to,
+    })
 
 
 def _month_label(year: int, month: int) -> str:
@@ -1563,12 +1989,28 @@ def _start_date_for_months(months: int):
     return date(y, m, 1)
 
 
+def _get_user_plan_type(chat_id: str) -> str:
+    """Ritorna 'free' o 'pro' per l'utente corrente."""
+    try:
+        plan = store.get_user_plan(chat_id)
+        return plan.get("plan_type", "free")
+    except Exception:
+        return "free"
+
+
+def _is_pro(chat_id: str) -> bool:
+    """True se l'utente è Pro."""
+    return _get_user_plan_type(chat_id) == "pro"
+
+
 @app.route("/api/analytics/overview")
 @_tg_webapp_auth
 def analytics_overview():
     """Ritorna risparmio mensile e spesa mensile per account negli ultimi N mesi."""
     from flask import g
-    months = min(int(request.args.get("months", 6)), 6)
+    plan_type = _get_user_plan_type(g.chat_id)
+    max_months = 24 if plan_type == "pro" else 6
+    months = min(int(request.args.get("months", 6)), max_months)
     start = _start_date_for_months(months)
     from datetime import date
     end = date.today()
@@ -1623,18 +2065,30 @@ def analytics_overview():
                 "amount": round(amount, 2),
             })
 
-    return jsonify({"savings": savings, "totals_by_account": totals_by_account})
+    return jsonify({"savings": savings, "totals_by_account": totals_by_account, "plan_type": plan_type})
 
 
 @app.route("/api/analytics/categories-expense")
 @_tg_webapp_auth
 def analytics_categories_expense():
-    """Ritorna spese per categoria: storico mensile e medie per ultimi N mesi."""
+    """Ritorna spese per categoria: storico mensile e medie per ultimi N mesi.
+    
+    Query params:
+        months=N        (default 6, max 24 Pro / 6 Free)
+        category=NAME   (filtra per categoria, solo Pro)
+        granularity=    "monthly" (default) | "weekly" (solo Pro)
+    """
     from flask import g
-    months = min(int(request.args.get("months", 6)), 6)
+    plan_type = _get_user_plan_type(g.chat_id)
+    max_months = 24 if plan_type == "pro" else 6
+    months = min(int(request.args.get("months", 6)), max_months)
     start = _start_date_for_months(months)
     from datetime import date
     end = date.today()
+
+    # Filtro categoria (solo Pro puo' filtrare)
+    category_filter = request.args.get("category", "").strip() if plan_type == "pro" else ""
+    granularity = request.args.get("granularity", "monthly") if plan_type == "pro" else "monthly"
 
     with store.Session() as s:
         storage = PostgresStorage(session=s, user_id=g.chat_id)
@@ -1643,11 +2097,18 @@ def analytics_categories_expense():
 
     budget_map = {c["name"]: c.get("monthly_budget") for c in categories}
 
-    # Aggrega per (anno, mese, categoria)
+    if category_filter:
+        transactions = [t for t in transactions if (t.get("category") or "Altro").lower() == category_filter.lower()]
+
+    # Aggrega per (anno, mese, categoria) o (anno, week, categoria)
     monthly_cat: dict[tuple, dict[str, float]] = defaultdict(lambda: defaultdict(float))
     for t in transactions:
         d = t["date"]
-        key = (d.year, d.month)
+        if granularity == "weekly":
+            iso = d.isocalendar()
+            key = (iso[0], iso[1])
+        else:
+            key = (d.year, d.month)
         cat = t.get("category") or "Altro"
         monthly_cat[key][cat] += t["amount"]
 
@@ -1655,8 +2116,12 @@ def analytics_categories_expense():
 
     by_category = []
     for key in all_keys:
-        y, m = key
-        label = _month_label(y, m)
+        if granularity == "weekly":
+            y, w = key
+            label = f"W{w} {str(y)[-2:]}"
+        else:
+            y, m = key
+            label = _month_label(y, m)
         for cat, amount in monthly_cat[key].items():
             by_category.append({
                 "month": label,
@@ -1677,7 +2142,7 @@ def analytics_categories_expense():
     ]
     averages.sort(key=lambda x: x["avg"], reverse=True)
 
-    return jsonify({"by_category": by_category, "averages": averages})
+    return jsonify({"by_category": by_category, "averages": averages, "plan_type": plan_type})
 
 
 @app.route("/api/analytics/income")
@@ -1685,6 +2150,7 @@ def analytics_categories_expense():
 def analytics_income():
     """Ritorna storico entrate mensili negli ultimi N mesi."""
     from flask import g
+    plan_type = _get_user_plan_type(g.chat_id)
     months = min(int(request.args.get("months", 6)), 6)
     start = _start_date_for_months(months)
     from datetime import date
@@ -1704,7 +2170,7 @@ def analytics_income():
         {"month": _month_label(y, m), "total": round(amount, 2)}
         for (y, m), amount in sorted(monthly.items())
     ]
-    return jsonify({"monthly": result})
+    return jsonify({"monthly": result, "plan_type": plan_type})
 
 
 @app.route("/api/analytics/wealth")
@@ -1712,17 +2178,521 @@ def analytics_income():
 def analytics_wealth():
     """Ritorna saldo corrente per account (capitale totale)."""
     from flask import g
+    plan_type = _get_user_plan_type(g.chat_id)
     with store.Session() as s:
         storage = PostgresStorage(session=s, user_id=g.chat_id)
         accounts = storage.fetch_accounts()
 
     result = [
-        {"name": a["name"], "balance": round(a["balance"] or 0.0, 2)}
+        {"name": a["name"], "balance": round(a["current_balance"] or 0.0, 2)}
         for a in accounts
-        if (a.get("balance") or 0.0) > 0
+        if a.get("current_balance") is not None
     ]
-    return jsonify({"accounts": result})
+    return jsonify({"accounts": result, "plan_type": plan_type})
+
+
+# ---------------------------------------------------------------------------
+# NUOVI ENDPOINT ANALYTICS (Fase 2)
+# ---------------------------------------------------------------------------
+
+@app.route("/api/analytics/capital-trend")
+@_tg_webapp_auth
+def analytics_capital_trend():
+    """Ritorna lo storico del capitale (somma saldi conti) mese per mese.
+    
+    Calcola per ogni mese il saldo aggregato di tutti i conti:
+    opening_balance + sum(income fino a quel mese) - sum(expenses fino a quel mese).
+    """
+    from flask import g
+    plan_type = _get_user_plan_type(g.chat_id)
+    max_months = 24 if plan_type == "pro" else 3
+    months = min(int(request.args.get("months", max_months)), max_months)
+    start = _start_date_for_months(months)
+    from datetime import date
+    end = date.today()
+
+    with store.Session() as s:
+        storage = PostgresStorage(session=s, user_id=g.chat_id)
+        accounts = storage.fetch_accounts()
+        transactions = storage.fetch_all_transactions(start, end)
+        incomes = storage.fetch_income(start, end)
+
+    # Calcola saldo iniziale aggregato (opening_balance di tutti i conti)
+    opening_total = sum(a.get("opening_balance", 0.0) or 0.0 for a in accounts)
+
+    # Prepara mappa conto -> opening_balance per il calcolo per-account
+    acc_opening = {a["name"]: (a.get("opening_balance", 0.0) or 0.0) for a in accounts}
+    acc_ids = {a["id"]: a["name"] for a in accounts}
+
+    # Aggrega entrate e uscite per mese e per conto
+    monthly_income_total: dict[tuple, float] = defaultdict(float)
+    monthly_expense_total: dict[tuple, float] = defaultdict(float)
+    monthly_income_by_acc: dict[tuple, dict[str, float]] = defaultdict(lambda: defaultdict(float))
+    monthly_expense_by_acc: dict[tuple, dict[str, float]] = defaultdict(lambda: defaultdict(float))
+
+    for inc in incomes:
+        d = inc["date"]
+        key = (d.year, d.month)
+        monthly_income_total[key] += inc["amount"]
+        acc_name = acc_ids.get(inc.get("account_id"), "Altro")
+        monthly_income_by_acc[key][acc_name] += inc["amount"]
+
+    for t in transactions:
+        d = t["date"]
+        key = (d.year, d.month)
+        monthly_expense_total[key] += t["amount"]
+        acc_name = acc_ids.get(t.get("account_id"), "Altro")
+        monthly_expense_by_acc[key][acc_name] += t["amount"]
+
+    # Genera tutti i mesi nel range
+    all_keys = sorted(set(monthly_income_total) | set(monthly_expense_total))
+    
+    # Calcola saldo cumulativo per ogni mese
+    capital_trend = []
+    by_account_trend: dict[str, list[dict]] = {name: [] for name in acc_opening}
+    
+    running_totals = dict(acc_opening)  # per-account
+    running_total = opening_total       # aggregato
+
+    for key in all_keys:
+        y, m = key
+        label = _month_label(y, m)
+        
+        month_inc = monthly_income_total.get(key, 0.0)
+        month_exp = monthly_expense_total.get(key, 0.0)
+        running_total += month_inc - month_exp
+
+        capital_trend.append({
+            "month": label,
+            "total": round(running_total, 2),
+        })
+
+        # Per-account (solo Pro)
+        if plan_type == "pro":
+            for acc_name in acc_opening:
+                inc_acc = monthly_income_by_acc.get(key, {}).get(acc_name, 0.0)
+                exp_acc = monthly_expense_by_acc.get(key, {}).get(acc_name, 0.0)
+                running_totals[acc_name] += inc_acc - exp_acc
+                by_account_trend[acc_name].append({
+                    "month": label,
+                    "account": acc_name,
+                    "balance": round(running_totals[acc_name], 2),
+                })
+
+    result = {"capital_trend": capital_trend, "plan_type": plan_type}
+    if plan_type == "pro":
+        result["by_account"] = [v for v in by_account_trend.values() if v]
+    
+    return jsonify(result)
+
+
+@app.route("/api/analytics/budget-status")
+@_tg_webapp_auth
+def analytics_budget_status():
+    """Ritorna lo stato budget per ogni categoria nel mese corrente (o specificato).
+    
+    Query params:
+        month=YYYY-MM   (default: mese corrente)
+    Richiede Pro — per Free ritorna errore con plan_type.
+    """
+    from flask import g
+    from datetime import date
+
+    plan_type = _get_user_plan_type(g.chat_id)
+    if plan_type != "pro":
+        return jsonify({
+            "error": "Funzionalita' riservata agli utenti Pro",
+            "plan_type": "free",
+            "budget_status": [],
+        })
+
+    month_str = request.args.get("month", "")
+    if month_str:
+        try:
+            parts = month_str.split("-")
+            target_year, target_month = int(parts[0]), int(parts[1])
+        except (ValueError, IndexError):
+            target_year, target_month = date.today().year, date.today().month
+    else:
+        target_year, target_month = date.today().year, date.today().month
+
+    from calendar import monthrange
+    month_start = date(target_year, target_month, 1)
+    _, last_day = monthrange(target_year, target_month)
+    month_end = date(target_year, target_month, last_day)
+
+    with store.Session() as s:
+        storage = PostgresStorage(session=s, user_id=g.chat_id)
+        transactions = storage.fetch_all_transactions(month_start, month_end)
+        incomes = storage.fetch_income(month_start, month_end)
+        categories = storage.get_categories()
+
+    # Budget impostati
+    budget_map = {c["name"]: (c.get("monthly_budget") or 0.0) for c in categories}
+    
+    # Speso per categoria
+    spent_by_cat: dict[str, float] = defaultdict(float)
+    for t in transactions:
+        cat = t.get("category") or "Altro"
+        spent_by_cat[cat] += t["amount"]
+
+    # Solo categorie con budget
+    budget_status = []
+    for cat_name, budget in budget_map.items():
+        if budget <= 0:
+            continue
+        spent = round(spent_by_cat.get(cat_name, 0.0), 2)
+        percentage = round((spent / budget) * 100, 1) if budget > 0 else 0.0
+        budget_status.append({
+            "category": cat_name,
+            "budget": round(budget, 2),
+            "spent": spent,
+            "remaining": round(max(budget - spent, 0), 2),
+            "percentage": percentage,
+        })
+
+    # Ordina per % spesa decrescente
+    budget_status.sort(key=lambda x: x["percentage"], reverse=True)
+
+    # Totale entrate del mese
+    total_income = round(sum(inc["amount"] for inc in incomes), 2)
+    total_spent = round(sum(spent_by_cat.values()), 2)
+
+    return jsonify({
+        "budget_status": budget_status,
+        "month": _month_label(target_year, target_month),
+        "total_income": total_income,
+        "total_spent": total_spent,
+        "plan_type": plan_type,
+    })
+
+
+@app.route("/api/analytics/transactions")
+@_tg_webapp_auth
+def analytics_transactions():
+    """Lista transazioni filtrabile per periodo, categoria, conto.
+    
+    Query params:
+        start=YYYY-MM-DD   (default: 30 giorni fa)
+        end=YYYY-MM-DD     (default: oggi)
+        category=NAME      (filtro categoria, opzionale)
+        account=NAME       (filtro conto, opzionale)
+        limit=N            (default 50, max 50 Free / 500 Pro)
+        offset=N           (default 0, paginazione)
+    """
+    from flask import g
+    from datetime import date
+
+    plan_type = _get_user_plan_type(g.chat_id)
+    is_pro = plan_type == "pro"
+    max_limit = 500 if is_pro else 50
+    limit = min(int(request.args.get("limit", 50)), max_limit)
+    offset = max(int(request.args.get("offset", 0)), 0)
+
+    # Periodo: Free solo ultimi 30 giorni
+    today = date.today()
+    end_str = request.args.get("end", today.isoformat())
+    try:
+        end_date = date.fromisoformat(end_str)
+    except (ValueError, TypeError):
+        end_date = today
+
+    if is_pro:
+        thirty_days_ago = today - timedelta(days=30)
+        start_str = request.args.get("start", thirty_days_ago.isoformat())
+        try:
+            start_date = date.fromisoformat(start_str)
+        except (ValueError, TypeError):
+            start_date = thirty_days_ago
+    else:
+        start_date = today - timedelta(days=30)
+
+    category_filter = request.args.get("category", "").strip()
+    account_filter = request.args.get("account", "").strip()
+
+    with store.Session() as s:
+        storage = PostgresStorage(session=s, user_id=g.chat_id)
+        transactions = storage.fetch_all_transactions(start_date, end_date)
+        accounts = storage.fetch_accounts()
+
+    acc_map = {a["id"]: a["name"] for a in accounts}
+
+    # Arricchisci con nome account e categoria
+    enriched = []
+    for t in transactions:
+        acc_name = acc_map.get(t.get("account_id"), "Altro")
+        cat = t.get("category") or "Altro"
+        
+        if category_filter and cat.lower() != category_filter.lower():
+            continue
+        if account_filter and acc_name.lower() != account_filter.lower():
+            continue
+        
+        d = t["date"]
+        enriched.append({
+            "id": t.get("id", 0),
+            "date": d.isoformat() if hasattr(d, "isoformat") else str(d),
+            "name": t.get("name", ""),
+            "amount": round(t["amount"], 2),
+            "category": cat,
+            "account": acc_name,
+        })
+
+    # Ordina per data decrescente
+    enriched.sort(key=lambda x: x["date"], reverse=True)
+    
+    total_count = len(enriched)
+    total_amount = round(sum(e["amount"] for e in enriched), 2)
+
+    # Paginazione
+    page = enriched[offset:offset + limit]
+
+    return jsonify({
+        "transactions": page,
+        "total": total_count,
+        "total_amount": total_amount,
+        "offset": offset,
+        "limit": limit,
+        "plan_type": plan_type,
+    })
+
+
+@app.route("/api/analytics/top-merchants")
+@_tg_webapp_auth
+def analytics_top_merchants():
+    """Top beneficiari/merchant per spesa totale.
+    
+    Query params:
+        months=N   (default 3)
+        limit=N    (default 5 Free, 20 Pro)
+    """
+    from flask import g
+
+    plan_type = _get_user_plan_type(g.chat_id)
+    is_pro = plan_type == "pro"
+    max_months = 24 if is_pro else 3
+    months = min(int(request.args.get("months", 3)), max_months)
+    default_limit = 20 if is_pro else 5
+    limit = min(int(request.args.get("limit", default_limit)), default_limit)
+    start = _start_date_for_months(months)
+    from datetime import date
+    end = date.today()
+
+    with store.Session() as s:
+        storage = PostgresStorage(session=s, user_id=g.chat_id)
+        transactions = storage.fetch_all_transactions(start, end)
+
+    # Aggrega per nome beneficiario
+    merchant_totals: dict[str, float] = defaultdict(float)
+    merchant_cats: dict[str, str] = {}
+    merchant_counts: dict[str, int] = defaultdict(int)
+
+    for t in transactions:
+        name = t.get("name", "Sconosciuto").strip() or "Sconosciuto"
+        merchant_totals[name] += t["amount"]
+        merchant_counts[name] += 1
+        if name not in merchant_cats:
+            merchant_cats[name] = t.get("category") or "Altro"
+
+    # Top N
+    top = sorted(merchant_totals.items(), key=lambda x: x[1], reverse=True)[:limit]
+
+    result = [
+        {
+            "name": name,
+            "total": round(total, 2),
+            "count": merchant_counts[name],
+            "category": merchant_cats.get(name, "Altro"),
+        }
+        for name, total in top
+    ]
+
+    return jsonify({"merchants": result, "plan_type": plan_type})
+
+
+@app.route("/api/analytics/savings-rate")
+@_tg_webapp_auth
+def analytics_savings_rate():
+    """Tasso di risparmio mensile: (entrate - uscite) / entrate * 100.
+    
+    Richiede Pro — per Free ritorna errore con plan_type.
+    """
+    from flask import g
+
+    plan_type = _get_user_plan_type(g.chat_id)
+    if plan_type != "pro":
+        return jsonify({
+            "error": "Funzionalita' riservata agli utenti Pro",
+            "plan_type": "free",
+            "savings_rate": [],
+        })
+
+    months = min(int(request.args.get("months", 6)), 24)
+    start = _start_date_for_months(months)
+    from datetime import date
+    end = date.today()
+
+    with store.Session() as s:
+        storage = PostgresStorage(session=s, user_id=g.chat_id)
+        transactions = storage.fetch_all_transactions(start, end)
+        incomes = storage.fetch_income(start, end)
+
+    monthly_expenses: dict[tuple, float] = defaultdict(float)
+    for t in transactions:
+        d = t["date"]
+        key = (d.year, d.month)
+        monthly_expenses[key] += t["amount"]
+
+    monthly_income: dict[tuple, float] = defaultdict(float)
+    for inc in incomes:
+        d = inc["date"]
+        key = (d.year, d.month)
+        monthly_income[key] += inc["amount"]
+
+    all_keys = sorted(set(monthly_expenses) | set(monthly_income))
+    
+    savings_rate = []
+    for key in all_keys:
+        y, m = key
+        inc = round(monthly_income.get(key, 0.0), 2)
+        exp = round(monthly_expenses.get(key, 0.0), 2)
+        savings = round(inc - exp, 2)
+        rate = round((savings / inc) * 100, 1) if inc > 0 else 0.0
+        savings_rate.append({
+            "month": _month_label(y, m),
+            "income": inc,
+            "expenses": exp,
+            "savings": savings,
+            "rate": rate,
+        })
+
+    return jsonify({"savings_rate": savings_rate, "plan_type": plan_type})
+
+
+@app.route("/api/analytics/month-comparison")
+@_tg_webapp_auth
+def analytics_month_comparison():
+    """Confronto spese per categoria: mese corrente vs mese precedente vs media 3 mesi.
+    
+    Richiede Pro — per Free ritorna errore con plan_type.
+    """
+    from flask import g
+    from datetime import date
+    from calendar import monthrange
+
+    plan_type = _get_user_plan_type(g.chat_id)
+    if plan_type != "pro":
+        return jsonify({
+            "error": "Funzionalita' riservata agli utenti Pro",
+            "plan_type": "free",
+            "comparisons": [],
+        })
+
+    today = date.today()
+    current_year, current_month = today.year, today.month
+
+    # Mese corrente
+    cur_start = date(current_year, current_month, 1)
+    _, last_day = monthrange(current_year, current_month)
+    cur_end = date(current_year, current_month, min(today.day, last_day))
+
+    # 4 mesi di storico per calcolare mese scorso e media 3m
+    history_start = _start_date_for_months(4)
+
+    with store.Session() as s:
+        storage = PostgresStorage(session=s, user_id=g.chat_id)
+        transactions = storage.fetch_all_transactions(history_start, cur_end)
+
+    # Aggrega per (anno, mese, categoria)
+    monthly_cat: dict[tuple, dict[str, float]] = defaultdict(lambda: defaultdict(float))
+    for t in transactions:
+        d = t["date"]
+        key = (d.year, d.month)
+        cat = t.get("category") or "Altro"
+        monthly_cat[key][cat] += t["amount"]
+
+    # Mese corrente
+    cur_key = (current_year, current_month)
+    cur_spending = monthly_cat.get(cur_key, {})
+
+    # Mese precedente
+    if current_month == 1:
+        prev_key = (current_year - 1, 12)
+    else:
+        prev_key = (current_year, current_month - 1)
+    prev_spending = monthly_cat.get(prev_key, {})
+
+    # Media ultimi 3 mesi completi (escludendo il corrente)
+    all_keys = sorted(monthly_cat.keys())
+    past_keys = [k for k in all_keys if k != cur_key][-3:]
+    
+    avg_spending: dict[str, float] = {}
+    if past_keys:
+        for k in past_keys:
+            for cat, amount in monthly_cat[k].items():
+                avg_spending[cat] = avg_spending.get(cat, 0.0) + amount
+        n_months = len(past_keys)
+        for cat in avg_spending:
+            avg_spending[cat] = round(avg_spending[cat] / n_months, 2)
+
+    # Costruisci il confronto
+    all_cats = set(cur_spending) | set(prev_spending) | set(avg_spending)
+    comparisons = []
+    for cat in sorted(all_cats):
+        cur_val = round(cur_spending.get(cat, 0.0), 2)
+        prev_val = round(prev_spending.get(cat, 0.0), 2)
+        avg_val = round(avg_spending.get(cat, 0.0), 2)
+        
+        change_pct = round(((cur_val - prev_val) / prev_val) * 100, 1) if prev_val > 0 else 0.0
+        
+        comparisons.append({
+            "category": cat,
+            "current_month": cur_val,
+            "last_month": prev_val,
+            "avg_3m": avg_val,
+            "change_pct": change_pct,
+        })
+
+    return jsonify({"comparisons": comparisons, "plan_type": plan_type})
+
+
+# ---------------------------------------------------------------------------
+# API Reports — storico report web
+# ---------------------------------------------------------------------------
+
+@app.route("/api/reports/<share_token>", methods=["GET"])
+def api_get_report_by_token(share_token: str):
+    """Endpoint pubblico: restituisce un report tramite share_token (no auth richiesta)."""
+    with store.Session() as s:
+        storage = PostgresStorage(session=s, user_id="")
+        report = storage.get_report_by_token(share_token)
+    if not report:
+        return jsonify({"error": "Report non trovato"}), 404
+    return jsonify(report)
+
+
+@app.route("/api/reports", methods=["GET"])
+@_tg_webapp_auth
+def api_get_reports_for_user():
+    """Endpoint autenticato: lista report dell'utente corrente."""
+    from flask import g
+    limit = min(int(request.args.get("limit", 24)), 100)
+    with store.Session() as s:
+        storage = PostgresStorage(session=s, user_id=g.chat_id)
+        reports = storage.get_reports_for_user(user_id=g.chat_id, limit=limit)
+    # Omette text_content e report_data per tenere la lista leggera
+    summary = [
+        {
+            "id": r["id"],
+            "report_type": r["report_type"],
+            "report_date": r["report_date"],
+            "share_token": r["share_token"],
+            "created_at": r["created_at"],
+        }
+        for r in reports
+    ]
+    return jsonify({"reports": summary})
 
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000, debug=False)
+    app.run(host="0.0.0.0", port=5000, debug=True)

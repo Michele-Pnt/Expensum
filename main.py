@@ -5,15 +5,15 @@ Pipeline:
   1. Estrazione dati da Notion (con paginazione e retry)
   2. Elaborazione statistica: consuntivo, trend, anomalie
   3. Previsione statistica mese successivo
-  4. Analisi AI con Gemini 2.5 Flash (Chain of Thought)
+  4. Analisi AI con Mistral Small 3.1 (Chain of Thought)
   5. Costruzione report Markdown
   6. Invio report su Telegram
 
 Modalità:
   --dry-run     Usa dati di test fittizi, mostra report a schermo senza
-                inviare su Telegram e senza chiamare Gemini.
+                inviare su Telegram e senza chiamare Mistral.
   --debug-data  Scarica dati REALI da Notion ma analizza solo in locale. Stampa
-                il testo esatto da inviare al prompt di Gemini e un JSON con
+                il testo esatto da inviare al prompt di Mistral e un JSON con
                 i dati estratti e si ferma prima della chiamata API.
   --month YYYY-MM   Analizza un mese specifico (default: mese scorso).
 """
@@ -30,13 +30,15 @@ from datetime import date, datetime
 from config import Config, setup_logging
 from src.notion_client import NotionFinanceClient
 from src.storage.notion_storage import NotionStorage
+from src.storage.postgres_storage import PostgresStorage
 from src.data_processor import DataProcessor
 from src.forecaster import Forecaster
-from src.gemini_client import GeminiClient
-from src.ollama_client import OllamaClient
+from src.mistral_client import MistralClient
 from src.telegram_client import TelegramClient
 from src.report_builder import ReportBuilder
 from src.chart_generator import ChartGenerator
+from src.llm_usage_tracker import build_request_key, estimate_reserved_tokens, normalize_usage_metadata
+from src.user_store import UserStore
 
 
 # ---------------------------------------------------------------------------
@@ -109,13 +111,74 @@ def _insert_accounts_section_near_summary(report_text: str, accounts: list[dict]
     return report_text + "\n\n---\n" + section
 
 
+def _resolve_default_target_month(today: date) -> tuple[int, int]:
+    """Ritorna (anno, mese) del consuntivo mensile di default: il mese scorso."""
+    if today.month == 1:
+        return today.year - 1, 12
+    return today.year, today.month - 1
+
+
+def _build_monthly_history(report) -> list[dict]:
+    """Costruisce lo storico mensile per il report web usando il report già elaborato."""
+    summaries = [m for m in [*(report.history or []), report.current_month] if m is not None]
+    summaries.sort(key=lambda m: (m.year, m.month))
+
+    income_by_month: dict[tuple[int, int], float] = {}
+    for inc in report.incomes or []:
+        inc_date = inc.get("date") or inc.get("income_date")
+        if isinstance(inc_date, str):
+            try:
+                inc_date = date.fromisoformat(inc_date)
+            except ValueError:
+                continue
+        elif isinstance(inc_date, datetime):
+            inc_date = inc_date.date()
+
+        if not isinstance(inc_date, date):
+            continue
+
+        key = (inc_date.year, inc_date.month)
+        income_by_month[key] = income_by_month.get(key, 0.0) + abs(float(inc.get("amount") or 0.0))
+
+    return [
+        {
+            "month": summary.label,
+            "income": round(income_by_month.get((summary.year, summary.month), 0.0), 2),
+            "expenses": round(summary.total, 2),
+            "net": round(income_by_month.get((summary.year, summary.month), 0.0) - summary.total, 2),
+        }
+        for summary in summaries
+    ]
+
+
+def _build_monthly_report_payload(report, target_year: int, target_month: int, total_accounts_balance: float, budget_by_cat: dict[str, float]) -> dict:
+    """Normalizza il payload JSON del report mensile condiviso sul web."""
+    by_category = dict(report.current_month.by_category)
+    return {
+        "type": "monthly_full",
+        "target_year": target_year,
+        "target_month": target_month,
+        "by_category": by_category,
+        "spent_by_cat": by_category,
+        "total": report.current_month.total,
+        "total_income": report.total_income,
+        "total_accounts": total_accounts_balance,
+        "budget_by_cat": budget_by_cat,
+        "monthly_history": _build_monthly_history(report),
+    }
+
+
 # ---------------------------------------------------------------------------
 # Funzione principale
 # ---------------------------------------------------------------------------
 
-async def run_agent(target_year: int, target_month: int, dry_run: bool, debug_data: bool = False) -> None:
+async def run_agent(target_year: int, target_month: int, dry_run: bool, debug_data: bool = False, chat_id: str | None = None) -> None:
     """Esegue la pipeline completa dell'agente finanziario."""
     logger = logging.getLogger("financial_agent.main")
+    usage_store = UserStore(db_url=(f"sqlite:///{Config.LOG_DIR / 'token_usage_measure.db'}" if dry_run else Config.DATABASE_URL))
+    usage_store.add_user("system")
+    if not chat_id:
+        chat_id = Config.TELEGRAM_CHAT_ID
     logger.info(
         f"{'[DRY-RUN] ' if dry_run else ''}Avvio agente — target: "
         f"{target_month:02d}/{target_year}"
@@ -134,9 +197,12 @@ async def run_agent(target_year: int, target_month: int, dry_run: bool, debug_da
         monthly_balances = []  # nessun dato Monthly Balance in dry-run
         incomes = []           # nessun dato Income in dry-run
         accounts = [{"name": "Mock Bank", "current_balance": 1500.0}]
+        budget_by_cat: dict[str, float] = {}
         logger.info(f"  [DRY-RUN] Usando {len(transactions)} transazioni mock")
     else:
-        storage = NotionStorage(NotionFinanceClient())
+        user_store = UserStore(db_url=Config.DATABASE_URL)
+        user = user_store.get_user(chat_id) if chat_id else None
+
         months_back = Config.HISTORY_MONTHS + 1
         start_year = target_year
         start_month = target_month - months_back
@@ -146,18 +212,44 @@ async def run_agent(target_year: int, target_month: int, dry_run: bool, debug_da
         start_date = date(start_year, start_month, 1)
         end_date = date(target_year, target_month, monthrange(target_year, target_month)[1])
 
-        transactions = storage.fetch_all_transactions(
-            start_date=start_date, end_date=end_date
-        )
-
-        logger.info("▶ Step 1b/7: Estrazione Monthly Balance (Risparmio Netto)")
-        monthly_balances = storage.fetch_monthly_balances(
-            start_date=start_date, end_date=end_date
-        )
-
-        logger.info("▶ Step 1c/7: Estrazione Entrate e Conti Correnti")
-        incomes = storage.fetch_income(start_date=start_date, end_date=end_date)
-        accounts = storage.fetch_accounts()
+        if user and user.storage_backend == "postgres":
+            logger.info(f"Usando PostgreSQL storage per utente {chat_id}")
+            _pg_session = user_store.Session()
+            try:
+                storage = PostgresStorage(_pg_session, user_id=chat_id)
+                transactions = storage.fetch_all_transactions(start_date=start_date, end_date=end_date)
+                logger.info("▶ Step 1b/7: Estrazione Monthly Balance (Risparmio Netto)")
+                monthly_balances = storage.fetch_monthly_balances(start_date=start_date, end_date=end_date)
+                logger.info("▶ Step 1c/7: Estrazione Entrate e Conti Correnti")
+                incomes = storage.fetch_income(start_date=start_date, end_date=end_date)
+                accounts = storage.fetch_accounts()
+            finally:
+                _pg_session.close()
+        else:
+            if user and user.notion_access_token:
+                db_schemas = user_store.get_database_schemas(chat_id)
+                notion_client = NotionFinanceClient(
+                    api_key=user.notion_access_token,
+                    expense_db_id=user.expense_db_id,
+                    income_db_id=user.income_db_id,
+                    categories_db_id=user.categories_db_id,
+                    monthly_balance_db_id=user.monthly_balance_db_id,
+                    accounts_db_id=user.accounts_db_id,
+                    subscriptions_db_id=user.subscriptions_db_id,
+                    pay_transfer_db_id=user.pay_transfer_db_id,
+                    db_schemas=db_schemas,
+                )
+                logger.info(f"Usando Notion OAuth per utente {chat_id}")
+            else:
+                notion_client = NotionFinanceClient()
+                logger.warning(f"Utente {chat_id} senza token Notion — fallback a Config .env")
+            storage = NotionStorage(notion_client)
+            transactions = storage.fetch_all_transactions(start_date=start_date, end_date=end_date)
+            logger.info("▶ Step 1b/7: Estrazione Monthly Balance (Risparmio Netto)")
+            monthly_balances = storage.fetch_monthly_balances(start_date=start_date, end_date=end_date)
+            logger.info("▶ Step 1c/7: Estrazione Entrate e Conti Correnti")
+            incomes = storage.fetch_income(start_date=start_date, end_date=end_date)
+            accounts = storage.fetch_accounts()
         if accounts:
             accounts_log = ", ".join(
                 f"{acc.get('name', 'Sconosciuto')}=€{float(acc.get('current_balance', 0.0)):.2f}"
@@ -166,6 +258,18 @@ async def run_agent(target_year: int, target_month: int, dry_run: bool, debug_da
             logger.info(f"Bilanci account letti da Notion: {accounts_log}")
         else:
             logger.warning("Nessun account valido letto da Notion.")
+
+        # Fetch budget per categoria (per evidenziazione sforamenti nel report)
+        try:
+            categories_data = storage.get_categories()
+            budget_by_cat: dict[str, float] = {
+                c["name"]: float(c["monthly_budget"])
+                for c in categories_data
+                if c.get("monthly_budget") is not None
+            }
+        except Exception as e:
+            logger.warning(f"Impossibile recuperare budget categorie: {e}")
+            budget_by_cat = {}
 
     if not transactions:
         logger.error("Nessuna transazione trovata. Uscita.")
@@ -255,23 +359,33 @@ async def run_agent(target_year: int, target_month: int, dry_run: bool, debug_da
         accounts_text += "Nessun conto trovato.\n"
 
     # 4. ANALISI AI
-    llm_provider = Config.LLM_PROVIDER
-    logger.info(f"▶ Step 4/7: Analisi AI con provider '{llm_provider}'")
+    logger.info("▶ Step 4/7: Analisi AI con Mistral Small 3.1")
     net_savings_str = f"€{current_mb['net_savings']:.2f}" if current_mb else "n/d"
     if dry_run:
-        logger.info(f"  [DRY-RUN] Salto {llm_provider}, uso report statistico locale")
-        final_report = ReportBuilder.build_fallback_report(report, forecast, accounts=accounts)
+        logger.info("  [DRY-RUN] Salto Mistral, uso report statistico locale")
+        final_report = ReportBuilder.build_fallback_report(report, forecast, accounts=accounts, budget_by_cat=budget_by_cat)
     else:
+        request_key = build_request_key("monthly_report", target_year, target_month, report.current_month.label, forecast.target_month_label)
+        reservation_created = False
         try:
-            if llm_provider == "ollama":
-                llm_client = OllamaClient()
-                logger.info(f"  Usando Ollama con modello {Config.OLLAMA_MODEL}")
-            else:
-                llm_client = GeminiClient()
-                logger.info(f"  Usando Gemini con modello {Config.GEMINI_MODEL}")
+            usage_store.reserve_llm_tokens(
+                chat_id=chat_id,
+                request_key=request_key,
+                operation="monthly_report",
+                provider="mistral",
+                model=Config.MISTRAL_SMALL_MODEL,
+                reserved_tokens=estimate_reserved_tokens("monthly_report"),
+            )
+            reservation_created = True
+        except Exception as e:
+            logger.warning("Reservation report mensile non creata: %s", e)
+
+        try:
+            llm_client = MistralClient()
+            logger.info(f"  Usando Mistral con modello {Config.MISTRAL_SMALL_MODEL}")
 
             llm_start = time.time()
-            final_report = llm_client.analyze_and_generate_report(
+            final_report, _llm_usage = llm_client.analyze_and_generate_report(
                 data_text=data_text,
                 accounts_text=accounts_text,
                 forecast_text=forecast_text,
@@ -282,11 +396,40 @@ async def run_agent(target_year: int, target_month: int, dry_run: bool, debug_da
                 total_accounts_balance=f"{total_accounts_balance:.2f}",
                 net_savings=net_savings_str,
             )
+            if _llm_usage:
+                _llm_usage = normalize_usage_metadata(_llm_usage)
+                try:
+                    usage_store.finalize_llm_usage(
+                        chat_id=chat_id,
+                        request_key=request_key,
+                        prompt_tokens=_llm_usage.get("prompt_tokens", 0),
+                        completion_tokens=_llm_usage.get("completion_tokens", 0),
+                        total_tokens=_llm_usage.get("total_tokens", 0),
+                        provider=_llm_usage.get("provider", "mistral"),
+                        model=_llm_usage.get("model", Config.MISTRAL_SMALL_MODEL),
+                        operation="monthly_report",
+                    )
+                except Exception as e:
+                    logger.warning("Impossibile finalizzare usage report mensile: %s", e)
+            elif reservation_created:
+                try:
+                    usage_store.release_llm_reservation(chat_id, request_key, reason="no_usage_metadata")
+                except Exception:
+                    pass
             llm_elapsed = time.time() - llm_start
-            logger.info(f"  ⏱️ Tempo inferenza {llm_provider}: {llm_elapsed:.1f}s")
+            logger.info(
+                "  ⏱️ Tempo inferenza Mistral: %.1fs — token usati: %s",
+                llm_elapsed,
+                _llm_usage.get("total_tokens", "n/d"),
+            )
         except Exception as e:
-            logger.error(f"Errore {llm_provider}: {e}. Uso fallback statistico.")
-            final_report = ReportBuilder.build_fallback_report(report, forecast, accounts=accounts)
+            if reservation_created:
+                try:
+                    usage_store.release_llm_reservation(chat_id, request_key, reason=str(e))
+                except Exception:
+                    pass
+            logger.error(f"Errore Mistral: {e}. Uso fallback statistico.")
+            final_report = ReportBuilder.build_fallback_report(report, forecast, accounts=accounts, budget_by_cat=budget_by_cat)
 
     final_report = _insert_accounts_section_near_summary(final_report, accounts)
 
@@ -303,17 +446,51 @@ async def run_agent(target_year: int, target_month: int, dry_run: bool, debug_da
 
     # 6. INVIO TELEGRAM
     logger.info("▶ Step 6/7: Invio report su Telegram")
-    telegram = TelegramClient()
-    
+    telegram = TelegramClient(chat_id=chat_id)
+
+    # Salva report nel DB (sessione dedicata, indipendente dalla sessione di lettura)
+    report_share_token: str = ""
+    if chat_id and not dry_run:
+        try:
+            _save_store = UserStore(db_url=Config.DATABASE_URL)
+            _save_user = _save_store.get_user(chat_id)
+            if _save_user and _save_user.storage_backend == "postgres":
+                _save_session = _save_store.Session()
+                try:
+                    _save_storage = PostgresStorage(_save_session, user_id=chat_id)
+                    report_share_token = _save_storage.save_report(
+                        user_id=chat_id,
+                        report_type="monthly",
+                        report_date=date(target_year, target_month, 1),
+                        text_content=final_report,
+                        report_data=_build_monthly_report_payload(
+                            report=report,
+                            target_year=target_year,
+                            target_month=target_month,
+                            total_accounts_balance=total_accounts_balance,
+                            budget_by_cat=budget_by_cat,
+                        ),
+                    )
+                finally:
+                    _save_session.close()
+        except Exception as e:
+            logger.warning(f"Salvataggio report mensile nel DB fallito: {e}")
+
     # Invia prima i grafici
     for path in chart_paths:
         try:
             await telegram.send_photo(photo_path=path)
         except Exception as e:
             logger.error(f"Errore durante l'invio del grafico {path}: {e}")
-            
+
     # Poi invia il testo
     await telegram.send_report(final_report)
+
+    # Bottone link al report web (solo se salvato con successo)
+    if report_share_token:
+        report_url = f"{Config.WEBAPP_BASE_URL}/reports/{report_share_token}"
+        await telegram.send_link_button("📊 Vedi il report completo sul web →", url=report_url)
+
     logger.info("✅ Report inviato con successo su Telegram!")
     
     # Cleanup delle immagini temporanee
@@ -364,11 +541,7 @@ def main():
             logger.error("Formato --month non valido. Usa YYYY-MM (es. 2026-01)")
             sys.exit(1)
     else:
-        today = date.today()
-        if today.month == 1:
-            target_month, target_year = 12, today.year - 1
-        else:
-            target_month, target_year = today.month - 1, today.year
+        target_year, target_month = _resolve_default_target_month(date.today())
 
     if not args.dry_run:
         try:
@@ -378,7 +551,8 @@ def main():
             logger.error("Copia .env.example in .env e inserisci le tue credenziali.")
             sys.exit(1)
 
-    asyncio.run(run_agent(target_year, target_month, dry_run=args.dry_run, debug_data=args.debug_data))
+    chat_id = os.environ.get("TELEGRAM_CHAT_ID") or Config.TELEGRAM_CHAT_ID
+    asyncio.run(run_agent(target_year, target_month, dry_run=args.dry_run, debug_data=args.debug_data, chat_id=chat_id))
 
 
 if __name__ == "__main__":

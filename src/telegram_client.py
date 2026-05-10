@@ -12,7 +12,7 @@ import asyncio
 import logging
 import re
 
-from telegram import Bot
+from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.constants import ParseMode
 from telegram.error import TelegramError
 from tenacity import (
@@ -33,9 +33,9 @@ MAX_MESSAGE_LENGTH = 4096
 class TelegramClient:
     """Client per l'invio di messaggi Telegram."""
 
-    def __init__(self):
+    def __init__(self, chat_id: str | None = None):
         self._bot = Bot(token=Config.TELEGRAM_BOT_TOKEN)
-        self._chat_id = Config.TELEGRAM_CHAT_ID
+        self._chat_id = chat_id or Config.TELEGRAM_CHAT_ID
 
     # ------------------------------------------------------------------
     # Invio principale
@@ -110,6 +110,18 @@ class TelegramClient:
         except TelegramError as e:
             logger.error(f"Errore Telegram invio foto: {e}")
             raise
+
+    async def send_link_button(self, text: str, url: str, button_label: str = "📊 Vedi sul web →") -> None:
+        """Invia un messaggio con un bottone URL inline (per link al report web)."""
+        keyboard = InlineKeyboardMarkup([[InlineKeyboardButton(button_label, url=url)]])
+        try:
+            await self._bot.send_message(
+                chat_id=self._chat_id,
+                text=text,
+                reply_markup=keyboard,
+            )
+        except TelegramError as e:
+            logger.warning(f"Invio link button fallito: {e}")
 
     # ------------------------------------------------------------------
     # Test connessione

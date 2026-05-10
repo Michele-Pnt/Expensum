@@ -2,11 +2,12 @@
 src/chart_generator.py — Generazione di grafici da inviare via Telegram.
 """
 
+from PIL import GimpGradientFile
 import os
 import uuid
 import logging
 
-from src.data_processor import TrendReport
+from src.data_processor import TrendReport, CategoryBudgetResult
 
 logger = logging.getLogger("financial_agent.chart_generator")
 
@@ -199,5 +200,201 @@ class ChartGenerator:
         filepath = self._get_filepath("line_chart")
         plt.tight_layout()
         plt.savefig(filepath, dpi=150, bbox_inches='tight')
+        plt.close(fig)
+        return filepath
+
+    def generate_weekly_budget_table(
+        self,
+        budget_results: dict[str, CategoryBudgetResult],
+        spent_last_week_by_cat: dict[str, float],
+        title: str = "",
+    ) -> str:
+        """
+        Genera una tabella PNG del budget settimanale per categoria.
+        Colonne: Categoria | Settimana scorsa | Speso nel mese | Obiettivo per settimana | Stato
+        """
+        import matplotlib.pyplot as plt
+        import matplotlib.patches as patches
+
+        sorted_cats = sorted(
+            budget_results.items(),
+            key=lambda x: x[1].budget_monthly,
+            reverse=True,
+        )
+        n = len(sorted_cats)
+        if n == 0:
+            return ""
+
+        # ── Palette ────────────────────────────────────────────────────────
+        BG       = "#1e1e2e"
+        SURFACE  = "#313244"
+        OVERLAY  = "#45475a"
+        TEXT     = "#cdd6f4"
+        SUBTEXT  = "#a6adc8"
+        ACCENT   = "#89b4fa"
+        GREEN    = "#a6e3a1"
+        YELLOW   = "#f9e2af"
+        RED      = "#f38ba8"
+        GREY     = "#6c7086"
+        SEP      = "#585b70"
+
+        SUBTITLE = "Obiettivo sett. = budget residuo ÷ settimane rimaste nel mese"
+        FOOTER   = "Modifica i tuoi budget con  /modify"
+
+        # ── Layout ─────────────────────────────────────────────────────────
+        FIG_W    = 11.0
+        ROW_H    = 0.52
+        HEADER_H = 0.80
+        TITLE_H  = 0.48 if title else 0.0
+        SUB_H    = 0.32
+        LEGEND_H = 0.34
+        FOOTER_H = 0.30
+        PAD_V    = 0.20
+        FIG_H    = PAD_V + TITLE_H + SUB_H + HEADER_H + n * ROW_H + LEGEND_H + FOOTER_H + PAD_V
+
+        # (header_label, width_fraction, h_align)
+        COLS = [
+            ("Categoria",                0.26, "left"),
+            ("Settimana\nscorsa",        0.16, "right"),
+            ("Speso nel\nmese",          0.17, "right"),
+            ("Obiettivo\nper settimana", 0.24, "right"),
+            ("Stato",                    0.17, "center"),
+        ]
+        PAD_X = 0.014  # padding interno cella
+
+        fig = plt.figure(figsize=(FIG_W, FIG_H))
+        fig.patch.set_facecolor(BG)
+        ax = fig.add_axes([0, 0, 1, 1])
+        ax.set_xlim(0, 1)
+        ax.set_ylim(0, FIG_H)
+        ax.axis("off")
+
+        y = FIG_H - PAD_V
+
+        # ── Titolo ─────────────────────────────────────────────────────────
+        if title:
+            ax.text(
+                0.5, y - TITLE_H / 2, title,
+                ha="center", va="center",
+                color=TEXT, fontsize=14, fontweight="bold",
+            )
+            y -= TITLE_H
+
+        # ── Subtitle / legenda ──────────────────────────────────────────────
+        ax.text(
+            0.5, y - SUB_H / 2, SUBTITLE,
+            ha="center", va="center",
+            color=SUBTEXT, fontsize=9, style="italic",
+        )
+        y -= SUB_H
+
+        # ── Header ─────────────────────────────────────────────────────────
+        x = 0.0
+        for label, w, align in COLS:
+            ax.add_patch(patches.Rectangle(
+                (x, y - HEADER_H), w, HEADER_H,
+                linewidth=0, facecolor=OVERLAY,
+            ))
+            tx = x + PAD_X if align == "left" else (x + w - PAD_X if align == "right" else x + w / 2)
+            ax.text(
+                tx, y - HEADER_H / 2, label,
+                ha=align, va="center",
+                color=ACCENT, fontsize=11, fontweight="bold", linespacing=1.5,
+            )
+            x += w
+
+        # Linea separatrice sotto header
+        ax.plot([0, 1], [y - HEADER_H, y - HEADER_H], color=ACCENT, linewidth=1.5)
+        y -= HEADER_H
+
+        # ── Righe dati ─────────────────────────────────────────────────────
+        STATUS_COLOR = {"ok": GREEN, "attenzione": YELLOW, "sforato": RED}
+        STATUS_LABEL = {"ok": "OK", "attenzione": "Attenzione", "sforato": "Sforato"}
+        STATUS_ICON  = {"ok": "✓", "attenzione": "!", "sforato": "✗"}
+
+        for i, (cat, r) in enumerate(sorted_cats):
+            row_bg = SURFACE if i % 2 == 0 else BG
+            last_week = spent_last_week_by_cat.get(cat, 0.0)
+            if last_week == 0.0:
+                s_color, s_label, s_icon = GREY, "Nessuna spesa", "⬜"
+            else:
+                s_color = STATUS_COLOR.get(r.status, SUBTEXT)
+                s_label = STATUS_LABEL.get(r.status, r.status)
+                s_icon  = STATUS_ICON.get(r.status, "?")
+
+            cell_vals = [
+                cat,
+                f"€ {last_week:,.2f}",
+                f"€ {r.spent_month:,.2f}",
+                f"€ {r.limite_reale:,.2f} / sett.",
+                None,  # status: disegnato a parte
+            ]
+
+            x = 0.0
+            for j, ((_, w, align), val) in enumerate(zip(COLS, cell_vals)):
+                ax.add_patch(patches.Rectangle(
+                    (x, y - ROW_H), w, ROW_H,
+                    linewidth=0, facecolor=row_bg,
+                ))
+
+                if j == 4:
+                    # Pill colorata con icona + label
+                    pill_w, pill_h = w * 0.82, ROW_H * 0.56
+                    pill_x = x + (w - pill_w) / 2
+                    pill_y = y - ROW_H / 2 - pill_h / 2
+                    ax.add_patch(patches.FancyBboxPatch(
+                        (pill_x, pill_y), pill_w, pill_h,
+                        boxstyle="round,pad=0.008",
+                        linewidth=0, facecolor=s_color, alpha=0.22,
+                    ))
+                    ax.add_patch(patches.FancyBboxPatch(
+                        (pill_x, pill_y), pill_w, pill_h,
+                        boxstyle="round,pad=0.008",
+                        linewidth=1.2, edgecolor=s_color, facecolor="none",
+                    ))
+                    ax.text(
+                        x + w / 2, y - ROW_H / 2,
+                        f"{s_icon}  {s_label}",
+                        ha="center", va="center",
+                        color=s_color, fontsize=9.5, fontweight="bold",
+                    )
+                else:
+                    tx = x + PAD_X if align == "left" else (x + w - PAD_X if align == "right" else x + w / 2)
+                    ax.text(
+                        tx, y - ROW_H / 2, val,
+                        ha=align, va="center",
+                        color=TEXT, fontsize=10,
+                    )
+                x += w
+
+            # Linea separatrice leggera tra righe
+            ax.plot([0, 1], [y - ROW_H, y - ROW_H], color=SEP, linewidth=0.4)
+            y -= ROW_H
+
+        # ── Legenda stati ──────────────────────────────────────────────────
+        ax.plot([0.02, 0.98], [y, y], color=SEP, linewidth=0.6)
+        y_leg = y - LEGEND_H / 2
+        legend_items = [
+            ("✓  OK", GREEN, 0.25),
+            ("!  Attenzione", YELLOW, 0.50),
+            ("✗  Sforato", RED, 0.75),
+        ]
+        for label, color, xpos in legend_items:
+            ax.text(
+                xpos, y_leg, label,
+                ha="center", va="center",
+                color=color, fontsize=9.5, fontweight="bold",
+            )
+        y -= LEGEND_H
+
+        # ── Footer ─────────────────────────────────────────────────────────
+        ax.text(
+            0.5, y - FOOTER_H / 2, FOOTER,
+            ha="center", va="center",
+            color=SUBTEXT, fontsize=9, style="italic",
+        )
+
+        filepath = self._get_filepath("weekly_budget_table")
+        plt.savefig(filepath, dpi=150, bbox_inches="tight", facecolor=BG)
         plt.close(fig)
         return filepath

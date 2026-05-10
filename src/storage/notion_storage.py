@@ -79,6 +79,12 @@ class NotionStorage(FinancialStorage):
         result = self._client.create_subscription(name)
         return {"id": result["id"], "name": name}
 
+    def get_categories(self) -> list[dict]:
+        """Ritorna categorie con budget e average dal DB locale (user_categories)."""
+        if self._store and self._user_id:
+            return self._store.get_user_categories_with_budget(self._user_id)
+        return [{"name": n, "monthly_budget": None, "average": 0.0} for n in self.get_category_names()]
+
     def fetch_subscriptions(self) -> list[dict]:
         return self._client.fetch_subscriptions()
 

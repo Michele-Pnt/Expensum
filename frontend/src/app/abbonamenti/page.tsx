@@ -50,10 +50,10 @@ export default function Abbonamenti() {
         {/* PREMIUM PLAN */}
         <Grid item xs={12} md={6}>
           <Card 
-            sx={{ 
+            sx={{
               height: '100%', display: 'flex', flexDirection: 'column', borderRadius: 4,
-              border: '2px solid', borderColor: 'secondary.main',
-              boxShadow: '0px 10px 30px rgba(76, 175, 80, 0.2)'
+              border: '2px solid', borderColor: 'primary.main',
+              boxShadow: '0px 8px 24px rgba(26, 54, 115, 0.12)'
             }}
           >
             <CardContent sx={{ flexGrow: 1, textAlign: 'center', p: 4 }}>
@@ -82,7 +82,7 @@ export default function Abbonamenti() {
             </CardContent>
             <CardActions sx={{ p: 3, pt: 0 }}>
               <Button fullWidth variant="contained" color="secondary" size="large">
-                Esegui l'upgrade
+                Esegui l&apos;upgrade
               </Button>
             </CardActions>
           </Card>

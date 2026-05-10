@@ -60,11 +60,18 @@ class Config:
     NOTION_MB_DATE: str = os.getenv("NOTION_MB_DATE", "Month")
     NOTION_MB_NET_SAVINGS: str = os.getenv("NOTION_MB_NET_SAVINGS", "Risparmio Netto")
 
-    # --- GEMINI ---
+    # --- MISTRAL ---
+    MISTRAL_API_KEY: str = os.getenv("MISTRAL_API_KEY", "")
+    MISTRAL_SMALL_MODEL: str = "mistral-small-latest"   # Mistral Small 3.1
+    MISTRAL_LARGE_MODEL: str = "mistral-large-latest"   # Mistral Large 3
+
+    # --- GEMINI / VERTEX AI ---
+    # GEMINI_API_KEY usato solo come fallback; la produzione usa Vertex AI
     GEMINI_API_KEY: str = os.getenv("GEMINI_API_KEY", "")
     GEMINI_MODEL: str = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
-    GEMINI_FALLBACK_1: str = os.getenv("GEMINI_FALLBACK_1", "gemini-2.0-flash")
-    GEMINI_FALLBACK_2: str = os.getenv("GEMINI_FALLBACK_2", "gemini-1.5-flash-8b")
+    # Vertex AI — trascrizione voce GDPR compliant (dati in EU)
+    GOOGLE_CLOUD_PROJECT: str = os.getenv("GOOGLE_CLOUD_PROJECT", "")
+    VERTEX_AI_LOCATION: str = os.getenv("VERTEX_AI_LOCATION", "europe-west3")
 
     # --- TELEGRAM ---
     TELEGRAM_BOT_TOKEN: str = os.getenv("TELEGRAM_BOT_TOKEN", "")
@@ -112,7 +119,7 @@ class Config:
             "NOTION_CLIENT_ID": cls.NOTION_CLIENT_ID,
             "NOTION_CLIENT_SECRET": cls.NOTION_CLIENT_SECRET,
         }
-        required["GEMINI_API_KEY"] = cls.GEMINI_API_KEY
+        required["MISTRAL_API_KEY"] = cls.MISTRAL_API_KEY
         missing = [k for k, v in required.items() if not v]
         if missing:
             raise EnvironmentError(

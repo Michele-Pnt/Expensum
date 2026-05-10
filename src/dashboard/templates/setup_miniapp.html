@@ -1190,6 +1190,25 @@
 
         // Aggiorna i dropdown relation in tutte le card subscriptions
         function refreshRelationOptions() {
+            // Costruisce la mappa dei nomi proprietà che rappresentano relazioni "account"
+            // usando il mapping dello schema Notion (più affidabile del solo string-match).
+            var accountRelKeys = {};
+            var subMapped = (schemasRaw['subscriptions_db_id'] && schemasRaw['subscriptions_db_id'].mapped) || {};
+            ['rel_account', 'rel_account_from', 'rel_account_to'].forEach(function(k) {
+                if (subMapped[k]) accountRelKeys[subMapped[k].toLowerCase()] = true;
+            });
+
+            function isAccountRelation(relFor) {
+                var lower = relFor.toLowerCase();
+                // Nomi hardcoded in makeEditForm (sempre inglese)
+                if (lower === 'account') return true;
+                if (lower === 'category') return false;
+                // Schema mapping (funziona con nomi italiani es. "Conto")
+                if (Object.keys(accountRelKeys).length > 0) return accountRelKeys[lower] === true;
+                // Fallback keyword: inglese + italiano
+                return lower.indexOf('account') !== -1 || lower === 'conto';
+            }
+
             // Opzioni Account: esistenti su Notion (mutable) + quelli che si stanno aggiungendo nel form
             var accOpts = existingAccounts.map(function(a) { return { value: a.id, label: a.name }; });
             itemsData['accounts_db_id'].forEach(function(item) {
@@ -1208,8 +1227,7 @@
             // Aggiorna tutti i <select> marcati con data-relation-for
             document.querySelectorAll('[data-relation-for]').forEach(function(sel) {
                 var relFor = sel.getAttribute('data-relation-for');
-                var isAccount = relFor.toLowerCase().indexOf('account') !== -1;
-                var opts = isAccount ? accOpts : catOpts;
+                var opts = isAccountRelation(relFor) ? accOpts : catOpts;
                 var cur = sel.value;
                 sel.innerHTML = '<option value="">-- Seleziona --</option>';
                 opts.forEach(function(o) {

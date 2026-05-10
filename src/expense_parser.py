@@ -6,7 +6,7 @@ L'utente scrive come a un amico:
     "ho speso 67 euro al supermercato"
     "netflix"
 
-Il parser usa Gemini per estrarre un JSON strutturato:
+Il parser usa Mistral Small 3.1 per estrarre un JSON strutturato:
     {date, amount, category, name}
 """
 
@@ -17,6 +17,8 @@ import time
 import random
 from datetime import date, datetime
 import difflib
+
+from mistralai.client import Mistral
 
 from config import Config
 
@@ -105,98 +107,118 @@ class ExpenseParser:
             categories: Lista nomi categorie da Notion (es. ["Affitto", "Supermercato", ...])
         """
         self._categories = categories or []
-
-        from google import genai
-
-        self._gemini_client = genai.Client(api_key=Config.GEMINI_API_KEY)
+        self._mistral_client = Mistral(api_key=Config.MISTRAL_API_KEY)
 
         logger.info(
-            "ExpenseParser inizializzato con provider=gemini, "
+            "ExpenseParser inizializzato con provider=mistral, "
             f"{len(self._categories)} categorie"
         )
 
     def parse(self, message: str) -> dict | None:
+        """Parsa un messaggio e restituisce solo il risultato strutturato."""
+        result, _usage = self.parse_with_usage(message)
+        return result
+
+    def parse_with_usage(self, message: str) -> tuple[dict | None, dict]:
         """
         Parsa un messaggio di testo libero e restituisce i dati della spesa.
 
         Returns:
-            dict con {date, amount, category, name} oppure None se non è una spesa.
-            I campi possono essere null se non determinabili.
+            dict con {type, date, amount, category, name, income_type, usage_metadata} oppure None.
+            `usage_metadata` contiene {prompt_tokens, completion_tokens, total_tokens,
+            provider, model} per il ledger token reale.
         """
         today = date.today()
         user_prompt = _build_user_prompt(message, self._categories, today)
 
-        logger.info(f"Parsing messaggio: '{message[:50]}...' con gemini")
+        logger.info(f"Parsing messaggio: '{message[:50]}...' con mistral")
 
         try:
-            raw_response = self._call_gemini(user_prompt)
+            raw_response, usage = self._call_mistral(user_prompt)
         except Exception as e:
             logger.error(f"Errore LLM durante il parsing: {e}")
-            return None
+            return None, {}
 
         logger.debug(f"Risposta LLM grezza: {raw_response[:200]}")
 
         parsed = _extract_json(raw_response)
         if parsed is None:
             logger.warning(f"Impossibile estrarre JSON dalla risposta: {raw_response[:200]}")
-            return None
+            return None, usage
 
         # Se il LLM dice che non è una spesa
         if "error" in parsed:
             logger.info(f"Messaggio non riconosciuto come spesa: {parsed.get('error')}")
-            return None
+            return None, usage
 
         # Validazione e normalizzazione
         result = self._normalize(parsed, today)
+        result["usage_metadata"] = usage
         logger.info(f"Parsing completato: {result}")
-        return result
+        return result, usage
 
-    def _call_gemini(self, user_prompt: str) -> str:
-        """Chiama Gemini con exponential backoff + jitter e fallback model."""
-        from google.genai import types
+    def _call_mistral(self, user_prompt: str) -> tuple[str, dict]:
+        """Chiama Mistral con exponential backoff + jitter e fallback su Large.
 
+        Returns:
+            (content, usage_metadata) dove usage_metadata è:
+            {prompt_tokens, completion_tokens, total_tokens, provider, model}
+        """
         max_retries = 3
-        base_delay = 1.0  # secondi
-        models_to_try = [Config.GEMINI_MODEL, Config.GEMINI_FALLBACK_1, Config.GEMINI_FALLBACK_2]
+        base_delay = 1.0
+        models_to_try = [Config.MISTRAL_SMALL_MODEL, Config.MISTRAL_LARGE_MODEL]
 
         for model_name in models_to_try:
             for attempt in range(max_retries):
                 try:
-                    response = self._gemini_client.models.generate_content(
+                    response = self._mistral_client.chat.complete(
                         model=model_name,
-                        contents=user_prompt,
-                        config=types.GenerateContentConfig(
-                            system_instruction=_SYSTEM_PROMPT,
-                            temperature=0.1,
-                            max_output_tokens=1024,
-                            response_mime_type="application/json",
-                        ),
+                        messages=[
+                            {"role": "system", "content": _SYSTEM_PROMPT},
+                            {"role": "user", "content": user_prompt},
+                        ],
+                        temperature=0.1,
+                        max_tokens=1024,
+                        response_format={"type": "json_object"},
                     )
-                    return response.text or ""
+                    content = response.choices[0].message.content or ""
+                    usage = {}
+                    if response.usage:
+                        prompt_tokens = response.usage.prompt_tokens or 0
+                        completion_tokens = response.usage.completion_tokens or 0
+                        total_tokens = response.usage.total_tokens or 0
+                        if total_tokens <= 0:
+                            total_tokens = prompt_tokens + completion_tokens
+                        usage = {
+                            "prompt_tokens": prompt_tokens,
+                            "completion_tokens": completion_tokens,
+                            "total_tokens": total_tokens,
+                            "provider": "mistral",
+                            "model": model_name,
+                        }
+                    return content, usage
                 except Exception as e:
                     error_str = str(e)
-                    is_retryable = any(code in error_str for code in ("503", "429", "UNAVAILABLE", "RESOURCE_EXHAUSTED"))
+                    is_retryable = any(code in error_str for code in ("503", "429", "500", "rate limit", "too many"))
 
                     if not is_retryable:
-                        raise  # Errore non recuperabile, esci subito
+                        raise
 
                     if attempt < max_retries - 1:
-                        # Exponential backoff con jitter
                         delay = base_delay * (2 ** attempt) + random.uniform(0, 1)
                         logger.warning(
-                            f"[Gemini] {model_name} tentativo {attempt + 1}/{max_retries} fallito "
+                            f"[Mistral] {model_name} tentativo {attempt + 1}/{max_retries} fallito "
                             f"({error_str[:80]}). Retry tra {delay:.1f}s..."
                         )
                         time.sleep(delay)
                     else:
                         is_last = (model_name == models_to_try[-1])
                         logger.warning(
-                            f"[Gemini] {model_name} esaurito {max_retries} tentativi. "
-                            f"{'Nessun altro fallback disponibile.' if is_last else 'Provo il prossimo modello di fallback...'}"
+                            f"[Mistral] {model_name} esaurito {max_retries} tentativi. "
+                            f"{'Nessun altro fallback disponibile.' if is_last else 'Provo con Mistral Large...'}"
                         )
 
-        # Se arriviamo qui, tutti i tentativi su tutti i modelli sono falliti
-        raise RuntimeError("Tutti i modelli Gemini non disponibili dopo i retry.")
+        raise RuntimeError("Tutti i modelli Mistral non disponibili dopo i retry.")
 
     def _normalize(self, parsed: dict, today: date) -> dict:
         """Normalizza e valida il risultato del parsing."""

@@ -1,5 +1,9 @@
 notion-client>=2.2.1
 google-genai>=1.0.0
+google-cloud-aiplatform>=1.60.0
+mistralai>=1.0.0
+pytesseract>=0.3.10
+Pillow>=10.0.0
 python-telegram-bot>=21.0
 APScheduler>=3.10.4
 cachetools>=5.3.0

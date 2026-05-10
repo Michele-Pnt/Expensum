@@ -13,18 +13,19 @@
   font-size: 1.5rem;
   font-weight: 700;
   margin: 0 0 0.5rem 0;
+  color: var(--color-text);
 }
 
 .header p {
-  color: var(--muted-foreground);
+  color: var(--color-text-2);
   margin: 0;
   font-size: 0.95rem;
 }
 
 .form {
-  background-color: var(--sidebar-bg);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
+  background-color: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
   padding: 2rem;
   display: flex;
   flex-direction: column;
@@ -40,39 +41,54 @@
 .label {
   font-weight: 500;
   font-size: 0.95rem;
+  color: var(--color-text);
 }
 
 .textarea {
   width: 100%;
   min-height: 150px;
-  padding: 0.75rem;
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  background-color: var(--chat-bg);
-  color: var(--foreground);
+  padding: 0.85rem 1rem;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background-color: var(--color-surface-2);
+  color: var(--color-text);
   font-family: inherit;
   font-size: 0.95rem;
   resize: vertical;
+  transition: border-color var(--duration-fast), box-shadow var(--duration-fast);
+}
+
+.textarea::placeholder {
+  color: var(--color-text-2);
 }
 
 .textarea:focus {
   outline: none;
-  border-color: var(--muted-foreground);
+  border-color: var(--color-primary);
+  box-shadow: 0 0 0 3px rgba(26, 54, 115, 0.08);
 }
 
 .submitBtn {
-  background-color: var(--foreground);
-  color: var(--background);
-  padding: 0.75rem;
-  border-radius: var(--radius);
-  font-weight: 600;
-  transition: opacity 0.2s;
+  background: var(--color-primary);
+  color: #ffffff;
+  padding: 0.85rem;
+  border-radius: var(--radius-md);
+  font-weight: 700;
+  font-size: 0.95rem;
+  transition: transform var(--duration-fast), box-shadow var(--duration-fast), opacity var(--duration-fast);
   display: flex;
   align-items: center;
   justify-content: center;
   gap: 0.5rem;
+  box-shadow: 0 2px 12px rgba(26, 54, 115, 0.20);
 }
 
 .submitBtn:hover {
-  opacity: 0.8;
+  transform: translateY(-1px);
+  box-shadow: 0 4px 20px rgba(26, 54, 115, 0.30);
+}
+
+.submitBtn:active {
+  transform: translateY(0);
+  opacity: 0.85;
 }

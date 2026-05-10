@@ -1,38 +1,60 @@
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
-  --sidebar-bg: #f9f9f9;
-  --sidebar-border: #e5e5e5;
-  --sidebar-hover: #f0f0f0;
-  --sidebar-active: #e0e0e0;
-  --accent: #000000;
-  --accent-foreground: #ffffff;
-  --muted: #f5f5f5;
-  --muted-foreground: #737373;
-  --chat-bg: #ffffff;
-  --chat-bubble-user: #f4f4f4;
-  --chat-bubble-bot: #ffffff;
-  --border: #e5e5e5;
-  --radius: 0.5rem;
-}
+  /* Brand Kit Expensum */
+  --color-primary: #1A3673;
+  --color-primary-dark: #142959;
+  --color-primary-light: rgba(26, 54, 115, 0.08);
+  --color-accent: #C5A059;
+  --color-accent-dim: #A8853C;
+  --color-neutral: #B0B5B9;
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-    --sidebar-bg: #111111;
-    --sidebar-border: #222222;
-    --sidebar-hover: #1a1a1a;
-    --sidebar-active: #2a2a2a;
-    --accent: #ffffff;
-    --accent-foreground: #000000;
-    --muted: #1f1f1f;
-    --muted-foreground: #a3a3a3;
-    --chat-bg: #000000;
-    --chat-bubble-user: #222222;
-    --chat-bubble-bot: #000000;
-    --border: #222222;
-  }
+  /* Backgrounds */
+  --color-base: #F7F6F2;
+  --color-surface: #FFFFFF;
+  --color-surface-2: #F0EDE8;
+  --color-surface-3: #E8E5DF;
+
+  /* Borders */
+  --color-border: #E5E2DC;
+  --color-border-2: #D4D0C8;
+
+  /* Text */
+  --color-text: #1A1A1A;
+  --color-text-2: #6B7280;
+  --color-text-3: #9CA3AF;
+
+  /* Finance colors */
+  --color-income: #1A3673;
+  --color-expense: #C5A059;
+  --color-net: #4B6CB7;
+
+  /* Semantic aliases */
+  --background: var(--color-base);
+  --foreground: var(--color-text);
+  --sidebar-bg: var(--color-surface);
+  --sidebar-border: var(--color-border);
+  --sidebar-hover: var(--color-surface-2);
+  --sidebar-active: var(--color-primary);
+  --accent: var(--color-primary);
+  --accent-foreground: #FFFFFF;
+  --muted: var(--color-surface-2);
+  --muted-foreground: var(--color-text-2);
+  --chat-bg: var(--color-base);
+  --chat-bubble-user: var(--color-primary);
+  --chat-bubble-bot: var(--color-surface);
+  --border: var(--color-border);
+  --radius: var(--radius-md);
+
+  --radius-sm: 6px;
+  --radius-md: 12px;
+  --radius-lg: 20px;
+  --radius-xl: 28px;
+
+  --duration-fast: 150ms;
+  --duration-base: 250ms;
+  --duration-slow: 400ms;
+
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+  --ease-spring: cubic-bezier(0.34, 1.56, 0.64, 1);
 }
 
 html,
@@ -45,9 +67,9 @@ body {
 }
 
 body {
-  color: var(--foreground);
-  background: var(--background);
-  font-family: Arial, Helvetica, sans-serif;
+  color: var(--color-text);
+  background: var(--color-base);
+  font-family: var(--font-inter), 'Inter', system-ui, sans-serif;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
 }
@@ -73,4 +95,51 @@ ul {
   list-style: none;
   padding: 0;
   margin: 0;
+}
+
+@keyframes fadeUp {
+  from { opacity: 0; transform: translateY(24px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes fadeIn {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+
+@keyframes scaleIn {
+  from { opacity: 0; transform: scale(0.92); }
+  to   { opacity: 1; transform: scale(1); }
+}
+
+@keyframes ringPulse {
+  0%   { box-shadow: 0 0 0 0 rgba(197, 160, 89, 0.40); }
+  70%  { box-shadow: 0 0 0 20px rgba(197, 160, 89, 0); }
+  100% { box-shadow: 0 0 0 0 rgba(197, 160, 89, 0); }
+}
+
+@keyframes gradientShift {
+  0%   { background-position: 0% 50%; }
+  50%  { background-position: 100% 50%; }
+  100% { background-position: 0% 50%; }
+}
+
+@keyframes float {
+  0%, 100% { transform: translateY(0px); }
+  50%       { transform: translateY(-10px); }
+}
+
+@keyframes ticker {
+  from { transform: translateX(0); }
+  to   { transform: translateX(-50%); }
+}
+
+@keyframes shimmer {
+  from { background-position: -200% center; }
+  to   { background-position: 200% center; }
+}
+
+@keyframes slideDown {
+  from { opacity: 0; transform: translateY(-8px); }
+  to   { opacity: 1; transform: translateY(0); }
 }

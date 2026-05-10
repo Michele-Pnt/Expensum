@@ -1,12 +1,31 @@
 from datetime import datetime
+import uuid
 
-from sqlalchemy import Column, String, Float, Integer, Date, DateTime, ForeignKey, UniqueConstraint, Index
+from sqlalchemy import (
+    Column,
+    String,
+    Float,
+    Integer,
+    Date,
+    DateTime,
+    ForeignKey,
+    UniqueConstraint,
+    Index,
+    Text,
+    JSON,
+)
 
 from src.user_store import Base
 
 
 class Expense(Base):
-    """Tabella delle spese per utenti con backend PostgreSQL."""
+    """Tabella delle spese per utenti con backend PostgreSQL/SQLite.
+
+    `category_name` è una colonna legacy mantenuta nullable durante la migrazione
+    3NF. Il campo authoritative è `category_id`; `category_name` non deve essere
+    usato nel codice applicativo — esiste solo per il backfill in `_ensure_sqlite_schema`.
+    """
+
     __tablename__ = "expenses"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
@@ -14,14 +33,16 @@ class Expense(Base):
     expense_date = Column(Date, nullable=False)
     amount = Column(Float, nullable=False)
     name = Column(String, nullable=False)
-    category_name = Column(String, nullable=False)
-    account_id = Column(String, nullable=False)
-    monthly_balance_id = Column(Integer, ForeignKey("monthly_balances.id"), nullable=True)
+    # Legacy bridge — sarà NULL dopo il backfill; NON usare nel codice applicativo.
+    category_name = Column(String, nullable=True)
+    category_id = Column(Integer, ForeignKey("user_categories.id"), nullable=True)
+    account_id = Column(Integer, ForeignKey("accounts.id"), nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
 
 
 class Income(Base):
-    """Tabella delle entrate per utenti con backend PostgreSQL."""
+    """Tabella delle entrate per utenti con backend PostgreSQL/SQLite."""
+
     __tablename__ = "incomes"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
@@ -29,25 +50,34 @@ class Income(Base):
     income_date = Column(Date, nullable=False)
     amount = Column(Float, nullable=False)
     name = Column(String, nullable=False)
-    account_id = Column(String, nullable=False)
+    account_id = Column(Integer, ForeignKey("accounts.id"), nullable=False)
     income_type = Column(String, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
 
 
 class Account(Base):
-    """Tabella dei conti bancari per utenti con backend PostgreSQL."""
+    """Tabella dei conti per utente.
+
+    `opening_balance` e' il fatto persistito; il saldo corrente si calcola on-read.
+    """
+
     __tablename__ = "accounts"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     user_id = Column(String, ForeignKey("users.chat_id"), nullable=False)
     name = Column(String, nullable=False)
-    balance = Column(Float, default=0.0)
+    opening_balance = Column(Float, default=0.0)
     currency = Column(String, default="EUR")
     account_type = Column(String, nullable=True)
+
+    __table_args__ = (
+        UniqueConstraint("user_id", "name", name="uq_accounts_user_name"),
+    )
 
 
 class SystemCategory(Base):
     """Categorie predefinite condivise fra tutti gli utenti. Immutabile a runtime."""
+
     __tablename__ = "system_categories"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
@@ -55,30 +85,42 @@ class SystemCategory(Base):
 
 
 class UserCategory(Base):
-    """Categorie effettive per utente.
+    """Categorie base dell'utente.
 
-    Per utenti Notion: mirror del DB Categories Notion, con notion_page_id e average
-    aggiornati sui tre trigger (post-setup, pre-report, job notturno).
-    Per utenti Postgres: categorie locali, average calcolato da expenses sugli stessi trigger.
+    I metadati specifici di Notion vengono salvati nella tabella separata
+    `user_category_notion_links`.
     """
+
     __tablename__ = "user_categories"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     user_id = Column(String, ForeignKey("users.chat_id"), nullable=False)
     name = Column(String, nullable=False)
-    average = Column(Float, nullable=False, default=0.0)
     monthly_budget = Column(Float, nullable=True)
-    notion_page_id = Column(String, nullable=True)   # None per utenti Postgres
-    synced_at = Column(DateTime, nullable=True)       # None per utenti Postgres
 
     __table_args__ = (
-        UniqueConstraint('user_id', 'name', name='uq_user_categories_user_name'),
-        Index('ix_user_categories_user_id', 'user_id'),
+        UniqueConstraint("user_id", "name", name="uq_user_categories_user_name"),
+        Index("ix_user_categories_user_id", "user_id"),
     )
 
 
+class UserCategoryNotionLink(Base):
+    """Metadati Notion associati a una categoria locale.
+
+    `average` resta una cache del valore Notion per preservare le UX esistenti.
+    """
+
+    __tablename__ = "user_category_notion_links"
+
+    category_id = Column(Integer, ForeignKey("user_categories.id"), primary_key=True)
+    notion_page_id = Column(String, nullable=True, unique=True)
+    synced_at = Column(DateTime, nullable=True)
+    average = Column(Float, nullable=True)
+
+
 class Subscription(Base):
-    """Tabella degli abbonamenti per utenti con backend PostgreSQL."""
+    """Tabella degli abbonamenti per utenti con backend PostgreSQL/SQLite."""
+
     __tablename__ = "subscriptions"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
@@ -87,18 +129,21 @@ class Subscription(Base):
     amount = Column(Float, nullable=True)
     last_billed = Column(Date, nullable=True)
     sub_type = Column(String, nullable=True)
-    account_id = Column(Integer, nullable=True)
-    category_id = Column(Integer, nullable=True)
+    account_id = Column(Integer, ForeignKey("accounts.id"), nullable=True)
+    category_id = Column(Integer, ForeignKey("user_categories.id"), nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
 
 
-class MonthlyBalance(Base):
-    """Tabella dei bilanci mensili per utenti con backend PostgreSQL."""
-    __tablename__ = "monthly_balances"
+class SavedReport(Base):
+    """Report generati (settimanali e mensili) salvati per lo storico web."""
+
+    __tablename__ = "saved_reports"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
-    user_id = Column(String, ForeignKey("users.chat_id"), nullable=False)
-    month = Column(Date, nullable=False)
-    income_total = Column(Float, default=0.0)
-    expense_total = Column(Float, default=0.0)
-    net_savings = Column(Float, default=0.0)
+    user_id = Column(String, ForeignKey("users.chat_id"), nullable=False, index=True)
+    report_type = Column(String(20), nullable=False)   # "weekly" | "monthly"
+    report_date = Column(Date, nullable=False)
+    share_token = Column(String(36), unique=True, nullable=False, default=lambda: str(uuid.uuid4()))
+    text_content = Column(Text, nullable=False)
+    report_data = Column(JSON, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)

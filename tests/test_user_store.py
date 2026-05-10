@@ -1,6 +1,6 @@
 import pytest
 from datetime import date
-from src.user_store import User, DailyUsage, Feedback, OAuthSession
+from src.user_store import User, DailyMetrics, Feedback, OAuthSession
 
 pytestmark = pytest.mark.integration
 
@@ -33,20 +33,11 @@ def test_update_existing_user(mock_db_session):
 def test_increment_usage(mock_db_session):
     store = mock_db_session
     chat_id = "12345"
-    today = date.today()
-    
-    # Primo incremento (crea il record DailyUsage)
+    # Legacy daily-usage counters have been removed; increment_usage is a no-op.
+    # Verifichiamo che la tabella legacy non esista e che la chiamata non sollevi errori.
     store.increment_usage(chat_id, "text")
-    store.increment_usage(chat_id, "text")
-    store.increment_usage(chat_id, "voice")
-    store.increment_usage(chat_id, "photo")
-    
-    with store.Session() as session:
-        usage = session.query(DailyUsage).filter_by(chat_id=chat_id, usage_date=today).first()
-        assert usage is not None
-        assert usage.text_count == 2
-        assert usage.voice_count == 1
-        assert usage.photo_count == 1
+    from sqlalchemy import inspect
+    assert not inspect(store.engine).has_table("daily_usage")
 
 def test_save_feedback(mock_db_session):
     store = mock_db_session

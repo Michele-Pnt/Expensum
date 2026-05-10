@@ -5,16 +5,19 @@ from datetime import date
 
 pytestmark = pytest.mark.unit
 
-def test_expense_parser_logic_with_mocked_gemini():
+def test_expense_parser_logic_with_mocked_mistral():
     """
-    Test del parser di spese con Gemini mockato.
+    Test del parser di spese con Mistral mockato.
     """
     categories = ["Cibo", "Trasporti", "Divertimento"]
 
     with patch.object(
         ExpenseParser,
-        "_call_gemini",
-        return_value='{"type": "expense", "amount": 10.5, "category": "Cibo", "name": "Pizza", "date": "2026-03-25"}',
+        "_call_mistral",
+        return_value=(
+            '{"type": "expense", "amount": 10.5, "category": "Cibo", "name": "Pizza", "date": "2026-03-25"}',
+            {"prompt_tokens": 100, "completion_tokens": 50, "total_tokens": 150, "provider": "mistral", "model": "mistral-small-latest"},
+        ),
     ):
         parser = ExpenseParser(categories)
         res = parser.parse("Ho speso 10.50 euro per una pizza ieri")

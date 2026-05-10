@@ -8,8 +8,6 @@ Nessun task in corso.
 
 ## 🐛 Bug aperti
 
-- [ ] bug nella visualizzazione della pagina della analytics della miniapp. 
-
 ---
 
 ## ✅ Completati

@@ -3,18 +3,18 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Moneo Admin Dashboard</title>
-    <!-- Assolutamente no framework CSS come richiesto. Staging Vanilla puro. -->
+    <title>Expensum Admin</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600;700;800&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
-    <!-- Chart.js CDN -->
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 </head>
 <body>
     <div class="app-container">
-        <!-- Sidebar Navigation -->
-        <nav class="sidebar glass-panel">
+        <nav class="sidebar">
             <div class="logo">
-                <h2>Traky / Moneo<span>Admin</span></h2>
+                <h2>Expensum<span>Admin</span></h2>
             </div>
             <ul class="nav-links">
                 <li><a href="{{ url_for('index') }}" class="{% if request.endpoint == 'index' %}active{% endif %}">📊 Overview</a></li>
@@ -27,7 +27,6 @@
             </div>
         </nav>
 
-        <!-- Main Content Area -->
         <main class="main-content">
             {% block content %}{% endblock %}
         </main>

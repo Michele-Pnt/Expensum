@@ -86,9 +86,40 @@ class FinancialStorage(ABC):
         """Aggiorna i dati di un abbonamento. Per ora supportiamo solo last_billed."""
         return False
 
+    def get_categories(self) -> list[dict]:
+        """Restituisce id, nome, budget mensile e average di tutte le categorie.
+
+        Implementazione di default: ritorna lista vuota. I backend che supportano
+        questa funzionalità (PostgresStorage, NotionStorage) la sovrascrivono.
+        """
+        return []
+
     @abstractmethod
     def get_or_create_monthly_balance(self, target_date: date) -> str | None:
         """Ritorna l'ID del record Monthly Balance per il mese della data fornita.
         Se non esiste, lo crea.
         """
         ...
+
+    def save_report(
+        self,
+        user_id: str,
+        report_type: str,
+        report_date: date,
+        text_content: str,
+        report_data: dict | None = None,
+    ) -> str:
+        """Salva un report generato e restituisce il share_token (UUID).
+
+        Default no-op: backend che non supportano lo storico (es. Notion) ignorano
+        silenziosamente la chiamata e restituiscono stringa vuota.
+        """
+        return ""
+
+    def get_report_by_token(self, share_token: str) -> dict | None:
+        """Recupera un report tramite share_token pubblico. None se non esiste."""
+        return None
+
+    def get_reports_for_user(self, user_id: str, limit: int = 24) -> list[dict]:
+        """Lista report dell'utente, ordinati per data decrescente."""
+        return []

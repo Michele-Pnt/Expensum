@@ -29,6 +29,27 @@ from config import Config
 
 logger = logging.getLogger("financial_agent.gemini")
 
+
+def _normalize_usage_metadata(response) -> dict:
+    """Normalizza le usage metadata di Gemini in un formato stabile."""
+    usage = {}
+    if response.usage_metadata:
+        um = response.usage_metadata
+        prompt_tokens = getattr(um, "prompt_token_count", 0) or 0
+        completion_tokens = getattr(um, "candidates_token_count", 0) or 0
+        total_tokens = getattr(um, "total_token_count", 0) or 0
+        if total_tokens <= 0:
+            total_tokens = prompt_tokens + completion_tokens
+        usage = {
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+            "total_tokens": total_tokens,
+            "thinking_tokens": getattr(um, "thoughts_token_count", None),
+            "provider": "gemini",
+            "model": Config.GEMINI_MODEL,
+        }
+    return usage
+
 # Eccezioni su cui effettuare retry
 _RETRYABLE = (
     httpx.HTTPStatusError,
@@ -146,20 +167,13 @@ class GeminiClient:
         total_amount: str,
         total_accounts_balance: str,
         net_savings: str = "n/d",
-    ) -> str:
+    ) -> tuple[str, dict]:
         """
         Chiama Gemini 2.5 Flash con i dati aggregati e il forecast.
-        Ritorna il report Markdown formattato per Telegram.
-
-        Args:
-            data_text: Output di DataProcessor.to_prompt_text()
-            forecast_text: Output di ForecastResult.to_prompt_text()
-            current_month_label: es. "February 2026"
-            next_month_label: es. "March 2026"
-            total_amount: Totale speso nel mese attuale (stringa formattata)
 
         Returns:
-            Stringa Markdown del report completo
+            (report_markdown, usage_metadata) dove usage_metadata è:
+            {prompt_tokens, completion_tokens, total_tokens, provider, model}
         """
         prompt = _PROMPT_TEMPLATE.format(
             data_block=data_text,
@@ -188,10 +202,8 @@ class GeminiClient:
         )
 
         # response.text può essere None se il modello usa thinking tokens separati
-        # In quel caso, estraiamo il testo dai candidates direttamente
         raw_text = response.text
         if raw_text is None:
-            # Concatena tutte le parti di tipo testo dai candidates
             raw_text = ""
             for candidate in (response.candidates or []):
                 for part in (candidate.content.parts or []):
@@ -203,9 +215,12 @@ class GeminiClient:
 
         logger.info(f"Risposta Gemini ricevuta: {len(raw_text)} caratteri")
 
+        # Estrai usage metadata
+        usage = _normalize_usage_metadata(response)
+
         # Rimuovi eventuale sezione di ragionamento (Chain of Thought)
         parts = raw_text.split("📊", 1)
         if len(parts) == 2:
             raw_text = "📊" + parts[1]
 
-        return raw_text.strip()
+        return raw_text.strip(), usage

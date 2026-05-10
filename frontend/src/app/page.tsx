@@ -1,165 +1,448 @@
 "use client";
+/* eslint-disable @next/next/no-img-element */
 
-import React, { useRef, useEffect } from "react";
-import { Box, Button, Container, Grid, Typography, Card, CardContent } from "@mui/material";
-import { Security, AutoGraph, AccountBalanceWallet, ChatBubbleOutline } from "@mui/icons-material";
+import React, { useEffect, useState } from "react";
 import Link from "next/link";
+import { MessageCircle, BarChart2, CreditCard, FileText, Check, Send, Sparkles, TrendingUp, BellRing, ChevronDown } from "lucide-react";
+import styles from "./page.module.css";
+
+const FEATURES = [
+  {
+    icon: <MessageCircle size={20} strokeWidth={1.5} />,
+    title: "Chatbot AI su Telegram",
+    desc: "Invia spese via testo, foto scontrino o vocale. Nessuna app da aprire, nessun form da compilare.",
+  },
+  {
+    icon: <BarChart2 size={20} strokeWidth={1.5} />,
+    title: "Analytics & Dashboard",
+    desc: "Grafici chiari su categorie, trend mensili e andamento del capitale. Sempre aggiornati.",
+  },
+  {
+    icon: <CreditCard size={20} strokeWidth={1.5} />,
+    title: "Abbonamenti automatici",
+    desc: "Traccia Netflix, Spotify, palestra e tutti i ricorrenti. Ricevi notifiche prima di ogni addebito.",
+  },
+  {
+    icon: <FileText size={20} strokeWidth={1.5} />,
+    title: "Report mensili",
+    desc: "Ogni fine mese un riepilogo completo arriva direttamente su Telegram. Niente da fare.",
+  },
+];
+
+const HOW_STEPS = [
+  {
+    icon: <Send size={18} strokeWidth={1.5} />,
+    title: "Invia la spesa.",
+    desc: "Scrivila in chat, scatta una foto allo scontrino o manda un vocale. Expensum capisce tutto.",
+  },
+  {
+    icon: <Sparkles size={18} strokeWidth={1.5} />,
+    title: "L’AI la analizza.",
+    desc: "Il modello AI categorizza e struttura i dati in automatico. Zero errori, zero sforzo.",
+  },
+  {
+    icon: <TrendingUp size={18} strokeWidth={1.5} />,
+    title: "Dashboard aggiornata.",
+    desc: "Visualizza grafici, trend e budget in tempo reale dalla web app o direttamente su Telegram.",
+  },
+  {
+    icon: <BellRing size={18} strokeWidth={1.5} />,
+    title: "Report automatico.",
+    desc: "Ogni mese ricevi un riepilogo completo con analisi delle spese e consigli personalizzati.",
+  },
+];
+
+const FREE_FEATURES = [
+  "Registrazione spese illimitata",
+  "Categorie personalizzabili",
+  "Report mensile via Telegram",
+  "Sincronizzazione Notion",
+];
+
+const PREMIUM_FEATURES = [
+  "Tutto del piano Free",
+  "Analytics avanzati con grafici",
+  "Previsioni e trend mensili",
+  "Gestione abbonamenti automatica",
+  "Storico 24 mesi",
+  "Budget per categoria",
+];
+
+const FOR_WHO = [
+  {
+    title: "Studenti fuori sede",
+    desc: "Affitto, spesa, uscite — tante voci, zero chiarezza. Expensum ti mostra dove finiscono i soldi.",
+  },
+  {
+    title: "Giovani professionisti",
+    desc: "Stipendio fisso ma fine mese sempre uguale? Scopri dove ottimizzare senza rinunciare a nulla.",
+  },
+  {
+    title: "Chiunque voglia più controllo",
+    desc: "Non serve essere un esperto di finanza. Basta parlare con Expensum come faresti con un amico.",
+  },
+];
 
 export default function LandingPage() {
-  const videoRef = useRef<HTMLVideoElement>(null);
+  const [scrolled, setScrolled] = useState(false);
 
   useEffect(() => {
-    if (videoRef.current) {
-      videoRef.current.play().catch(err => console.log("Video autoplay failed:", err));
-    }
+    const onScroll = () => setScrolled(window.scrollY > 20);
+    window.addEventListener("scroll", onScroll, { passive: true });
+    return () => window.removeEventListener("scroll", onScroll);
   }, []);
 
+  useEffect(() => {
+    const io = new IntersectionObserver(
+      (entries) => {
+        entries.forEach((e) => {
+          if (e.isIntersecting) {
+            (e.target as HTMLElement).classList.add("revealed");
+            io.unobserve(e.target);
+          }
+        });
+      },
+      { threshold: 0.12 }
+    );
+    document.querySelectorAll("[data-reveal]").forEach((el) => io.observe(el));
+    return () => io.disconnect();
+  }, []);
+
+  const scrollToSection = (id: string) => {
+    document.getElementById(id)?.scrollIntoView({ behavior: "smooth" });
+  };
+
   return (
-    <Box sx={{ minHeight: "100vh", display: "flex", flexDirection: "column" }}>
-      {/* Navbar Minimal */}
-      <Box sx={{ p: 3, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-        <Typography variant="h6" color="primary" fontWeight="bold">
-          Traky / Moneo
-        </Typography>
-        <Box gap={2} display="flex">
-          <Link href="/chat" passHref>
-            <Button variant="outlined" color="primary">Login</Button>
-          </Link>
-          <Link href="/chat" passHref>
-            <Button variant="contained" color="primary">Inizia Gratis</Button>
-          </Link>
-        </Box>
-      </Box>
+    <>
+      {/* ── Navbar ── */}
+      <nav className={`${styles.nav} ${scrolled ? styles.navScrolled : ""}`}>
+        <div className={styles.navInner}>
+          <div className={styles.navLogo}>
+            <img src="/logo-expensum-icon.png" alt="Expensum" className={styles.navLogoIcon} />
+            <img src="/scritta_expensum.png" alt="Expensum" className={styles.navLogoText} />
+          </div>
+          <div className={styles.navLinks}>
+            <button className={styles.navLink} onClick={() => scrollToSection("come-funziona")}>
+              Come funziona
+            </button>
+            <button className={styles.navLink} onClick={() => scrollToSection("prezzi")}>
+              Prezzi
+            </button>
+          </div>
+          <div className={styles.navActions}>
+            <Link href="/login" className={styles.btnGhost}>
+              Accedi alla web app
+            </Link>
+            <a
+              href="https://t.me/ExspensumBot"
+              target="_blank"
+              rel="noopener noreferrer"
+              className={styles.btnPrimary}
+            >
+              Apri su Telegram
+            </a>
+          </div>
+        </div>
+      </nav>
 
-      {/* Hero Section */}
-      <Box sx={{ flexGrow: 1, display: "flex", alignItems: "center", py: 10, bgcolor: "background.default" }}>
-        <Container maxWidth="lg">
-          <Grid container spacing={6} alignItems="center">
-            <Grid item xs={12} md={6}>
-              <Typography variant="h1" sx={{ fontSize: { xs: "3rem", md: "4rem" }, mb: 2, color: "#111" }}>
-                Gestisci le tue finanze con l'<Box component="span" sx={{ color: "primary.main" }}>Intelligenza Artificiale</Box>.
-              </Typography>
-              <Typography variant="h6" color="text.secondary" sx={{ mb: 4, fontWeight: 400, lineHeight: 1.6 }}>
-                Traky e Moneo si uniscono per offrirti l'assistente finanziario definitivo. Tieni traccia delle spese, ottimizza i tuoi abbonamenti e ricevi consigli personalizzati in tempo reale.
-              </Typography>
-              <Box display="flex" gap={2}>
-                <Link href="/chat" passHref>
-                  <Button variant="contained" color="secondary" size="large" sx={{ px: 4, py: 1.5, fontSize: "1.1rem" }}>
-                    Parla con Moneo
-                  </Button>
-                </Link>
-                <Link href="/analytics" passHref>
-                  <Button variant="outlined" color="primary" size="large" sx={{ px: 4, py: 1.5, fontSize: "1.1rem" }}>
-                    Vedi Demo
-                  </Button>
-                </Link>
-              </Box>
-            </Grid>
-            <Grid item xs={12} md={6}>
-              {/* Placeholder for Hero Image/Video */}
-              <Box 
-                sx={{ 
-                  width: "100%", 
-                  height: 400, 
-                  bgcolor: "#e0f2f1", 
-                  borderRadius: 4,
-                  display: "flex",
-                  alignItems: "center",
-                  justifyContent: "center",
-                  boxShadow: "0px 20px 40px rgba(0, 128, 128, 0.15)"
-                }}
-              >
-                <video
-                  ref={videoRef}
-                  autoPlay
-                  loop
-                  muted
-                  playsInline
-                  style={{ width: "100%", height: "100%", objectFit: "cover", borderRadius: "16px" }}
+      <main>
+        {/* ── Hero ── */}
+        <section className={styles.hero}>
+          <div className={styles.heroInner}>
+            <div className={styles.heroLeft}>
+              <p className={styles.heroPill}>Powered by AI</p>
+              <h1 className={styles.heroHeadline}>
+                Il tuo compagno<br />del risparmio.
+              </h1>
+              <p className={styles.heroSub}>
+                Traccia le spese via Telegram. L’AI le analizza.<br />
+                Tu capisci i tuoi soldi.
+              </p>
+              <div className={styles.heroActions}>
+                <a
+                  href="https://t.me/ExspensumBot"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className={styles.btnPrimary}
                 >
-                  <source src="/AvatarMoneoV2.mp4?v=2" type="video/mp4" />
-                </video>
-              </Box>
-            </Grid>
-          </Grid>
-        </Container>
-      </Box>
+                  Apri su Telegram →
+                </a>
+                <button
+                  className={styles.btnGhost}
+                  onClick={() => scrollToSection("come-funziona")}
+                >
+                  Come funziona
+                </button>
+              </div>
+            </div>
 
-      {/* Trust Signals */}
-      <Box sx={{ py: 6, bgcolor: "#fff", borderTop: "1px solid #eaeaea", borderBottom: "1px solid #eaeaea" }}>
-        <Container maxWidth="lg">
-          <Grid container spacing={4} justifyContent="center" textAlign="center">
-            <Grid item xs={12}>
-              <Typography variant="subtitle1" color="text.secondary" sx={{ mb: 3 }}>
-                DATI AL SICURO, SINCRONIZZAZIONE PERFETTA
-              </Typography>
-            </Grid>
-            <Grid item xs={6} md={3}>
-              <Box display="flex" flexDirection="column" alignItems="center">
-                <Security color="primary" sx={{ fontSize: 40, mb: 1 }} />
-                <Typography variant="body1" fontWeight="bold">Privacy First</Typography>
-              </Box>
-            </Grid>
-            <Grid item xs={6} md={3}>
-              <Box display="flex" flexDirection="column" alignItems="center">
-                <Typography variant="h5" fontWeight="bold" color="text.secondary" sx={{ mb: 1 }}>N</Typography>
-                <Typography variant="body1" fontWeight="bold">Sincronizzato con Notion</Typography>
-              </Box>
-            </Grid>
-          </Grid>
-        </Container>
-      </Box>
+            <div className={styles.heroRight}>
+              <div className={styles.deviceFrame}>
+                <div className={styles.deviceBar}>
+                  <span className={styles.deviceDot} />
+                  <span className={styles.deviceDot} />
+                  <span className={styles.deviceDot} />
+                  <span className={styles.deviceUrl}>expensum.it/analytics</span>
+                </div>
+                <div className={styles.deviceScreen}>
+                  {/* Dashboard preview mockup */}
+                  <div className={styles.mockHeader}>
+                    <span className={styles.mockGreeting}>Buongiorno, Michele</span>
+                    <span className={styles.mockBadge}>Premium</span>
+                  </div>
+                  <div className={styles.mockStats}>
+                    <div className={styles.mockStat}>
+                      <span className={styles.mockStatLabel}>Spese questo mese</span>
+                      <span className={styles.mockStatValue}>€ 1.240</span>
+                    </div>
+                    <div className={styles.mockStat}>
+                      <span className={styles.mockStatLabel}>Risparmio</span>
+                      <span className={styles.mockStatValueGold}>+ € 380</span>
+                    </div>
+                  </div>
+                  <div className={styles.mockChart}>
+                    {[65, 80, 45, 90, 60, 75, 50].map((h, i) => (
+                      <div key={i} className={styles.mockBar} style={{ height: `${h}%` }} />
+                    ))}
+                  </div>
+                  <div className={styles.mockCategories}>
+                    {["Spesa", "Ristoranti", "Trasporti", "Svago"].map((c, i) => (
+                      <div key={i} className={styles.mockCategoryRow}>
+                        <span className={styles.mockCategoryName}>{c}</span>
+                        <div className={styles.mockCategoryBar}>
+                          <div
+                            className={styles.mockCategoryFill}
+                            style={{ width: `${[70, 45, 30, 20][i]}%` }}
+                          />
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
 
-      {/* Features Section */}
-      <Container maxWidth="lg" sx={{ py: 10 }}>
-        <Typography variant="h3" textAlign="center" sx={{ mb: 8 }}>
-          Come Traky può aiutarti
-        </Typography>
-        <Grid container spacing={4}>
-          <Grid item xs={12} md={4}>
-            <Card sx={{ height: "100%", display: "flex", flexDirection: "column" }}>
-              <CardContent sx={{ flexGrow: 1, p: 4 }}>
-                <ChatBubbleOutline color="primary" sx={{ fontSize: 48, mb: 2 }} />
-                <Typography variant="h5" sx={{ mb: 2, fontWeight: "bold" }}>Assistente Chatbot</Typography>
-                <Typography color="text.secondary">
-                  Aggiungi le tue spese semplicemente parlando o scrivendo a Moneo su Telegram o sulla Web App. Non c'è bisogno di form noiosi.
-                </Typography>
-              </CardContent>
-            </Card>
-          </Grid>
-          <Grid item xs={12} md={4}>
-            <Card sx={{ height: "100%", display: "flex", flexDirection: "column" }}>
-              <CardContent sx={{ flexGrow: 1, p: 4 }}>
-                <AutoGraph color="secondary" sx={{ fontSize: 48, mb: 2 }} />
-                <Typography variant="h5" sx={{ mb: 2, fontWeight: "bold" }}>Analytics Avanzati</Typography>
-                <Typography color="text.secondary">
-                  Visualizza l'andamento delle tue spese con grafici chiari e intuitivi. Scopri dove stai spendendo di più e come risparmiare.
-                </Typography>
-              </CardContent>
-            </Card>
-          </Grid>
-          <Grid item xs={12} md={4}>
-            <Card sx={{ height: "100%", display: "flex", flexDirection: "column" }}>
-              <CardContent sx={{ flexGrow: 1, p: 4 }}>
-                <AccountBalanceWallet color="info" sx={{ fontSize: 48, mb: 2 }} />
-                <Typography variant="h5" sx={{ mb: 2, fontWeight: "bold" }}>Gestione Abbonamenti</Typography>
-                <Typography color="text.secondary">
-                  Tieni traccia di tutte le tue iscrizioni (Netflix, Palestra, Spotify) e ricevi notifiche prima che ti vengano addebitate.
-                </Typography>
-              </CardContent>
-            </Card>
-          </Grid>
-        </Grid>
-      </Container>
+          <button
+            className={styles.heroScroll}
+            onClick={() => scrollToSection("per-chi")}
+            aria-label="Scorri in basso"
+          >
+            <ChevronDown size={20} strokeWidth={1.5} />
+          </button>
+        </section>
 
-      {/* Footer */}
-      <Box sx={{ bgcolor: "#111", color: "#fff", py: 6, mt: "auto" }}>
-        <Container maxWidth="lg">
-          <Typography variant="body2" textAlign="center">
-            © {new Date().getFullYear()} Finance-Agents / Traky. Tutti i diritti riservati.
-          </Typography>
-        </Container>
-      </Box>
-    </Box>
+        {/* ── Per chi è pensato ── */}
+        <section id="per-chi" className={styles.section}>
+          <div className={styles.sectionInner}>
+            <div className={styles.sectionHeadLeft}>
+              <h2 className={styles.sectionH2} data-reveal>
+                Per chi è pensato<br />Expensum.
+              </h2>
+            </div>
+            <div className={styles.forWhoList}>
+              {FOR_WHO.map((item, i) => (
+                <div key={i} className={styles.forWhoItem} data-reveal>
+                  <span className={styles.forWhoNum}>0{i + 1}</span>
+                  <div>
+                    <strong className={styles.forWhoTitle}>{item.title}</strong>
+                    <span className={styles.forWhoDesc}> {item.desc}</span>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        </section>
+
+        {/* ── Features ── */}
+        <section id="features" className={styles.sectionAlt}>
+          <div className={styles.sectionInner}>
+            <h2 className={styles.sectionH2Full} data-reveal>
+              Cosa fa Expensum.{" "}
+              <span className={styles.h2Muted}>Tutto il necessario,</span>
+              <br />
+              <span className={styles.h2Muted}>niente di superfluo.</span>
+            </h2>
+            <div className={styles.featureGrid} data-reveal>
+              {FEATURES.map((f, i) => (
+                <div key={i} className={styles.featureCard}>
+                  <div className={styles.featureIcon}>{f.icon}</div>
+                  <h3 className={styles.featureTitle}>{f.title}</h3>
+                  <p className={styles.featureDesc}>{f.desc}</p>
+                </div>
+              ))}
+            </div>
+          </div>
+        </section>
+
+        <div className={styles.dividerLine} />
+
+        {/* ── Come funziona (Timeline) ── */}
+        <section id="come-funziona" className={styles.section}>
+          <div className={styles.sectionInner}>
+            <h2 className={styles.sectionH2Center} data-reveal>
+              Come funziona.<br />Semplice e veloce.
+            </h2>
+
+            <div className={styles.timeline}>
+              <div className={styles.timelineLine} />
+              {HOW_STEPS.map((step, i) => (
+                <div
+                  key={i}
+                  className={`${styles.timelineRow} ${i % 2 === 1 ? styles.timelineRowRight : ""}`}
+                  data-reveal
+                >
+                  <div className={styles.timelineCard}>
+                    <div className={styles.timelineStep}>{i + 1}</div>
+                    <div className={styles.timelineIcon}>{step.icon}</div>
+                    <div>
+                      <strong className={styles.timelineTitle}>{step.title}</strong>
+                      <span className={styles.timelineDesc}> {step.desc}</span>
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        </section>
+
+        {/* ── Pricing ── */}
+        <section id="prezzi" className={styles.sectionAlt}>
+          <div className={styles.sectionInner}>
+            <h2 className={styles.sectionH2Full} data-reveal>
+              Scegli il tuo piano.
+            </h2>
+
+            <div className={styles.pricingGrid}>
+              {/* Free */}
+              <div className={styles.pricingCard} data-reveal>
+                <p className={styles.pricingLabel}>Free</p>
+                <div className={styles.pricingPrice}>
+                  <span className={styles.pricingAmount}>€0</span>
+                  <span className={styles.pricingPeriod}>/mese</span>
+                </div>
+                <a
+                  href="https://t.me/ExspensumBot"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className={styles.btnOutline}
+                >
+                  Inizia gratis
+                </a>
+                <ul className={styles.featureList}>
+                  {FREE_FEATURES.map((feat) => (
+                    <li key={feat} className={styles.featureListItem}>
+                      <Check size={14} className={styles.checkIcon} />
+                      {feat}
+                    </li>
+                  ))}
+                </ul>
+                <p className={styles.pricingNote}>
+                  Per chi vuole iniziare a tenere traccia senza impegno.
+                </p>
+              </div>
+
+              {/* Premium */}
+              <div className={`${styles.pricingCard} ${styles.pricingCardPremium}`} data-reveal>
+                <div className={styles.pricingBadge}>Più popolare</div>
+                <p className={styles.pricingLabel}>Premium</p>
+                <div className={styles.pricingPrice}>
+                  <span className={styles.pricingAmount}>€4.99</span>
+                  <span className={styles.pricingPeriod}>/mese</span>
+                </div>
+                <a
+                  href="https://t.me/ExspensumBot"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className={styles.btnPrimary}
+                >
+                  Passa a Premium
+                </a>
+                <ul className={styles.featureList}>
+                  {PREMIUM_FEATURES.map((feat) => (
+                    <li key={feat} className={styles.featureListItem}>
+                      <Check size={14} className={styles.checkIcon} />
+                      {feat}
+                    </li>
+                  ))}
+                </ul>
+                <p className={styles.pricingNote}>
+                  Per chi vuole il massimo: grafici, budget, previsioni e storico completo.
+                </p>
+              </div>
+            </div>
+
+            <div className={styles.pricingCta} data-reveal>
+              <p>Hai domande sul piano giusto per te?</p>
+              <a href="mailto:expensum.finance@gmail.com" className={styles.ctaLink}>
+                Contattaci →
+              </a>
+            </div>
+          </div>
+        </section>
+      </main>
+
+      {/* ── Footer ── */}
+      <footer className={styles.footer}>
+        {/* Top bar: logo + social */}
+        <div className={styles.footerTopBar}>
+          <div className={styles.footerLogoCombo}>
+            <img src="/logo-expensum-icon.png" alt="" className={styles.footerLogoIcon} />
+            <img src="/scritta_expensum.png" alt="Expensum" className={styles.footerLogoText} />
+          </div>
+          <div className={styles.footerSocials}>
+            <a href="https://instagram.com/expensum.finance" target="_blank" rel="noopener noreferrer" className={styles.footerSocialIcon} aria-label="Instagram">
+              <svg width="18" height="18" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.8}><rect x="2" y="2" width="20" height="20" rx="5"/><circle cx="12" cy="12" r="5"/><circle cx="17.5" cy="6.5" r="1" fill="currentColor" stroke="none"/></svg>
+            </a>
+            <a href="https://t.me/ExspensumBot" target="_blank" rel="noopener noreferrer" className={styles.footerSocialIcon} aria-label="Telegram">
+              <svg width="18" height="18" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.8}><path d="M21 5L2 12.5l7 1M21 5l-3 15-9-5.5M21 5L9 13.5m0 0V19l3-3"/></svg>
+            </a>
+            <a href="https://acesse.one/ite4lxk" target="_blank" rel="noopener noreferrer" className={styles.footerSocialIcon} aria-label="Facebook">
+              <svg width="18" height="18" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.8}><path d="M18 2h-3a5 5 0 0 0-5 5v3H7v4h3v8h4v-8h3l1-4h-4V7a1 1 0 0 1 1-1h3z"/></svg>
+            </a>
+            <a href="mailto:expensum.finance@gmail.com" className={styles.footerSocialIcon} aria-label="Email">
+              <svg width="18" height="18" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.8}><rect x="2" y="4" width="20" height="16" rx="2"/><path d="m2 7 10 7 10-7"/></svg>
+            </a>
+          </div>
+        </div>
+
+        {/* Link grid */}
+        <div className={styles.footerGrid}>
+          <div className={styles.footerCol}>
+            <p className={styles.footerColTitle}>Prodotto</p>
+            <a href="#come-funziona" className={styles.footerGridLink}>Come funziona</a>
+            <a href="#features" className={styles.footerGridLink}>Analytics</a>
+            <a href="#features" className={styles.footerGridLink}>Abbonamenti automatici</a>
+            <a href="#features" className={styles.footerGridLink}>Report mensili</a>
+            <a href="#prezzi" className={styles.footerGridLink}>Prezzi</a>
+          </div>
+          <div className={styles.footerCol}>
+            <p className={styles.footerColTitle}>Per iniziare</p>
+            <a href="https://t.me/ExspensumBot" target="_blank" rel="noopener noreferrer" className={styles.footerGridLink}>Apri su Telegram</a>
+            <a href="#prezzi" className={styles.footerGridLink}>Piano Free</a>
+            <a href="#prezzi" className={styles.footerGridLink}>Piano Premium</a>
+            <a href="/login" className={styles.footerGridLink}>Accedi alla web app</a>
+          </div>
+          <div className={styles.footerCol}>
+            <p className={styles.footerColTitle}>Azienda</p>
+            <a href="mailto:expensum.finance@gmail.com" className={styles.footerGridLink}>Chi siamo</a>
+            <a href="mailto:expensum.finance@gmail.com" className={styles.footerGridLink}>Contatti</a>
+            <a href="#" className={styles.footerGridLink}>Privacy Policy</a>
+            <a href="#" className={styles.footerGridLink}>Termini di servizio</a>
+          </div>
+          <div className={styles.footerCol}>
+            <p className={styles.footerColTitle}>Seguici</p>
+            <a href="https://instagram.com/expensum.finance" target="_blank" rel="noopener noreferrer" className={styles.footerGridLink}>Instagram</a>
+            <a href="https://t.me/ExspensumBot" target="_blank" rel="noopener noreferrer" className={styles.footerGridLink}>Telegram</a>
+            <a href="https://acesse.one/ite4lxk" target="_blank" rel="noopener noreferrer" className={styles.footerGridLink}>Facebook</a>
+            <a href="mailto:expensum.finance@gmail.com" className={styles.footerGridLink}>Email</a>
+          </div>
+        </div>
+
+        <div className={styles.footerBottom}>
+          <p className={styles.footerCopy}>© {new Date().getFullYear()} Expensum — Il tuo compagno del risparmio.</p>
+        </div>
+      </footer>
+    </>
   );
 }

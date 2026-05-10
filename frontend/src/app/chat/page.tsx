@@ -29,11 +29,11 @@ export default function ChatMiniApp() {
   return (
     <Box sx={{ height: "100vh", display: "flex", flexDirection: "column", bgcolor: "background.default" }}>
       {/* Video Avatar Section */}
-      <Box 
-        sx={{ 
-          width: "100%", height: "35vh", bgcolor: "#111", 
+      <Box
+        sx={{
+          width: "100%", height: "35vh", bgcolor: "background.default",
           display: "flex", alignItems: "center", justifyContent: "center",
-          borderBottom: "1px solid #333", overflow: "hidden", position: "relative"
+          borderBottom: "1px solid", borderColor: "divider", overflow: "hidden", position: "relative"
         }}
       >
         <video
@@ -46,9 +46,9 @@ export default function ChatMiniApp() {
         >
           <source src="/AvatarMoneoV2.mp4?v=2" type="video/mp4" />
         </video>
-        <Box sx={{ position: "absolute", bottom: 16, left: 16, display: "flex", alignItems: "center", gap: 1 }}>
-          <Box sx={{ width: 10, height: 10, borderRadius: "50%", bgcolor: "#4caf50" }} />
-          <Typography variant="caption" color="#fff" fontWeight="bold">Moneo Online</Typography>
+        <Box sx={{ position: "absolute", bottom: 16, left: 16, display: "flex", alignItems: "center", gap: 1, bgcolor: "rgba(26,54,115,0.85)", px: 1.5, py: 0.5, borderRadius: 10 }}>
+          <Box sx={{ width: 8, height: 8, borderRadius: "50%", bgcolor: "#4ade80", boxShadow: "0 0 6px #4ade80" }} />
+          <Typography variant="caption" color="#fff" fontWeight={600} fontSize="0.75rem">Moneo Online</Typography>
         </Box>
       </Box>
 
@@ -80,7 +80,7 @@ export default function ChatMiniApp() {
       </Box>
 
       {/* Input Area */}
-      <Box sx={{ p: 2, bgcolor: "#fff", borderTop: "1px solid #eaeaea", display: "flex", alignItems: "center", gap: 1 }}>
+      <Box sx={{ p: 2, bgcolor: "background.paper", borderTop: "1px solid", borderColor: "divider", display: "flex", alignItems: "center", gap: 1 }}>
         <IconButton color="primary" size="small"><ImageIcon /></IconButton>
         <IconButton color="primary" size="small"><Mic /></IconButton>
         <IconButton color="primary" size="small"><VideoCall /></IconButton>
@@ -96,7 +96,10 @@ export default function ChatMiniApp() {
           sx={{
             "& .MuiOutlinedInput-root": {
               borderRadius: 20,
-              bgcolor: "#f5f7fa"
+              bgcolor: "background.default",
+              "& fieldset": { borderColor: "divider" },
+              "&:hover fieldset": { borderColor: "primary.main" },
+              "&.Mui-focused fieldset": { borderColor: "primary.main" }
             }
           }}
           InputProps={{
