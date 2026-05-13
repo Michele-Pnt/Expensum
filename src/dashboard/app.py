@@ -23,7 +23,7 @@ from src.user_store import UserStore, User, LlmUsageEvent, LlmPricing, DailyMetr
 from src.notion_client import NotionFinanceClient
 from src.storage.notion_storage import NotionStorage
 from src.storage.postgres_storage import PostgresStorage
-from src.workspace_bootstrapper import bootstrap_workspace
+from src.workspace_bootstrapper import bootstrap_workspace, bootstrap_lifestyle_categories
 from src.category_sync import refresh_category_averages
 from src.dashboard_message import build_dashboard_text
 
@@ -63,13 +63,15 @@ def _build_setup_redirect(chat_id: str) -> str:
 
 
 def _resolve_authenticated_redirect(chat_id: str) -> str:
-    """Instrada un utente autenticato verso setup o home app."""
+    """Instrada un utente autenticato verso setup, onboarding o home app."""
     user = _get_user_by_chat_id(chat_id)
     if not user:
         session.clear()
         return url_for("web_login")
     if user.setup_completed_at is None:
         return _build_setup_redirect(chat_id)
+    if user.onboarding_completed_at is None:
+        return "/onboarding"
     return "/chat"
 
 
@@ -759,7 +761,7 @@ def _process_oauth_background(
             _tg(report_msg)
             return
 
-        report_msg = "🎊 <b>TRAKY È PRONTO ALL'AZIONE!</b>\n\nHo scansionato il tuo Notion e collegato i database:\n"
+        report_msg = "🎊 <b>MONEO È PRONTO!</b>\n\nHo scansionato il tuo Notion e collegato i database:\n"
         if not discovered:
             report_msg += (
                 "⚠️ <b>Attenzione</b>: Non ho trovato i database standard (Spese, Entrate, ecc.). "
@@ -770,26 +772,21 @@ def _process_oauth_background(
             for key in discovered:
                 db_name = key.replace("_db_id", "").capitalize()
                 report_msg += f"✅ {db_name}\n"
+
+            # Marca il setup tecnico come completato — l'onboarding delle preferenze
+            # avviene nel wizard web/Telegram (non nel setup_miniapp, che resta opzionale)
+            store.mark_setup_completed(chat_id)
+
             report_msg += (
-                "\n\n👇 <b>Inizia a usare Moneo configurando il tuo spazio:</b>\n"
-                "1️⃣ Clicca sul pulsante qui sotto.\n"
-                "2️⃣ Aggiungi i tuoi <b>Conti</b> (es. Conto Corrente, Contanti) e imposta il saldo iniziale.\n"
-                "3️⃣ Personalizza le tue <b>Categorie</b> di spesa ed eventuali budget.\n"
-                "4️⃣ Inserisci i tuoi <b>Abbonamenti</b> per tenerne traccia automaticamente."
+                "\n\n🎉 Ora completa il tuo profilo per personalizzare Moneo!\n"
+                "Apri la webapp e segui il wizard di configurazione, oppure scrivi "
+                "<b>/impostazioni</b> qui in chat."
             )
-            reg_token_miniapp = store.create_oauth_session(chat_id)
-            miniapp_url = f"{Config.WEBAPP_BASE_URL}/setup?reg_token={reg_token_miniapp}"
             try:
                 requests.post(telegram_url, json={
                     "chat_id": chat_id,
                     "text": report_msg,
                     "parse_mode": "HTML",
-                    "reply_markup": {
-                        "inline_keyboard": [[{
-                            "text": "⚙️ Configura il tuo spazio",
-                            "web_app": {"url": miniapp_url}
-                        }]]
-                    }
                 })
             except Exception as tg_err:
                 print(f"[OAuth-bg] Errore invio messaggio finale: {tg_err}")
@@ -1881,6 +1878,508 @@ def api_manage_update():
 
 
 # ---------------------------------------------------------------------------
+# API CHAT — Telegram-like chat interface for web app
+# ---------------------------------------------------------------------------
+
+def _build_financial_storage(user, pg_session=None):
+    """Costruisce il FinancialStorage corretto in base al backend dell'utente."""
+    if user.storage_backend == "postgres":
+        return PostgresStorage(session=pg_session, user_id=user.chat_id)
+    # Backend Notion
+    stored_schemas = store.get_database_schemas(user.chat_id)
+    db_schemas = {}
+    for db_key, data in stored_schemas.items():
+        props = data.get("properties")
+        mapped = data.get("mapped")
+        db_schemas[db_key] = {
+            "database_id": data.get("database_id"),
+            "properties": json.loads(props) if isinstance(props, str) else (props or {}),
+            "mapped": json.loads(mapped) if isinstance(mapped, str) else (mapped or {}),
+        }
+    notion_client = NotionFinanceClient(
+        api_key=user.notion_access_token,
+        expense_db_id=user.expense_db_id,
+        income_db_id=user.income_db_id,
+        categories_db_id=user.categories_db_id,
+        monthly_balance_db_id=user.monthly_balance_db_id,
+        accounts_db_id=user.accounts_db_id,
+        subscriptions_db_id=user.subscriptions_db_id,
+        pay_transfer_db_id=user.pay_transfer_db_id,
+        db_schemas=db_schemas,
+    )
+    return NotionStorage(notion_client, store=store, user_id=user.chat_id)
+
+
+def _chat_parse_text(chat_id: str, text: str, skip_length_check: bool = False) -> tuple[dict | None, dict | None, str]:
+    """Valida, sanitizza e lancia il parsing LLM su un messaggio testuale.
+
+    Ritorna (result, usage, error_reply). Se error_reply è non-None il chiamante
+    deve restituire un errore al client senza procedere.
+    skip_length_check=True per testo OCR (generato dal sistema, non digitato dall'utente).
+    """
+    from src.expense_parser import ExpenseParser
+    from src.rate_limiter import is_rate_limited
+    from src.user_store import QuotaExceededError
+
+    # Validazione lunghezza — non applicata a testo OCR (scontrini possono essere lunghi)
+    if not skip_length_check and len(text) > Config.MAX_MESSAGE_LEN:
+        return None, None, f"⚠️ Messaggio troppo lungo! Massimo {Config.MAX_MESSAGE_LEN} caratteri."
+
+    # Rate limiting
+    if is_rate_limited(chat_id, max_messages=Config.MAX_MESSAGES_PER_MINUTE):
+        return None, None, "⏳ Stai inviando troppi messaggi. Attendi qualche secondo e riprova."
+
+    # Token check
+    try:
+        plan = store.get_user_plan(chat_id)
+        tokens_remaining = plan.get("tokens_remaining", 0)
+        TEXT_COST = 800
+        if plan.get("plan_type") != "pro" and tokens_remaining < TEXT_COST:
+            return None, None, "🔒 Hai esaurito i token mensili. Passa al piano Pro o attendi il rinnovo."
+    except Exception:
+        pass  # best-effort: non bloccare per errori di quota
+
+    # Sanitizzazione input — difesa da prompt injection
+    safe_input = f"[INIZIO INPUT UTENTE]\n{text}\n[FINE INPUT UTENTE]"
+
+    # Carica categorie dal backend corretto
+    categories: list[str] = []
+    try:
+        user = _get_user_by_chat_id(chat_id)
+        if user.storage_backend == "postgres":
+            with store.Session() as s:
+                storage = _build_financial_storage(user, pg_session=s)
+                categories_raw = storage.get_categories()
+                categories = [c["name"] for c in categories_raw if c.get("name")]
+        else:
+            storage = _build_financial_storage(user)
+            categories_raw = storage.get_categories()
+            categories = [c["name"] for c in categories_raw if c.get("name")]
+    except Exception:
+        pass
+
+    # Parsing LLM
+    try:
+        parser = ExpenseParser(categories=categories)
+        result, usage = parser.parse_with_usage(safe_input)
+    except Exception as e:
+        logger.exception("Errore ExpenseParser chat: %s", e)
+        return None, None, "⚠️ Errore interno durante il parsing. Riprova."
+
+    # Token tracking (best-effort)
+    if usage:
+        try:
+            import uuid
+            store.finalize_llm_usage(
+                chat_id=chat_id,
+                request_key=str(uuid.uuid4()),
+                operation="chat_parse",
+                provider=usage.get("provider", "unknown"),
+                model=usage.get("model", "unknown"),
+                prompt_tokens=usage.get("prompt_tokens", 0),
+                completion_tokens=usage.get("completion_tokens", 0),
+                total_tokens=usage.get("total_tokens", 0),
+            )
+        except Exception:
+            pass
+
+    return result, usage, ""
+
+
+def _build_parse_reply(result: dict) -> tuple[str, dict]:
+    """Costruisce il testo di preview e il dict parsed da mandare al client."""
+    parsed_type = result.get("type", "expense")
+    amount_str = f"€{result['amount']:.2f}" if result.get("amount") else "importo non specificato"
+    date_obj = result.get("date")
+    date_str = date_obj.strftime("%d/%m/%Y") if date_obj else "oggi"
+
+    if parsed_type == "expense":
+        cat = result.get("category") or "Altro"
+        name = result.get("name") or "Spesa"
+        reply = f"Ho interpretato **{name}** di {amount_str} nella categoria _{cat}_ ({date_str}). Confermi?"
+    else:
+        income_type = result.get("income_type") or "Entrata"
+        name = result.get("name") or "Entrata"
+        reply = f"Ho interpretato **{name}** ({income_type}) di {amount_str} ({date_str}). Confermi?"
+
+    parsed = {
+        "type": parsed_type,
+        "amount": result.get("amount"),
+        "category": result.get("category"),
+        "income_type": result.get("income_type"),
+        "name": result.get("name"),
+        "date": str(result.get("date")),
+    }
+    return reply, parsed
+
+
+@app.route("/api/chat/message", methods=["POST"])
+def api_chat_message():
+    """Parse-only: interpreta il messaggio via LLM ma non salva. Richiede conferma."""
+    chat_id, _ = _resolve_request_chat_id()
+    if not chat_id:
+        return jsonify({"error": "Unauthorized"}), 401
+
+    data = request.get_json(silent=True) or {}
+    text = (data.get("text") or "").strip()
+    if not text:
+        return jsonify({"error": "Testo vuoto"}), 400
+
+    result, _usage, error_reply = _chat_parse_text(chat_id, text)
+
+    if error_reply:
+        # Distinguiamo tra errore di validazione e parsing fallito
+        if result is None and error_reply.startswith("⚠️") or error_reply.startswith("🔒") or error_reply.startswith("⏳"):
+            # Log il messaggio utente anche in caso di errore lieve
+            try:
+                store.log_message(chat_id, source="webapp", role="user", text=text)
+                store.log_message(chat_id, source="webapp", role="bot", text=error_reply)
+            except Exception:
+                pass
+            return jsonify({"ok": False, "type": "error", "reply": error_reply, "saved": False})
+        return jsonify({"ok": False, "type": "error", "reply": error_reply, "saved": False})
+
+    # Log messaggio utente
+    try:
+        store.log_message(chat_id, source="webapp", role="user", text=text)
+    except Exception:
+        pass
+
+    if result is None:
+        unknown_reply = "Non ho riconosciuto una transazione nel tuo messaggio. Prova con qualcosa come «ho speso 20€ al supermercato» 🛒"
+        try:
+            store.log_message(chat_id, source="webapp", role="bot", text=unknown_reply)
+        except Exception:
+            pass
+        return jsonify({"ok": True, "type": "unknown", "reply": unknown_reply, "saved": False})
+
+    reply, parsed = _build_parse_reply(result)
+
+    # Log preview bot (non ancora confermata)
+    try:
+        store.log_message(chat_id, source="webapp", role="bot", text=reply, metadata=parsed)
+    except Exception:
+        pass
+
+    return jsonify({"ok": True, "type": parsed["type"], "parsed": parsed, "reply": reply, "saved": False})
+
+
+@app.route("/api/chat/confirm", methods=["POST"])
+def api_chat_confirm():
+    """Salva la transazione parsata dopo conferma esplicita dell'utente."""
+    chat_id, _ = _resolve_request_chat_id()
+    if not chat_id:
+        return jsonify({"error": "Unauthorized"}), 401
+
+    data = request.get_json(silent=True) or {}
+    parsed = data.get("parsed") or {}
+    parsed_type = parsed.get("type", "expense")
+
+    if not parsed.get("amount"):
+        return jsonify({"error": "Dati transazione mancanti"}), 400
+
+    user = _get_user_by_chat_id(chat_id)
+    if not user:
+        return jsonify({"error": "Utente non trovato"}), 404
+
+    # Converti la data da stringa a oggetto date (il parser la serializza come str)
+    from datetime import date as _date
+    raw_date = parsed.get("date")
+    try:
+        tx_date = datetime.strptime(str(raw_date).split("T")[0], "%Y-%m-%d").date()
+    except (ValueError, AttributeError, TypeError):
+        tx_date = _date.today()
+
+    saved = False
+    try:
+        if user.storage_backend == "postgres":
+            with store.Session() as s:
+                storage = _build_financial_storage(user, pg_session=s)
+                accounts = storage.fetch_accounts()
+                default_account_id = accounts[0]["id"] if accounts else None
+                if parsed_type == "expense":
+                    storage.create_expense(
+                        expense_date=tx_date,
+                        amount=float(parsed.get("amount") or 0),
+                        category_name=parsed.get("category") or "Altro",
+                        name=parsed.get("name") or "Spesa",
+                        account_id=default_account_id,
+                    )
+                else:
+                    storage.create_income(
+                        income_date=tx_date,
+                        amount=float(parsed.get("amount") or 0),
+                        income_type=parsed.get("income_type") or "Stipendio",
+                        name=parsed.get("name") or "Entrata",
+                        account_id=default_account_id,
+                    )
+        else:
+            storage = _build_financial_storage(user)
+            accounts = storage.fetch_accounts()
+            default_account_id = accounts[0]["id"] if accounts else None
+            if parsed_type == "expense":
+                storage.create_expense(
+                    expense_date=tx_date,
+                    amount=float(parsed.get("amount") or 0),
+                    category_name=parsed.get("category") or "Altro",
+                    name=parsed.get("name") or "Spesa",
+                    account_id=default_account_id,
+                )
+            else:
+                storage.create_income(
+                    income_date=tx_date,
+                    amount=float(parsed.get("amount") or 0),
+                    income_type=parsed.get("income_type") or "Stipendio",
+                    name=parsed.get("name") or "Entrata",
+                    account_id=default_account_id,
+                )
+        saved = True
+    except Exception as e:
+        logger.exception("Errore salvataggio transazione confermata: %s", e)
+
+    amount_str = f"€{float(parsed.get('amount', 0)):.2f}"
+    if parsed_type == "expense":
+        cat = parsed.get("category") or "Altro"
+        name = parsed.get("name") or "Spesa"
+        if saved:
+            reply = f"✅ Ho registrato **{name}** di {amount_str} nella categoria _{cat}_."
+        else:
+            reply = f"⚠️ Ho interpretato **{name}** di {amount_str}, ma non sono riuscito a salvarlo. Riprova."
+    else:
+        income_type = parsed.get("income_type") or "Entrata"
+        name = parsed.get("name") or "Entrata"
+        if saved:
+            reply = f"✅ Ho registrato **{name}** ({income_type}) di {amount_str}."
+        else:
+            reply = f"⚠️ Ho interpretato **{name}** di {amount_str}, ma non sono riuscito a salvarlo. Riprova."
+
+    # Log risposta finale bot
+    try:
+        store.log_message(chat_id, source="webapp", role="bot", text=reply, metadata=parsed if saved else None)
+    except Exception:
+        pass
+
+    return jsonify({"ok": saved, "saved": saved, "reply": reply})
+
+
+@app.route("/api/chat/voice", methods=["POST"])
+def api_chat_voice():
+    """Trascrive un messaggio vocale via Gemini e lo processa come testo."""
+    import tempfile
+    from src.rate_limiter import is_rate_limited
+
+    chat_id, _ = _resolve_request_chat_id()
+    if not chat_id:
+        return jsonify({"error": "Unauthorized"}), 401
+
+    if is_rate_limited(chat_id, max_messages=Config.MAX_MESSAGES_PER_MINUTE):
+        return jsonify({"ok": False, "reply": "⏳ Troppi messaggi. Attendi qualche secondo.", "saved": False})
+
+    audio_file = request.files.get("audio")
+    if not audio_file:
+        return jsonify({"error": "File audio mancante"}), 400
+
+    # Trascrizione Gemini Vertex AI
+    transcribed = ""
+    try:
+        from google import genai
+        from google.genai import types as genai_types
+
+        audio_bytes = audio_file.read()
+        if len(audio_bytes) < 100:
+            return jsonify({"ok": False, "reply": "⚠️ Audio troppo corto o vuoto.", "saved": False})
+
+        client_ai = genai.Client(
+            vertexai=True,
+            project=Config.GOOGLE_CLOUD_PROJECT,
+            location=Config.VERTEX_AI_LOCATION,
+        )
+        audio_part = genai_types.Part.from_bytes(data=audio_bytes, mime_type="audio/webm")
+        response = client_ai.models.generate_content(
+            model=Config.GEMINI_MODEL,
+            contents=[
+                "Trascrivi esattamente e parola per parola questo audio in italiano. "
+                "Restituisci SOLO ed esclusivamente il testo trascritto, nient'altro.",
+                audio_part,
+            ],
+        )
+        transcribed = (response.text or "").strip()
+    except Exception as e:
+        logger.exception("Errore trascrizione voce chat: %s", e)
+        return jsonify({"ok": False, "reply": "⚠️ Errore durante la trascrizione audio. Riprova o scrivi il messaggio.", "saved": False})
+
+    if not transcribed:
+        return jsonify({"ok": False, "reply": "⚠️ Non sono riuscito a trascrivere l'audio. Parla più chiaramente o scrivi il messaggio.", "saved": False})
+
+    result, _usage, error_reply = _chat_parse_text(chat_id, transcribed)
+
+    user_text = f"🎤 {transcribed}"
+    try:
+        store.log_message(chat_id, source="webapp", role="user", text=user_text)
+    except Exception:
+        pass
+
+    if error_reply:
+        try:
+            store.log_message(chat_id, source="webapp", role="bot", text=error_reply)
+        except Exception:
+            pass
+        return jsonify({"ok": False, "type": "error", "reply": error_reply, "saved": False, "transcription": transcribed})
+
+    if result is None:
+        unknown_reply = "Non ho riconosciuto una transazione nel tuo messaggio vocale. Prova a descrivere la spesa più chiaramente."
+        try:
+            store.log_message(chat_id, source="webapp", role="bot", text=unknown_reply)
+        except Exception:
+            pass
+        return jsonify({"ok": True, "type": "unknown", "reply": unknown_reply, "saved": False, "transcription": transcribed})
+
+    reply, parsed = _build_parse_reply(result)
+    try:
+        store.log_message(chat_id, source="webapp", role="bot", text=reply, metadata=parsed)
+    except Exception:
+        pass
+
+    return jsonify({"ok": True, "type": parsed["type"], "parsed": parsed, "reply": reply, "saved": False, "transcription": transcribed})
+
+
+@app.route("/api/chat/photo", methods=["POST"])
+def api_chat_photo():
+    """Analizza un'immagine di scontrino via OCR e la processa come testo."""
+    import tempfile
+    from src.rate_limiter import is_rate_limited
+
+    chat_id, _ = _resolve_request_chat_id()
+    if not chat_id:
+        return jsonify({"error": "Unauthorized"}), 401
+
+    if is_rate_limited(chat_id, max_messages=Config.MAX_MESSAGES_PER_MINUTE):
+        return jsonify({"ok": False, "reply": "⏳ Troppi messaggi. Attendi qualche secondo.", "saved": False})
+
+    image_file = request.files.get("image")
+    if not image_file:
+        return jsonify({"error": "Immagine mancante"}), 400
+
+    ocr_text = ""
+    try:
+        from src.ocr_client import OcrClient, OCRError
+
+        with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp:
+            image_file.save(tmp.name)
+            tmp_path = tmp.name
+
+        try:
+            ocr_text = OcrClient().extract_text_from_image(tmp_path)
+        except OCRError:
+            return jsonify({"ok": False, "reply": "⚠️ Non riesco a leggere lo scontrino. Riprova con una foto più nitida e ben illuminata.", "saved": False})
+        finally:
+            try:
+                import os
+                os.unlink(tmp_path)
+            except Exception:
+                pass
+    except Exception as e:
+        logger.exception("Errore OCR chat: %s", e)
+        return jsonify({"ok": False, "reply": "⚠️ Errore durante l'analisi dell'immagine. Riprova.", "saved": False})
+
+    # 🛡️ Sanitizzazione testo OCR — rimuove Unicode pericolosi e rileva injection
+    from src.input_sanitizer import sanitize_ocr_text, InjectionDetectedError
+    try:
+        ocr_text = sanitize_ocr_text(ocr_text, chat_id)
+    except InjectionDetectedError:
+        store.logout_user(chat_id)
+        return jsonify({
+            "ok": False,
+            "reply": (
+                f"🚫 Comportamento malevolo rilevato. "
+                f"Il tuo account è stato disabilitato. "
+                f"Per chiarimenti scrivi a: {Config.SUPPORT_EMAIL}"
+            ),
+            "saved": False,
+            "banned": True,
+        })
+
+    result, _usage, error_reply = _chat_parse_text(chat_id, ocr_text, skip_length_check=True)
+
+    user_text = f"📷 {ocr_text[:200]}"
+    try:
+        store.log_message(chat_id, source="webapp", role="user", text=user_text)
+    except Exception:
+        pass
+
+    if error_reply:
+        try:
+            store.log_message(chat_id, source="webapp", role="bot", text=error_reply)
+        except Exception:
+            pass
+        return jsonify({"ok": False, "type": "error", "reply": error_reply, "saved": False})
+
+    if result is None:
+        unknown_reply = "⚠️ Ho letto il testo dello scontrino ma non ho riconosciuto una transazione. Prova a scrivere la spesa manualmente."
+        try:
+            store.log_message(chat_id, source="webapp", role="bot", text=unknown_reply)
+        except Exception:
+            pass
+        return jsonify({"ok": True, "type": "unknown", "reply": unknown_reply, "saved": False})
+
+    reply, parsed = _build_parse_reply(result)
+    try:
+        store.log_message(chat_id, source="webapp", role="bot", text=reply, metadata=parsed)
+    except Exception:
+        pass
+
+    return jsonify({"ok": True, "type": parsed["type"], "parsed": parsed, "reply": reply, "saved": False})
+
+
+@app.route("/api/chat/history", methods=["GET"])
+def api_chat_history():
+    """Ritorna la cronologia condivisa: messaggi da Telegram e web app + report."""
+    chat_id, _ = _resolve_request_chat_id()
+    if not chat_id:
+        return jsonify({"error": "Unauthorized"}), 401
+
+    limit = min(int(request.args.get("limit", 60)), 100)
+
+    try:
+        messages = store.get_chat_history(chat_id, limit=limit)
+
+        # Arricchisce con i report salvati (appaiono inline come messaggi bot)
+        try:
+            user = _get_user_by_chat_id(chat_id)
+            if user:
+                if user.storage_backend == "postgres":
+                    with store.Session() as s:
+                        pg = PostgresStorage(session=s, user_id=chat_id)
+                        reports = pg.get_reports_for_user(chat_id, limit=10)
+                else:
+                    storage = _build_financial_storage(user)
+                    reports = storage.get_reports_for_user(chat_id, limit=10)
+
+                for r in reports:
+                    messages.append({
+                        "id": f"report-{r.get('share_token', '')}",
+                        "source": "telegram",
+                        "role": "bot",
+                        "text": (r.get("text_content") or "")[:500] + ("…" if len(r.get("text_content") or "") > 500 else ""),
+                        "created_at": str(r.get("report_date") or r.get("created_at") or ""),
+                        "metadata": {
+                            "report_type": r.get("report_type"),
+                            "share_token": r.get("share_token"),
+                        },
+                    })
+
+                messages.sort(key=lambda m: m.get("created_at") or "", reverse=False)
+                messages = messages[-limit:]
+        except Exception:
+            pass  # i report sono opzionali
+
+        return jsonify({"messages": messages, "count": len(messages)})
+    except Exception as e:
+        logger.exception("Errore api_chat_history: %s", e)
+        return jsonify({"messages": [], "count": 0})
+
+
+# ---------------------------------------------------------------------------
 # API ANALYTICS — Telegram Mini App
 # ---------------------------------------------------------------------------
 import hmac
@@ -1972,6 +2471,111 @@ def api_auth_session():
     })
 
 
+# ---------------------------------------------------------------------------
+# Onboarding API
+# ---------------------------------------------------------------------------
+
+@app.route("/api/onboarding/status", methods=["GET"])
+def api_onboarding_status():
+    """Stato corrente del wizard di onboarding."""
+    chat_id, _ = _resolve_request_chat_id()
+    if not chat_id:
+        return jsonify({"authorized": False}), 401
+    prefs = store.get_user_preferences(chat_id)
+    return jsonify(prefs)
+
+
+@app.route("/api/onboarding/step", methods=["POST"])
+def api_onboarding_step():
+    """Salva i dati di uno step del wizard."""
+    chat_id, _ = _resolve_request_chat_id()
+    if not chat_id:
+        return jsonify({"error": "Unauthorized"}), 401
+    body = request.get_json(silent=True) or {}
+    step = body.get("step")
+    data = body.get("data", {})
+    if not step:
+        return jsonify({"error": "step required"}), 400
+    store.save_onboarding_progress(chat_id, step, data)
+    return jsonify({"status": "ok"})
+
+
+@app.route("/api/onboarding/generate-categories", methods=["POST"])
+def api_onboarding_generate_categories():
+    """Genera categorie personalizzate con Mistral Small in base al lifestyle."""
+    chat_id, _ = _resolve_request_chat_id()
+    if not chat_id:
+        return jsonify({"error": "Unauthorized"}), 401
+    body = request.get_json(silent=True) or {}
+    lifestyle = body.get("lifestyle", {})
+    try:
+        from src.mistral_client import MistralClient
+        client = MistralClient()
+        categories = client.generate_lifestyle_categories(lifestyle)
+    except Exception as e:
+        logger.warning("Errore generazione categorie onboarding: %s", e)
+        from src.workspace_bootstrapper import DEFAULT_CATEGORIES
+        categories = list(DEFAULT_CATEGORIES)
+    return jsonify({"categories": categories})
+
+
+@app.route("/api/onboarding/complete", methods=["POST"])
+def api_onboarding_complete():
+    """Finalizza l'onboarding: crea le categorie selezionate e segna come completato."""
+    chat_id, _ = _resolve_request_chat_id()
+    if not chat_id:
+        return jsonify({"error": "Unauthorized"}), 401
+    body = request.get_json(silent=True) or {}
+    selected_categories = body.get("selected_categories", [])
+
+    user = _get_user_by_chat_id(chat_id)
+    if not user:
+        return jsonify({"error": "User not found"}), 404
+
+    try:
+        if user.storage_backend == "postgres":
+            db_session = store.Session()
+            storage = PostgresStorage(session=db_session, user_id=chat_id)
+            created = bootstrap_lifestyle_categories(storage, selected_categories)
+            db_session.commit()
+        else:
+            from src.notion_client import NotionFinanceClient
+            from src.storage.notion_storage import NotionStorage
+            notion_client = NotionFinanceClient(
+                api_key=user.notion_access_token,
+                categories_db_id=user.categories_db_id,
+            )
+            storage = NotionStorage(notion_client)
+            created = bootstrap_lifestyle_categories(storage, selected_categories)
+    except Exception as e:
+        logger.error("Errore bootstrap lifestyle categories: %s", e)
+        created = []
+
+    store.complete_onboarding(chat_id)
+    return jsonify({"status": "ok", "categories_created": created})
+
+
+@app.route("/api/user/preferences", methods=["GET"])
+def api_user_preferences_get():
+    """Restituisce le preferenze utente."""
+    chat_id, _ = _resolve_request_chat_id()
+    if not chat_id:
+        return jsonify({"error": "Unauthorized"}), 401
+    return jsonify(store.get_user_preferences(chat_id))
+
+
+@app.route("/api/user/preferences", methods=["PUT"])
+def api_user_preferences_put():
+    """Aggiorna le preferenze utente."""
+    chat_id, _ = _resolve_request_chat_id()
+    if not chat_id:
+        return jsonify({"error": "Unauthorized"}), 401
+    body = request.get_json(silent=True) or {}
+    step = body.pop("step", "preferences_update")
+    store.save_onboarding_progress(chat_id, step, body)
+    return jsonify({"status": "ok"})
+
+
 def _month_label(year: int, month: int) -> str:
     return f"{month_abbr[month]} {str(year)[-2:]}"
 
@@ -1979,8 +2583,10 @@ def _month_label(year: int, month: int) -> str:
 def _start_date_for_months(months: int):
     from datetime import date
     today = date.today()
-    # torna all'inizio del mese N mesi fa
-    m = today.month - months
+    # Torna al primo giorno del mese, months-1 mesi indietro,
+    # così da includere esattamente `months` mesi (incluso il corrente).
+    offset = months - 1
+    m = today.month - offset
     y = today.year + m // 12
     m = m % 12
     if m <= 0:
@@ -2151,7 +2757,8 @@ def analytics_income():
     """Ritorna storico entrate mensili negli ultimi N mesi."""
     from flask import g
     plan_type = _get_user_plan_type(g.chat_id)
-    months = min(int(request.args.get("months", 6)), 6)
+    max_months = 24 if plan_type == "pro" else 6
+    months = min(int(request.args.get("months", 6)), max_months)
     start = _start_date_for_months(months)
     from datetime import date
     end = date.today()
@@ -2204,86 +2811,99 @@ def analytics_capital_trend():
     opening_balance + sum(income fino a quel mese) - sum(expenses fino a quel mese).
     """
     from flask import g
-    plan_type = _get_user_plan_type(g.chat_id)
-    max_months = 24 if plan_type == "pro" else 3
-    months = min(int(request.args.get("months", max_months)), max_months)
-    start = _start_date_for_months(months)
     from datetime import date
     end = date.today()
+
+    plan_type = _get_user_plan_type(g.chat_id)
+    max_months = 24 if plan_type == "pro" else 6
+    months = min(int(request.args.get("months", 6)), max_months)
+    view_start = _start_date_for_months(months)
 
     with store.Session() as s:
         storage = PostgresStorage(session=s, user_id=g.chat_id)
         accounts = storage.fetch_accounts()
-        transactions = storage.fetch_all_transactions(start, end)
-        incomes = storage.fetch_income(start, end)
+        # Fetch ALL data to calculate running balance correctly
+        transactions = storage.fetch_all_transactions(date(2000, 1, 1), end)
+        incomes = storage.fetch_income(date(2000, 1, 1), end)
 
-    # Calcola saldo iniziale aggregato (opening_balance di tutti i conti)
-    opening_total = sum(a.get("opening_balance", 0.0) or 0.0 for a in accounts)
-
-    # Prepara mappa conto -> opening_balance per il calcolo per-account
-    acc_opening = {a["name"]: (a.get("opening_balance", 0.0) or 0.0) for a in accounts}
-    acc_ids = {a["id"]: a["name"] for a in accounts}
-
-    # Aggrega entrate e uscite per mese e per conto
-    monthly_income_total: dict[tuple, float] = defaultdict(float)
-    monthly_expense_total: dict[tuple, float] = defaultdict(float)
-    monthly_income_by_acc: dict[tuple, dict[str, float]] = defaultdict(lambda: defaultdict(float))
-    monthly_expense_by_acc: dict[tuple, dict[str, float]] = defaultdict(lambda: defaultdict(float))
+    # Mappe di utilità
+    acc_id_to_name = {a["id"]: a["name"] for a in accounts}
+    acc_id_to_opening = {a["id"]: (a.get("opening_balance", 0.0) or 0.0) for a in accounts}
+    
+    # Aggrega entrate e uscite per (anno, mese) e per ID conto
+    # Usiamo None come chiave per le transazioni senza conto ("Altro")
+    monthly_income: dict[tuple, dict[int | None, float]] = defaultdict(lambda: defaultdict(float))
+    monthly_expense: dict[tuple, dict[int | None, float]] = defaultdict(lambda: defaultdict(float))
 
     for inc in incomes:
         d = inc["date"]
         key = (d.year, d.month)
-        monthly_income_total[key] += inc["amount"]
-        acc_name = acc_ids.get(inc.get("account_id"), "Altro")
-        monthly_income_by_acc[key][acc_name] += inc["amount"]
+        aid = inc.get("account_id")
+        monthly_income[key][aid] += inc["amount"]
 
     for t in transactions:
         d = t["date"]
         key = (d.year, d.month)
-        monthly_expense_total[key] += t["amount"]
-        acc_name = acc_ids.get(t.get("account_id"), "Altro")
-        monthly_expense_by_acc[key][acc_name] += t["amount"]
+        aid = t.get("account_id")
+        monthly_expense[key][aid] += t["amount"]
 
-    # Genera tutti i mesi nel range
-    all_keys = sorted(set(monthly_income_total) | set(monthly_expense_total))
+    # Inizializza i saldi correnti
+    running_totals: dict[int | None, float] = {aid: opening for aid, opening in acc_id_to_opening.items()}
+    running_totals[None] = 0.0 # Per transazioni senza conto associato
     
-    # Calcola saldo cumulativo per ogni mese
+    # Determina il mese di partenza (il primo con attività o view_start)
+    all_keys_with_activity = sorted(set(monthly_income.keys()) | set(monthly_expense.keys()))
+    if not all_keys_with_activity:
+        first_y, first_m = view_start.year, view_start.month
+    else:
+        first_y, first_m = all_keys_with_activity[0]
+        if date(first_y, first_m, 1) > view_start:
+            first_y, first_m = view_start.year, view_start.month
+
     capital_trend = []
-    by_account_trend: dict[str, list[dict]] = {name: [] for name in acc_opening}
     
-    running_totals = dict(acc_opening)  # per-account
-    running_total = opening_total       # aggregato
-
-    for key in all_keys:
-        y, m = key
-        label = _month_label(y, m)
+    curr_y, curr_m = first_y, first_m
+    while date(curr_y, curr_m, 1) <= end:
+        m_key = (curr_y, curr_m)
         
-        month_inc = monthly_income_total.get(key, 0.0)
-        month_exp = monthly_expense_total.get(key, 0.0)
-        running_total += month_inc - month_exp
+        # Aggiorna i saldi di TUTTI i conti (inclusi quelli con ID None)
+        # 1. Incomes
+        for aid, amount in monthly_income.get(m_key, {}).items():
+            running_totals[aid] = running_totals.get(aid, 0.0) + amount
+        # 2. Expenses
+        for aid, amount in monthly_expense.get(m_key, {}).items():
+            running_totals[aid] = running_totals.get(aid, 0.0) - amount
+        
+        # Se siamo nel range di visualizzazione, aggiungi ai risultati
+        if date(curr_y, curr_m, 1) >= view_start:
+            total_balance = sum(running_totals.values())
+            entry = {
+                "month": _month_label(curr_y, curr_m),
+                "total": round(total_balance, 2)
+            }
+            # Se Pro, aggiungiamo i dettagli per account (mappando ID -> Nome)
+            if plan_type == "pro":
+                for aid, bal in running_totals.items():
+                    if aid is not None:
+                        name = acc_id_to_name.get(aid, f"Conto {aid}")
+                        entry[name] = round(bal, 2)
+                    elif abs(bal) > 0.01:
+                        # Mostra "Altro" solo se ha un saldo significativo
+                        entry["Altro"] = round(bal, 2)
+            
+            capital_trend.append(entry)
+            
+        # Avanza al mese successivo
+        curr_m += 1
+        if curr_m > 12:
+            curr_m = 1
+            curr_y += 1
 
-        capital_trend.append({
-            "month": label,
-            "total": round(running_total, 2),
-        })
-
-        # Per-account (solo Pro)
-        if plan_type == "pro":
-            for acc_name in acc_opening:
-                inc_acc = monthly_income_by_acc.get(key, {}).get(acc_name, 0.0)
-                exp_acc = monthly_expense_by_acc.get(key, {}).get(acc_name, 0.0)
-                running_totals[acc_name] += inc_acc - exp_acc
-                by_account_trend[acc_name].append({
-                    "month": label,
-                    "account": acc_name,
-                    "balance": round(running_totals[acc_name], 2),
-                })
-
-    result = {"capital_trend": capital_trend, "plan_type": plan_type}
-    if plan_type == "pro":
-        result["by_account"] = [v for v in by_account_trend.values() if v]
-    
-    return jsonify(result)
+    return jsonify({
+        "capital_trend": capital_trend,
+        "plan_type": plan_type,
+        "accounts": [a["name"] for a in accounts] if plan_type == "pro" else []
+    })
 
 
 @app.route("/api/analytics/budget-status")
@@ -2436,10 +3056,11 @@ def analytics_transactions():
             "amount": round(t["amount"], 2),
             "category": cat,
             "account": acc_name,
+            "created_at": t.get("created_at") or "",
         })
 
-    # Ordina per data decrescente
-    enriched.sort(key=lambda x: x["date"], reverse=True)
+    # Ordina per data decrescente, a parità di data dalla più recente (created_at desc)
+    enriched.sort(key=lambda x: (x["date"], x["created_at"]), reverse=True)
     
     total_count = len(enriched)
     total_amount = round(sum(e["amount"] for e in enriched), 2)

@@ -161,3 +161,33 @@ def bootstrap_workspace(storage: FinancialStorage) -> BootstrapResult:
         len(subscriptions_created),
     )
     return result
+
+
+def bootstrap_lifestyle_categories(
+    storage: FinancialStorage,
+    selected_categories: list[str],
+) -> list[str]:
+    """Crea le categorie selezionate dall'utente nel wizard di onboarding.
+
+    Idempotente: verifica le categorie esistenti prima di creare per evitare duplicati.
+
+    Args:
+        storage: implementazione di FinancialStorage dell'utente
+        selected_categories: lista di nomi categoria approvati dall'utente
+
+    Returns:
+        Lista dei nomi effettivamente creati (esclusi i duplicati già esistenti)
+    """
+    created: list[str] = []
+    try:
+        existing = {name.lower() for name in storage.get_category_names()}
+        for name in selected_categories:
+            if name.lower() not in existing:
+                storage.create_category(name)
+                created.append(name)
+                existing.add(name.lower())
+                logger.info("[Bootstrap lifestyle] Categoria creata: %s", name)
+    except Exception as e:
+        logger.error("[Bootstrap lifestyle] Errore creazione categorie: %s", e)
+    logger.info("[Bootstrap lifestyle] Completato — categorie create: %d", len(created))
+    return created
