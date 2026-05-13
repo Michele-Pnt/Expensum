@@ -80,7 +80,19 @@ class User(Base):
 
     # Dashboard pinnata in chat Telegram
     pinned_dashboard_msg_id = Column(BigInteger, nullable=True)
-    
+
+    # Preferenze utente
+    preferred_language = Column(String, default='it', nullable=False)
+    currency = Column(String, default='EUR', nullable=False)
+    timezone = Column(String, default='Europe/Rome', nullable=False)
+    lifestyle_json = Column(Text, nullable=True)
+    monthly_budget = Column(Float, nullable=True)
+    notification_time = Column(String, default='08:00')
+    notifications_enabled = Column(Boolean, default=True)
+
+    # Stato wizard onboarding
+    onboarding_step = Column(String, default='pending')
+    onboarding_completed_at = Column(DateTime, nullable=True)
 
     def __repr__(self):
         return f"<User(chat_id={self.chat_id}, username='{self.username}')>"
@@ -513,6 +525,64 @@ class UserStore:
             user.setup_status = "DONE"
             user.setup_completed_at = datetime.utcnow()
             session.commit()
+
+    def save_onboarding_progress(self, chat_id: str, step: str, data: dict) -> None:
+        """Salva lo step corrente e mappa i dati ai campi utente corrispondenti."""
+        chat_id = str(chat_id)
+        with self.Session() as session:
+            user = session.query(User).filter(User.chat_id == chat_id).first()
+            if not user:
+                return
+            user.onboarding_step = step
+            if 'language' in data:
+                user.preferred_language = data['language']
+            if 'currency' in data:
+                user.currency = data['currency']
+            if 'timezone' in data:
+                user.timezone = data['timezone']
+            if any(k in data for k in ('transport', 'dining', 'hobbies')):
+                current = json.loads(user.lifestyle_json) if user.lifestyle_json else {}
+                for key in ('transport', 'dining', 'hobbies'):
+                    if key in data:
+                        current[key] = data[key]
+                user.lifestyle_json = json.dumps(current)
+            if 'budget' in data:
+                user.monthly_budget = data['budget']
+            if 'notification_time' in data:
+                user.notification_time = data['notification_time']
+            if 'notifications_enabled' in data:
+                user.notifications_enabled = data['notifications_enabled']
+            session.commit()
+
+    def complete_onboarding(self, chat_id: str) -> None:
+        """Marca l'onboarding come completato con timestamp."""
+        chat_id = str(chat_id)
+        with self.Session() as session:
+            user = session.query(User).filter(User.chat_id == chat_id).first()
+            if not user:
+                return
+            user.onboarding_completed_at = datetime.utcnow()
+            user.onboarding_step = 'completed'
+            session.commit()
+
+    def get_user_preferences(self, chat_id: str) -> dict:
+        """Restituisce le preferenze utente come dizionario."""
+        chat_id = str(chat_id)
+        with self.Session() as session:
+            user = session.query(User).filter(User.chat_id == chat_id).first()
+            if not user:
+                return {}
+            return {
+                'preferred_language': user.preferred_language,
+                'currency': user.currency,
+                'timezone': user.timezone,
+                'lifestyle': json.loads(user.lifestyle_json) if user.lifestyle_json else {},
+                'monthly_budget': user.monthly_budget,
+                'notification_time': user.notification_time,
+                'notifications_enabled': user.notifications_enabled,
+                'onboarding_step': user.onboarding_step,
+                'onboarding_completed_at': user.onboarding_completed_at.isoformat() if user.onboarding_completed_at else None,
+            }
 
     def set_credentials(self, chat_id: str, email: str, password: str) -> None:
         """Salva email e hash bcrypt della password per un utente."""

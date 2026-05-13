@@ -313,6 +313,65 @@ class MistralClient:
         logger.info(f"Piano mensile Mistral ricevuto: {len(raw_text)} caratteri")
         return raw_text.strip(), usage
 
+    def generate_lifestyle_categories(self, lifestyle: dict) -> list[str]:
+        """Suggerisce categorie di spesa personalizzate basandosi sul profilo lifestyle.
+
+        Privacy: al modello si invia solo il dizionario lifestyle anonimo — nessun dato
+        personale, nessun user_id, nessuno storico finanziario.
+
+        Args:
+            lifestyle: dizionario anonimo, es. {"transport": "auto", "dining": "spesso",
+                       "hobbies": ["palestra", "streaming"]}
+        Returns:
+            Lista di 10-20 nomi di categoria. Fallback su DEFAULT_CATEGORIES se la
+            risposta non è JSON valido o Mistral non risponde.
+        """
+        from src.workspace_bootstrapper import DEFAULT_CATEGORIES
+
+        baseline = ", ".join(DEFAULT_CATEGORIES)
+        lifestyle_text = ", ".join(
+            f"{k}: {v if not isinstance(v, list) else ', '.join(v)}"
+            for k, v in lifestyle.items()
+        )
+
+        prompt = (
+            "Sei un esperto di finanza personale. Devi suggerire categorie di spesa "
+            "personalizzate per un utente in base al suo stile di vita.\n\n"
+            f"Stile di vita: {lifestyle_text}\n\n"
+            f"Categorie standard di partenza: {baseline}\n\n"
+            "Restituisci SOLO un array JSON con 10-20 nomi di categoria in italiano, "
+            "personalizzato in base allo stile di vita sopra. Includi le categorie "
+            "standard rilevanti e aggiungine di specifiche per questo profilo. "
+            "Esempio: [\"Alimentari\", \"Ristoranti\", \"Auto & Carburante\"]\n\n"
+            "IMPORTANTE: rispondi solo con l'array JSON, nessun testo aggiuntivo."
+        )
+
+        logger.info(
+            "Generazione categorie lifestyle con Mistral (%s)", Config.MISTRAL_SMALL_MODEL
+        )
+
+        try:
+            response = self._client.chat.complete(
+                model=Config.MISTRAL_SMALL_MODEL,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.3,
+                max_tokens=512,
+            )
+            raw = response.choices[0].message.content or ""
+            # Estrai il JSON dall'eventuale testo circostante
+            start = raw.find('[')
+            end = raw.rfind(']')
+            if start != -1 and end != -1:
+                import json as _json
+                categories = _json.loads(raw[start:end + 1])
+                if isinstance(categories, list) and categories:
+                    logger.info("Categorie lifestyle generate: %d", len(categories))
+                    return [str(c) for c in categories]
+        except Exception as e:
+            logger.warning("Errore generazione categorie lifestyle: %s — uso default", e)
+
+        return list(DEFAULT_CATEGORIES)
+
 
 _WEEKLY_PLAN_PROMPT_TEMPLATE = """
 Sei un Coach Finanziario Personale specializzato in finanza quotidiana.

@@ -23,7 +23,7 @@ from src.user_store import UserStore, User, LlmUsageEvent, LlmPricing, DailyMetr
 from src.notion_client import NotionFinanceClient
 from src.storage.notion_storage import NotionStorage
 from src.storage.postgres_storage import PostgresStorage
-from src.workspace_bootstrapper import bootstrap_workspace
+from src.workspace_bootstrapper import bootstrap_workspace, bootstrap_lifestyle_categories
 from src.category_sync import refresh_category_averages
 from src.dashboard_message import build_dashboard_text
 
@@ -63,13 +63,15 @@ def _build_setup_redirect(chat_id: str) -> str:
 
 
 def _resolve_authenticated_redirect(chat_id: str) -> str:
-    """Instrada un utente autenticato verso setup o home app."""
+    """Instrada un utente autenticato verso setup, onboarding o home app."""
     user = _get_user_by_chat_id(chat_id)
     if not user:
         session.clear()
         return url_for("web_login")
     if user.setup_completed_at is None:
         return _build_setup_redirect(chat_id)
+    if user.onboarding_completed_at is None:
+        return "/onboarding"
     return "/chat"
 
 
@@ -759,7 +761,7 @@ def _process_oauth_background(
             _tg(report_msg)
             return
 
-        report_msg = "🎊 <b>TRAKY È PRONTO ALL'AZIONE!</b>\n\nHo scansionato il tuo Notion e collegato i database:\n"
+        report_msg = "🎊 <b>MONEO È PRONTO!</b>\n\nHo scansionato il tuo Notion e collegato i database:\n"
         if not discovered:
             report_msg += (
                 "⚠️ <b>Attenzione</b>: Non ho trovato i database standard (Spese, Entrate, ecc.). "
@@ -770,26 +772,21 @@ def _process_oauth_background(
             for key in discovered:
                 db_name = key.replace("_db_id", "").capitalize()
                 report_msg += f"✅ {db_name}\n"
+
+            # Marca il setup tecnico come completato — l'onboarding delle preferenze
+            # avviene nel wizard web/Telegram (non nel setup_miniapp, che resta opzionale)
+            store.mark_setup_completed(chat_id)
+
             report_msg += (
-                "\n\n👇 <b>Inizia a usare Moneo configurando il tuo spazio:</b>\n"
-                "1️⃣ Clicca sul pulsante qui sotto.\n"
-                "2️⃣ Aggiungi i tuoi <b>Conti</b> (es. Conto Corrente, Contanti) e imposta il saldo iniziale.\n"
-                "3️⃣ Personalizza le tue <b>Categorie</b> di spesa ed eventuali budget.\n"
-                "4️⃣ Inserisci i tuoi <b>Abbonamenti</b> per tenerne traccia automaticamente."
+                "\n\n🎉 Ora completa il tuo profilo per personalizzare Moneo!\n"
+                "Apri la webapp e segui il wizard di configurazione, oppure scrivi "
+                "<b>/impostazioni</b> qui in chat."
             )
-            reg_token_miniapp = store.create_oauth_session(chat_id)
-            miniapp_url = f"{Config.WEBAPP_BASE_URL}/setup?reg_token={reg_token_miniapp}"
             try:
                 requests.post(telegram_url, json={
                     "chat_id": chat_id,
                     "text": report_msg,
                     "parse_mode": "HTML",
-                    "reply_markup": {
-                        "inline_keyboard": [[{
-                            "text": "⚙️ Configura il tuo spazio",
-                            "web_app": {"url": miniapp_url}
-                        }]]
-                    }
                 })
             except Exception as tg_err:
                 print(f"[OAuth-bg] Errore invio messaggio finale: {tg_err}")
@@ -2472,6 +2469,111 @@ def api_auth_session():
         "chat_id": chat_id,
         "redirect_to": None if redirect_to == "/chat" else redirect_to,
     })
+
+
+# ---------------------------------------------------------------------------
+# Onboarding API
+# ---------------------------------------------------------------------------
+
+@app.route("/api/onboarding/status", methods=["GET"])
+def api_onboarding_status():
+    """Stato corrente del wizard di onboarding."""
+    chat_id, _ = _resolve_request_chat_id()
+    if not chat_id:
+        return jsonify({"authorized": False}), 401
+    prefs = store.get_user_preferences(chat_id)
+    return jsonify(prefs)
+
+
+@app.route("/api/onboarding/step", methods=["POST"])
+def api_onboarding_step():
+    """Salva i dati di uno step del wizard."""
+    chat_id, _ = _resolve_request_chat_id()
+    if not chat_id:
+        return jsonify({"error": "Unauthorized"}), 401
+    body = request.get_json(silent=True) or {}
+    step = body.get("step")
+    data = body.get("data", {})
+    if not step:
+        return jsonify({"error": "step required"}), 400
+    store.save_onboarding_progress(chat_id, step, data)
+    return jsonify({"status": "ok"})
+
+
+@app.route("/api/onboarding/generate-categories", methods=["POST"])
+def api_onboarding_generate_categories():
+    """Genera categorie personalizzate con Mistral Small in base al lifestyle."""
+    chat_id, _ = _resolve_request_chat_id()
+    if not chat_id:
+        return jsonify({"error": "Unauthorized"}), 401
+    body = request.get_json(silent=True) or {}
+    lifestyle = body.get("lifestyle", {})
+    try:
+        from src.mistral_client import MistralClient
+        client = MistralClient()
+        categories = client.generate_lifestyle_categories(lifestyle)
+    except Exception as e:
+        logger.warning("Errore generazione categorie onboarding: %s", e)
+        from src.workspace_bootstrapper import DEFAULT_CATEGORIES
+        categories = list(DEFAULT_CATEGORIES)
+    return jsonify({"categories": categories})
+
+
+@app.route("/api/onboarding/complete", methods=["POST"])
+def api_onboarding_complete():
+    """Finalizza l'onboarding: crea le categorie selezionate e segna come completato."""
+    chat_id, _ = _resolve_request_chat_id()
+    if not chat_id:
+        return jsonify({"error": "Unauthorized"}), 401
+    body = request.get_json(silent=True) or {}
+    selected_categories = body.get("selected_categories", [])
+
+    user = _get_user_by_chat_id(chat_id)
+    if not user:
+        return jsonify({"error": "User not found"}), 404
+
+    try:
+        if user.storage_backend == "postgres":
+            db_session = store.Session()
+            storage = PostgresStorage(session=db_session, user_id=chat_id)
+            created = bootstrap_lifestyle_categories(storage, selected_categories)
+            db_session.commit()
+        else:
+            from src.notion_client import NotionFinanceClient
+            from src.storage.notion_storage import NotionStorage
+            notion_client = NotionFinanceClient(
+                api_key=user.notion_access_token,
+                categories_db_id=user.categories_db_id,
+            )
+            storage = NotionStorage(notion_client)
+            created = bootstrap_lifestyle_categories(storage, selected_categories)
+    except Exception as e:
+        logger.error("Errore bootstrap lifestyle categories: %s", e)
+        created = []
+
+    store.complete_onboarding(chat_id)
+    return jsonify({"status": "ok", "categories_created": created})
+
+
+@app.route("/api/user/preferences", methods=["GET"])
+def api_user_preferences_get():
+    """Restituisce le preferenze utente."""
+    chat_id, _ = _resolve_request_chat_id()
+    if not chat_id:
+        return jsonify({"error": "Unauthorized"}), 401
+    return jsonify(store.get_user_preferences(chat_id))
+
+
+@app.route("/api/user/preferences", methods=["PUT"])
+def api_user_preferences_put():
+    """Aggiorna le preferenze utente."""
+    chat_id, _ = _resolve_request_chat_id()
+    if not chat_id:
+        return jsonify({"error": "Unauthorized"}), 401
+    body = request.get_json(silent=True) or {}
+    step = body.pop("step", "preferences_update")
+    store.save_onboarding_progress(chat_id, step, body)
+    return jsonify({"status": "ok"})
 
 
 def _month_label(year: int, month: int) -> str:
