@@ -12,7 +12,6 @@ if (fs.existsSync(envPath)) {
 }
 
 const nextConfig: NextConfig = {
-  // @ts-expect-error - Proprietà supportata solo in alcune versioni di Next.js/Turbopack
   allowedDevOrigins: ngrokHost ? [ngrokHost, "*.ngrok-free.app"] : ["*.ngrok-free.app"],
   async rewrites() {
     return [

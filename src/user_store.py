@@ -9,6 +9,7 @@ import secrets
 import string
 from decimal import Decimal, ROUND_HALF_UP
 from typing import Optional
+import json
 from sqlalchemy import (
     Column,
     String,
@@ -19,6 +20,7 @@ from sqlalchemy import (
     Date,
     ForeignKey,
     Float,
+    Text,
     UniqueConstraint,
     func,
     create_engine,
@@ -181,7 +183,20 @@ class LlmUsageEvent(Base):
     estimated_cost_currency = Column(String, nullable=False, default="USD")
     request_key = Column(String, nullable=False, unique=True)
     reservation_id = Column(Integer, ForeignKey("llm_token_reservations.id"), nullable=True)
-    
+
+
+class ChatMessage(Base):
+    __tablename__ = "chat_messages"
+
+    id            = Column(Integer, primary_key=True, autoincrement=True)
+    chat_id       = Column(String, ForeignKey("users.chat_id"), nullable=False, index=True)
+    source        = Column(String, nullable=False)   # 'telegram' | 'webapp'
+    role          = Column(String, nullable=False)   # 'user' | 'bot'
+    text          = Column(Text, nullable=False)
+    metadata_json = Column(Text, nullable=True)      # JSON: dati transazione parsata
+    created_at    = Column(DateTime, default=datetime.utcnow, index=True)
+
+
 # 5. IL MANAGER DEL DATABASE
 class UserStore:
     def __init__(self, db_url="sqlite:///users.db"):
@@ -1279,3 +1294,50 @@ class UserStore:
                 logger.info("[Ledger] %s reservation scadute marcate come expired.", count)
             return count
 
+    def log_message(
+        self,
+        chat_id: str,
+        source: str,
+        role: str,
+        text: str,
+        metadata: dict | None = None,
+    ) -> int:
+        """Salva un messaggio nella cronologia condivisa. Ritorna l'id del record creato."""
+        with self.Session() as session:
+            msg = ChatMessage(
+                chat_id=str(chat_id),
+                source=source,
+                role=role,
+                text=text,
+                metadata_json=json.dumps(metadata, default=str) if metadata else None,
+            )
+            session.add(msg)
+            session.commit()
+            return msg.id
+
+    def get_chat_history(self, chat_id: str, limit: int = 60) -> list[dict]:
+        """Ritorna gli ultimi `limit` messaggi della cronologia, in ordine cronologico asc."""
+        with self.Session() as session:
+            rows = (
+                session.query(ChatMessage)
+                .filter(ChatMessage.chat_id == str(chat_id))
+                .order_by(ChatMessage.created_at.desc())
+                .limit(limit)
+                .all()
+            )
+        result = []
+        for r in reversed(rows):
+            entry: dict = {
+                "id": r.id,
+                "source": r.source,
+                "role": r.role,
+                "text": r.text,
+                "created_at": r.created_at.isoformat() if r.created_at else None,
+            }
+            if r.metadata_json:
+                try:
+                    entry["metadata"] = json.loads(r.metadata_json)
+                except Exception:
+                    pass
+            result.append(entry)
+        return result

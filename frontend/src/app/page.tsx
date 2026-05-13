@@ -85,6 +85,7 @@ const FOR_WHO = [
 
 export default function LandingPage() {
   const [scrolled, setScrolled] = useState(false);
+  const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
 
   useEffect(() => {
     const onScroll = () => setScrolled(window.scrollY > 20);
@@ -97,18 +98,24 @@ export default function LandingPage() {
       (entries) => {
         entries.forEach((e) => {
           if (e.isIntersecting) {
-            (e.target as HTMLElement).classList.add("revealed");
+            const el = e.target as HTMLElement;
+            const delay = el.dataset.delay ?? "0";
+            setTimeout(() => el.classList.add("revealed"), Number(delay));
             io.unobserve(e.target);
           }
         });
       },
-      { threshold: 0.12 }
+      { threshold: 0.10 }
     );
-    document.querySelectorAll("[data-reveal]").forEach((el) => io.observe(el));
+    const selectors = ["[data-reveal]", "[data-reveal-left]", "[data-reveal-right]", "[data-reveal-scale]"];
+    selectors.forEach((sel) =>
+      document.querySelectorAll(sel).forEach((el) => io.observe(el))
+    );
     return () => io.disconnect();
   }, []);
 
   const scrollToSection = (id: string) => {
+    setMobileMenuOpen(false);
     document.getElementById(id)?.scrollIntoView({ behavior: "smooth" });
   };
 
@@ -139,10 +146,31 @@ export default function LandingPage() {
               rel="noopener noreferrer"
               className={styles.btnPrimary}
             >
-              Apri su Telegram
+              Accedi su Telegram
             </a>
+            {/* Hamburger — solo mobile */}
+            <button
+              className={styles.hamburger}
+              onClick={() => setMobileMenuOpen((o) => !o)}
+              aria-label="Menu"
+            >
+              <span className={`${styles.hamburgerLine} ${mobileMenuOpen ? styles.hamburgerLineOpen1 : ""}`} />
+              <span className={`${styles.hamburgerLine} ${mobileMenuOpen ? styles.hamburgerLineOpen2 : ""}`} />
+              <span className={`${styles.hamburgerLine} ${mobileMenuOpen ? styles.hamburgerLineOpen3 : ""}`} />
+            </button>
           </div>
         </div>
+        {/* Mobile dropdown — solo link di navigazione */}
+        {mobileMenuOpen && (
+          <div className={styles.mobileMenu}>
+            <button className={styles.mobileMenuLink} onClick={() => scrollToSection("come-funziona")}>
+              Come funziona
+            </button>
+            <button className={styles.mobileMenuLink} onClick={() => scrollToSection("prezzi")}>
+              Prezzi
+            </button>
+          </div>
+        )}
       </nav>
 
       <main>
@@ -165,7 +193,7 @@ export default function LandingPage() {
                   rel="noopener noreferrer"
                   className={styles.btnPrimary}
                 >
-                  Apri su Telegram →
+                  Accedi su Telegram →
                 </a>
                 <button
                   className={styles.btnGhost}
@@ -176,49 +204,13 @@ export default function LandingPage() {
               </div>
             </div>
 
-            <div className={styles.heroRight}>
-              <div className={styles.deviceFrame}>
-                <div className={styles.deviceBar}>
-                  <span className={styles.deviceDot} />
-                  <span className={styles.deviceDot} />
-                  <span className={styles.deviceDot} />
-                  <span className={styles.deviceUrl}>expensum.it/analytics</span>
-                </div>
-                <div className={styles.deviceScreen}>
-                  {/* Dashboard preview mockup */}
-                  <div className={styles.mockHeader}>
-                    <span className={styles.mockGreeting}>Buongiorno, Michele</span>
-                    <span className={styles.mockBadge}>Premium</span>
-                  </div>
-                  <div className={styles.mockStats}>
-                    <div className={styles.mockStat}>
-                      <span className={styles.mockStatLabel}>Spese questo mese</span>
-                      <span className={styles.mockStatValue}>€ 1.240</span>
-                    </div>
-                    <div className={styles.mockStat}>
-                      <span className={styles.mockStatLabel}>Risparmio</span>
-                      <span className={styles.mockStatValueGold}>+ € 380</span>
-                    </div>
-                  </div>
-                  <div className={styles.mockChart}>
-                    {[65, 80, 45, 90, 60, 75, 50].map((h, i) => (
-                      <div key={i} className={styles.mockBar} style={{ height: `${h}%` }} />
-                    ))}
-                  </div>
-                  <div className={styles.mockCategories}>
-                    {["Spesa", "Ristoranti", "Trasporti", "Svago"].map((c, i) => (
-                      <div key={i} className={styles.mockCategoryRow}>
-                        <span className={styles.mockCategoryName}>{c}</span>
-                        <div className={styles.mockCategoryBar}>
-                          <div
-                            className={styles.mockCategoryFill}
-                            style={{ width: `${[70, 45, 30, 20][i]}%` }}
-                          />
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                </div>
+            <div className={styles.heroRight} id="hero-right">
+              <div className={styles.heroMascotWrap} id="hero-mascot">
+                <img
+                  src="/moneo/Moneo-base.png"
+                  alt="Moneo, il tuo assistente finanziario"
+                  className={styles.heroMascotImg}
+                />
               </div>
             </div>
           </div>
@@ -242,7 +234,12 @@ export default function LandingPage() {
             </div>
             <div className={styles.forWhoList}>
               {FOR_WHO.map((item, i) => (
-                <div key={i} className={styles.forWhoItem} data-reveal>
+                <div
+                  key={i}
+                  className={styles.forWhoItem}
+                  data-reveal-left=""
+                  data-delay={i * 120}
+                >
                   <span className={styles.forWhoNum}>0{i + 1}</span>
                   <div>
                     <strong className={styles.forWhoTitle}>{item.title}</strong>
@@ -263,6 +260,13 @@ export default function LandingPage() {
               <br />
               <span className={styles.h2Muted}>niente di superfluo.</span>
             </h2>
+            <div className={styles.featureIllustration} data-reveal-scale="">
+              <img
+                src="/moneo/Moneo-AI-powered.png"
+                alt="Moneo categorizza e analizza le tue spese con AI"
+                className={styles.featureIllustrationImg}
+              />
+            </div>
             <div className={styles.featureGrid} data-reveal>
               {FEATURES.map((f, i) => (
                 <div key={i} className={styles.featureCard}>
@@ -284,13 +288,22 @@ export default function LandingPage() {
               Come funziona.<br />Semplice e veloce.
             </h2>
 
+            <div className={styles.useCaseVisual} data-reveal-scale="">
+              <img
+                src="/moneo/Expensum-use-case.png"
+                alt="Fotografa lo scontrino, Expensum lo registra in automatico"
+                className={styles.useCaseImg}
+              />
+            </div>
+
             <div className={styles.timeline}>
               <div className={styles.timelineLine} />
               {HOW_STEPS.map((step, i) => (
                 <div
                   key={i}
                   className={`${styles.timelineRow} ${i % 2 === 1 ? styles.timelineRowRight : ""}`}
-                  data-reveal
+                  {...(i % 2 === 0 ? { "data-reveal-left": "" } : { "data-reveal-right": "" })}
+                  data-delay={i * 100}
                 >
                   <div className={styles.timelineCard}>
                     <div className={styles.timelineStep}>{i + 1}</div>
@@ -302,6 +315,40 @@ export default function LandingPage() {
                   </div>
                 </div>
               ))}
+            </div>
+          </div>
+        </section>
+
+        {/* ── Trust strip ── */}
+        <section className={styles.trustSection}>
+          <div className={styles.sectionInner}>
+            <div className={styles.trustGrid}>
+              <div className={styles.trustCard} data-reveal-left="">
+                <div className={styles.trustCardImgWrap}>
+                  <img
+                    src="/moneo/Moneo-money-helper.png"
+                    alt="Analytics e portfolio growth"
+                    className={styles.trustCardImg}
+                  />
+                </div>
+                <div className={styles.trustCardText}>
+                  <strong>Dashboard sempre aggiornata</strong>
+                  <span>Grafici, trend e previsioni mensili. I tuoi dati finanziari in un colpo d&apos;occhio.</span>
+                </div>
+              </div>
+              <div className={styles.trustCard} data-reveal-right="">
+                <div className={styles.trustCardImgWrap}>
+                  <img
+                    src="/moneo/Moneo-secure.png"
+                    alt="I tuoi dati sono al sicuro"
+                    className={styles.trustCardImg}
+                  />
+                </div>
+                <div className={styles.trustCardText}>
+                  <strong>I tuoi dati al sicuro</strong>
+                  <span>Sincronizzazione protetta su Notion. Nessun dato finanziario condiviso con terze parti.</span>
+                </div>
+              </div>
             </div>
           </div>
         </section>
@@ -418,7 +465,7 @@ export default function LandingPage() {
           </div>
           <div className={styles.footerCol}>
             <p className={styles.footerColTitle}>Per iniziare</p>
-            <a href="https://t.me/ExspensumBot" target="_blank" rel="noopener noreferrer" className={styles.footerGridLink}>Apri su Telegram</a>
+            <a href="https://t.me/ExspensumBot" target="_blank" rel="noopener noreferrer" className={styles.footerGridLink}>Accedi su Telegram</a>
             <a href="#prezzi" className={styles.footerGridLink}>Piano Free</a>
             <a href="#prezzi" className={styles.footerGridLink}>Piano Premium</a>
             <a href="/login" className={styles.footerGridLink}>Accedi alla web app</a>

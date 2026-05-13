@@ -3,10 +3,14 @@ src/notion_client.py — Estrazione dati dal database Notion delle spese.
 
 Compatibile con notion-client v3 + Notion API 2025-09-03.
 
-Gestisce tre database:
+Gestisce sette database:
   1. Expense — transazioni di spesa
-  2. Categories — mappa categorieID → nome
-  3. Monthly Balance — "Risparmio Netto" mensile certificato (formula)
+  2. Income — entrate
+  3. Categories — mappa categorieID → nome
+  4. Monthly Balance — "Risparmio Netto" mensile certificato (formula)
+  5. Accounts — conti bancari e carte
+  6. Subscriptions — abbonamenti ricorrenti
+  7. Pay/Transfer — trasferimenti tra conti
 
 Approccio per le categorie:
   - Pre-carica TUTTO il database Categories in una dict {page_id → name}
@@ -751,6 +755,7 @@ class NotionFinanceClient:
             category_name = sel.get("name", "Senza categoria") if sel else "Senza categoria"
 
         return {
+            "id": page.get("id", ""),
             "date": tx_date, 
             "category": category_name, 
             "category_average": category_average,
@@ -1080,7 +1085,13 @@ class NotionFinanceClient:
         income_type_val = income_type_prop.get("select") or {}
         income_type = income_type_val.get("name")
 
-        return {"date": tx_date, "name": name, "amount": amount, "income_type": income_type}
+        return {
+            "id": page.get("id", ""),
+            "date": tx_date, 
+            "name": name, 
+            "amount": amount, 
+            "income_type": income_type
+        }
 
     # ------------------------------------------------------------------
     # Fetch Accounts
@@ -1596,8 +1607,6 @@ class NotionFinanceClient:
                                 name = rt[0].get("plain_text", "")
                                 if name.lower() == category_name.lower():
                                     return page_id
-                                if category_name.lower() in name.lower() or name.lower() in category_name.lower():
-                                    return page_id
                 has_more = resp.get("has_more", False)
                 cursor = resp.get("next_cursor")
         except Exception as e:
@@ -1800,8 +1809,8 @@ class NotionFinanceClient:
     # Write: creazione elementi setup (accounts/categories/subscriptions)
     # ------------------------------------------------------------------
     def create_account(self, account_name: str,
-                       initial_amount: float = None,
-                       account_type: str = None) -> dict:
+                       initial_amount: float | None = None,
+                       account_type: str | None = None) -> dict:
         """Crea un conto nel database Accounts usando la title property corretta."""
         if not self.accounts_db_id:
             raise ValueError("Accounts database non configurato")
@@ -1844,11 +1853,11 @@ class NotionFinanceClient:
         )
 
     def create_subscription(self, subscription_name: str,
-                            sub_type: str = None,
-                            amount: float = None,
-                            category_id: str = None,
-                            account_id: str = None,
-                            last_billed: str = None) -> dict:
+                            sub_type: str | None = None,
+                            amount: float | None = None,
+                            category_id: str | None = None,
+                            account_id: str | None = None,
+                            last_billed: str | None = None) -> dict:
         """Crea un abbonamento nel database Subscriptions usando la title property corretta."""
         if not self.subscriptions_db_id:
             raise ValueError("Subscriptions database non configurato")

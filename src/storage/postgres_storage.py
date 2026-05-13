@@ -186,11 +186,13 @@ class PostgresStorage(FinancialStorage):
         ).all()
         return [
             {
+                "id": exp.id,
                 "date": exp.expense_date,
                 "amount": exp.amount,
                 "name": exp.name,
                 "category": cat.name if cat else (exp.category_name or ""),
                 "account_id": exp.account_id,
+                "created_at": exp.created_at.isoformat() if exp.created_at else None,
             }
             for exp, cat in rows
         ]
@@ -239,6 +241,7 @@ class PostgresStorage(FinancialStorage):
         ).all()
         return [
             {
+                "id": r.id,
                 "date": r.income_date,
                 "amount": r.amount,
                 "name": r.name,
@@ -333,12 +336,23 @@ class PostgresStorage(FinancialStorage):
         """
         return None
 
+    def _month_trunc_sql(self, date_col: str) -> str:
+        """Ritorna l'espressione SQL per troncare una data al primo del mese, dialect-aware."""
+        dialect = self._session.get_bind().dialect.name
+        if dialect == "postgresql":
+            return f"TO_CHAR(DATE_TRUNC('month', {date_col}), 'YYYY-MM-DD')"
+        return f"strftime('%Y-%m-01', {date_col})"
+
     def fetch_monthly_balances(self, start_date: date, end_date: date) -> list[dict]:
         """Aggrega entrate e uscite per mese nell'intervallo (on-read, senza tabella dedicata)."""
-        # Entrate per mese
+        from calendar import month_name as _month_name
+
+        inc_month = self._month_trunc_sql("income_date")
+        exp_month = self._month_trunc_sql("expense_date")
+
         income_rows = self._session.execute(
             text(
-                "SELECT strftime('%Y-%m-01', income_date) AS month, SUM(amount) AS total "
+                f"SELECT {inc_month} AS month, SUM(amount) AS total "
                 "FROM incomes "
                 "WHERE user_id = :uid AND income_date >= :start AND income_date <= :end "
                 "GROUP BY month"
@@ -346,10 +360,9 @@ class PostgresStorage(FinancialStorage):
             {"uid": self._user_id, "start": start_date.isoformat(), "end": end_date.isoformat()},
         ).mappings().all()
 
-        # Uscite per mese
         expense_rows = self._session.execute(
             text(
-                "SELECT strftime('%Y-%m-01', expense_date) AS month, SUM(amount) AS total "
+                f"SELECT {exp_month} AS month, SUM(amount) AS total "
                 "FROM expenses "
                 "WHERE user_id = :uid AND expense_date >= :start AND expense_date <= :end "
                 "GROUP BY month"
@@ -360,7 +373,6 @@ class PostgresStorage(FinancialStorage):
         income_by_month = {r["month"]: r["total"] for r in income_rows}
         expense_by_month = {r["month"]: r["total"] for r in expense_rows}
 
-        from calendar import month_name as _month_name
         all_months = sorted(set(income_by_month) | set(expense_by_month))
         result = []
         for month_str in all_months:

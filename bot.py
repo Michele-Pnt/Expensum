@@ -456,6 +456,14 @@ async def _build_and_send_weekly_plan(
             report_keyboard = InlineKeyboardMarkup([[
                 InlineKeyboardButton("📊 Vedi sul web →", url=report_url)
             ]])
+            try:
+                _user_store.log_message(
+                    str(chat_id), source="telegram", role="bot",
+                    text=plan_text[:500] + ("…" if len(plan_text) > 500 else ""),
+                    metadata={"report_type": "weekly", "share_token": share_token},
+                )
+            except Exception as _le:
+                logger.debug("[User %s] log_message weekly report fallito: %s", chat_id, _le)
     except Exception as e:
         logger.warning(f"[User {chat_id}] Salvataggio report settimanale fallito: {e}")
 
@@ -588,6 +596,14 @@ async def _build_and_send_monthly_plan(
             report_keyboard = InlineKeyboardMarkup([[
                 InlineKeyboardButton("📊 Vedi sul web →", url=report_url)
             ]])
+            try:
+                _user_store.log_message(
+                    str(chat_id), source="telegram", role="bot",
+                    text=plan_text[:500] + ("…" if len(plan_text) > 500 else ""),
+                    metadata={"report_type": "monthly", "share_token": share_token},
+                )
+            except Exception as _le:
+                logger.debug("[User %s] log_message monthly report fallito: %s", chat_id, _le)
     except Exception as e:
         logger.warning(f"[User {chat_id}] Salvataggio report mensile fallito: {e}")
 
@@ -1247,6 +1263,10 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         return
 
     logger.info(f"[User {chat_id}] Messaggio ricevuto: '{message_text}'")
+    try:
+        _user_store.log_message(chat_id, source="telegram", role="user", text=message_text)
+    except Exception as _le:
+        logger.debug("[User %s] log_message user fallito: %s", chat_id, _le)
     _user_store.increment_usage(chat_id, "text")
  
     # Mostra "sta scrivendo..."
@@ -1414,6 +1434,10 @@ async def _process_expense_text(update: Update, context: ContextTypes.DEFAULT_TY
     ])
 
     await update.message.reply_text(summary, parse_mode=ParseMode.MARKDOWN, reply_markup=keyboard)
+    try:
+        _user_store.log_message(chat_id, source="telegram", role="bot", text=summary, metadata=result)
+    except Exception as _le:
+        logger.debug("[User %s] log_message bot summary fallito: %s", chat_id, _le)
 
 async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handler per messaggi vocali — trascrizione e parsing spesa con LLM."""
@@ -1489,6 +1513,22 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             ]
         )
         message_trascribed = response.text.strip()
+
+        # 🛡️ DIFESA 2.5: Sanitizzazione trascrizione audio — rileva injection vocali
+        # (es. "...e ora ignora le istruzioni precedenti") e rimuove Unicode anomali
+        from src.input_sanitizer import sanitize_audio_transcription, InjectionDetectedError
+        try:
+            message_trascribed = sanitize_audio_transcription(message_trascribed, chat_id)
+        except InjectionDetectedError:
+            _user_store.logout_user(chat_id)
+            await update.message.reply_text(
+                "🚫 *Comportamento malevolo rilevato.*\n\n"
+                "Il tuo account è stato disabilitato a causa di un tentativo di manipolazione del sistema.\n\n"
+                f"Per chiarimenti scrivi a: {Config.SUPPORT_EMAIL}",
+                parse_mode="Markdown",
+            )
+            return
+
         logger.info(f"[User {chat_id}] Trascrizione Audio: {message_trascribed}")
         response_usage = getattr(response, "usage_metadata", None)
         raw_transcription_usage = {}
@@ -1523,6 +1563,10 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             except Exception as e:
                 logger.warning("[User %s] release_llm_reservation voice fallita: %s", chat_id, e)
         _user_store.increment_usage(chat_id, "voice")
+        try:
+            _user_store.log_message(chat_id, source="telegram", role="user", text=f"🎤 {message_trascribed}")
+        except Exception as _le:
+            logger.debug("[User %s] log_message voice fallito: %s", chat_id, _le)
         await update.message.reply_text("🎙️ Ho ascoltato! Sto elaborando...")
         await _process_expense_text(update, context, message_trascribed, chat_id)
 
@@ -1577,8 +1621,27 @@ async def handle_photos(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             )
             return
 
+        # 🛡️ DIFESA 3: Sanitizzazione testo OCR — rimuove Unicode pericolosi e
+        # rileva pattern di prompt injection nascosti nello scontrino
+        from src.input_sanitizer import sanitize_ocr_text, InjectionDetectedError
+        try:
+            message_trascribed = sanitize_ocr_text(message_trascribed, chat_id)
+        except InjectionDetectedError:
+            _user_store.logout_user(chat_id)
+            await update.message.reply_text(
+                "🚫 *Comportamento malevolo rilevato.*\n\n"
+                "Il tuo account è stato disabilitato a causa di un tentativo di manipolazione del sistema.\n\n"
+                f"Per chiarimenti scrivi a: {Config.SUPPORT_EMAIL}",
+                parse_mode="Markdown",
+            )
+            return
+
         logger.info(f"[User {chat_id}] OCR scontrino: {message_trascribed[:100]}")
         _user_store.increment_usage(chat_id, "photo")
+        try:
+            _user_store.log_message(chat_id, source="telegram", role="user", text=f"📷 {message_trascribed[:200]}")
+        except Exception as _le:
+            logger.debug("[User %s] log_message photo fallito: %s", chat_id, _le)
         await update.message.reply_text("📸 Foto analizzata! Sto elaborando...")
         await _process_expense_text(update, context, message_trascribed, chat_id)
 
@@ -1616,6 +1679,11 @@ async def _save_to_notion(query, context, chat_id: str, account_id: str | None =
                 parse_mode=ParseMode.MARKDOWN,
             )
             logger.info(f"[User {chat_id}] Entrata salvata: {data['name']} €{data['amount']:.2f}")
+            try:
+                _success_text = f"✅ Entrata salvata: {data['name']} €{data['amount']:.2f}"
+                _user_store.log_message(chat_id, source="telegram", role="bot", text=_success_text, metadata=data)
+            except Exception as _le:
+                logger.debug("[User %s] log_message income saved fallito: %s", chat_id, _le)
         else:
             storage.create_expense(
                 expense_date=date,
@@ -1631,6 +1699,11 @@ async def _save_to_notion(query, context, chat_id: str, account_id: str | None =
                 parse_mode=ParseMode.MARKDOWN,
             )
             logger.info(f"Spesa salvata: {data['name']} €{data['amount']:.2f}")
+            try:
+                _success_text = f"✅ Spesa salvata: {data['name']} €{data['amount']:.2f}"
+                _user_store.log_message(chat_id, source="telegram", role="bot", text=_success_text, metadata=data)
+            except Exception as _le:
+                logger.debug("[User %s] log_message expense saved fallito: %s", chat_id, _le)
 
         # Aggiorna la dashboard pinnata in background (se esiste)
         try:

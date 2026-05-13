@@ -3,13 +3,20 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { Drawer, List, ListItem, ListItemButton, ListItemText } from "@mui/material";
+import { Drawer, List, ListItem, ListItemButton, ListItemText, Box } from "@mui/material";
 import { BarChart2, MessageCircle, CreditCard, MessageSquare, Home, FileText } from "lucide-react";
 import styles from "./Sidebar.module.css";
 
 const drawerWidth = 240;
 
-export default function Sidebar() {
+type SidebarProps = {
+  mobileOpen?: boolean;
+  desktopOpen?: boolean;
+  onToggle?: () => void;
+  isMobile?: boolean;
+};
+
+export default function Sidebar({ mobileOpen = false, desktopOpen = true, onToggle, isMobile = false }: SidebarProps) {
   const pathname = usePathname();
 
   const navItems = [
@@ -23,23 +30,9 @@ export default function Sidebar() {
     { name: "Abbonamenti", path: "/abbonamenti", icon: <CreditCard size={18} /> },
   ];
 
-  return (
-    <Drawer
-      variant="permanent"
-      sx={{
-        width: drawerWidth,
-        flexShrink: 0,
-        [`& .MuiDrawer-paper`]: {
-          width: drawerWidth,
-          boxSizing: "border-box",
-          bgcolor: "var(--color-surface)",
-          borderRight: "1px solid var(--color-border)",
-          color: "var(--color-text)",
-          backgroundImage: "none",
-        },
-      }}
-    >
-      <div className={styles.brand}>
+  const drawerContent = (
+    <>
+      <div className={styles.brand} onClick={onToggle} style={{ cursor: onToggle ? "pointer" : "default" }}>
         <img src="/logo-expensum-icon.png" alt="Expensum" className={styles.brandLogo} />
         <span className={styles.brandName}>EXPENSUM</span>
       </div>
@@ -53,6 +46,11 @@ export default function Sidebar() {
                 <ListItemButton
                   disableRipple
                   className={isActive ? `${styles.navItem} ${styles.navItemActive}` : styles.navItem}
+                  onClick={() => {
+                    if (isMobile && onToggle) {
+                      onToggle();
+                    }
+                  }}
                 >
                   <span className={styles.navIcon}>{item.icon}</span>
                   <ListItemText
@@ -77,6 +75,11 @@ export default function Sidebar() {
                 <ListItemButton
                   disableRipple
                   className={isActive ? `${styles.navItem} ${styles.navItemActive}` : styles.navItem}
+                  onClick={() => {
+                    if (isMobile && onToggle) {
+                      onToggle();
+                    }
+                  }}
                 >
                   <span className={styles.navIcon}>{item.icon}</span>
                   <ListItemText
@@ -89,6 +92,50 @@ export default function Sidebar() {
           );
         })}
       </List>
-    </Drawer>
+    </>
+  );
+
+  return (
+    <Box component="nav" sx={{ width: { xs: 0, sm: desktopOpen ? drawerWidth : 0 }, flexShrink: { sm: 0 } }}>
+      {/* Mobile drawer */}
+      <Drawer
+        variant="temporary"
+        open={mobileOpen}
+        onClose={onToggle}
+        ModalProps={{ keepMounted: true }}
+        sx={{
+          display: { xs: "block", sm: "none" },
+          "& .MuiDrawer-paper": {
+            width: drawerWidth,
+            boxSizing: "border-box",
+            bgcolor: "var(--color-surface)",
+            borderRight: "1px solid var(--color-border)",
+            color: "var(--color-text)",
+            backgroundImage: "none",
+          },
+        }}
+      >
+        {drawerContent}
+      </Drawer>
+
+      {/* Desktop drawer */}
+      <Drawer
+        variant="persistent"
+        open={desktopOpen}
+        sx={{
+          display: { xs: "none", sm: "block" },
+          "& .MuiDrawer-paper": {
+            width: drawerWidth,
+            boxSizing: "border-box",
+            bgcolor: "var(--color-surface)",
+            borderRight: "1px solid var(--color-border)",
+            color: "var(--color-text)",
+            backgroundImage: "none",
+          },
+        }}
+      >
+        {drawerContent}
+      </Drawer>
+    </Box>
   );
 }

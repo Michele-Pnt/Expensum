@@ -84,6 +84,8 @@ class Config:
     DATABASE_URL: str = os.getenv("DATABASE_URL", "sqlite:///users.db")
 
     # --- SICUREZZA e CLOUD ---
+    # Email di supporto mostrata agli utenti bannati per comportamento malevolo
+    SUPPORT_EMAIL: str = os.getenv("SUPPORT_EMAIL", "support@expensum.app")
     # Password master per la web dashboard
     DASHBOARD_PASSWORD: str = os.getenv("DASHBOARD_PASSWORD", "admin")
     # Rate Limiting: max messaggi per utente per finestra di 60 secondi

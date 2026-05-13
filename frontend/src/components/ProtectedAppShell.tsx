@@ -2,7 +2,8 @@
 
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
-import { Box, CircularProgress, Typography } from "@mui/material";
+import { Box, CircularProgress, Typography, IconButton, useMediaQuery, useTheme } from "@mui/material";
+import { Menu as MenuIcon } from "lucide-react";
 import Sidebar from "./Sidebar";
 
 type AuthStatus =
@@ -36,10 +37,23 @@ function getTelegramContext() {
 
 export default function ProtectedAppShell({ children }: { children: React.ReactNode }) {
   const router = useRouter();
+  const theme = useTheme();
+  const isMobile = useMediaQuery(theme.breakpoints.down("sm"));
+  const [mobileOpen, setMobileOpen] = useState(false);
+  const [desktopOpen, setDesktopOpen] = useState(true);
+
   const [authStatus, setAuthStatus] = useState<AuthStatus>(() => {
     const { isTelegram } = getTelegramContext();
     return { phase: "loading", isTelegram };
   });
+
+  const handleDrawerToggle = () => {
+    if (isMobile) {
+      setMobileOpen(!mobileOpen);
+    } else {
+      setDesktopOpen(!desktopOpen);
+    }
+  };
 
   useEffect(() => {
     let cancelled = false;
@@ -122,8 +136,24 @@ export default function ProtectedAppShell({ children }: { children: React.ReactN
 
   return (
     <Box sx={{ display: "flex", minHeight: "100vh", bgcolor: "background.default" }}>
-      <Sidebar />
-      <Box component="main" sx={{ flexGrow: 1, width: { sm: "calc(100% - 240px)" } }}>
+      <Sidebar mobileOpen={mobileOpen} desktopOpen={desktopOpen} onToggle={handleDrawerToggle} isMobile={isMobile} />
+      <Box 
+        component="main" 
+        sx={{ 
+          flexGrow: 1, 
+          width: { sm: desktopOpen ? "calc(100% - 240px)" : "100%" },
+          display: "flex",
+          flexDirection: "column",
+          minWidth: 0,
+        }}
+      >
+        {(!desktopOpen || isMobile) && (
+          <Box sx={{ p: 2, pb: 0, display: "flex", alignItems: "center" }}>
+            <IconButton onClick={handleDrawerToggle} sx={{ bgcolor: "background.paper", boxShadow: 1, border: "1px solid var(--color-border)" }}>
+              <MenuIcon size={20} />
+            </IconButton>
+          </Box>
+        )}
         {children}
       </Box>
     </Box>

@@ -1,12 +1,11 @@
 "use client";
-/* eslint-disable @typescript-eslint/no-explicit-any */
 
 import { useEffect, useState, useCallback, type ReactNode } from "react";
 import {
   Box, Card, CardContent, CardHeader, CircularProgress, Tab, Tabs,
   Typography, Slider, Alert, Chip, Select, MenuItem, FormControl,
   InputLabel, Table, TableBody, TableCell, TableContainer, TableHead,
-  TableRow, TablePagination, LinearProgress, TextField,
+  TableRow, TablePagination, LinearProgress, TextField, ToggleButton, ToggleButtonGroup,
 } from "@mui/material";
 import {
   BarChart, Bar, PieChart, Pie, Cell, XAxis, YAxis, Tooltip,
@@ -30,9 +29,8 @@ interface CategoriesData { by_category: CategoryEntry[]; averages: CategoryAvg[]
 interface IncomeData { monthly: IncomeEntry[]; plan_type: string }
 interface WealthData { accounts: AccountBalance[]; plan_type: string }
 
-interface CapitalTrendEntry { month: string; total: number }
-interface CapitalByAccountEntry { month: string; account: string; balance: number }
-interface CapitalTrendData { capital_trend: CapitalTrendEntry[]; by_account?: CapitalByAccountEntry[][]; plan_type: string }
+interface CapitalTrendEntry { month: string; total: number; [key: string]: string | number }
+interface CapitalTrendData { capital_trend: CapitalTrendEntry[]; plan_type: string; accounts?: string[] }
 
 interface TransactionEntry {
   id: number; date: string; name: string; amount: number;
@@ -154,10 +152,12 @@ function pivotTopCategories(rows: CategoryEntry[]): {
 // ---------------------------------------------------------------------------
 
 function PeriodSlider({ value, onChange, maxMonths }: { value: number; onChange: (v: number) => void; maxMonths: number }) {
-  const marks = Array.from({ length: Math.min(maxMonths, 12) }, (_, i) => ({ value: i + 1, label: `${i + 1}` }));
-  if (maxMonths > 12) {
-    marks.push({ value: 24, label: "24" });
-  }
+  const marks = Array.from({ length: maxMonths }, (_, i) => {
+    const val = i + 1;
+    // Mostra etichetta ogni mese fino a 12, poi ogni 3 mesi
+    const showLabel = val <= 12 || val === maxMonths || val % 3 === 0;
+    return { value: val, label: showLabel ? `${val}` : "" };
+  });
   return (
     <Box sx={{ px: 2, mb: 3 }}>
       <Typography variant="body2" color="text.secondary" mb={1}>
@@ -182,7 +182,7 @@ function PremiumGate({ isPro, children, featureName }: { isPro: boolean; childre
   if (isPro) return <>{children}</>;
   return (
     <Card sx={{ mb: 2, borderRadius: 2, position: "relative", overflow: "hidden" }}>
-      <Box sx={{ filter: "blur(6px)", opacity: 0.35, pointerEvents: "none", userSelect: "none" }}>
+      <Box aria-hidden="true" sx={{ filter: "blur(6px)", opacity: 0.35, pointerEvents: "none", userSelect: "none" }}>
         {children}
       </Box>
       <Box sx={{
@@ -220,7 +220,7 @@ function ChartCard({ title, children, badge }: { title: string; children: ReactN
         titleTypographyProps={{ variant: "subtitle2", fontWeight: 700 }}
         sx={{ pb: 1 }}
       />
-      <CardContent sx={{ height: { xs: 200, sm: 260 }, pt: 0 }}>{children}</CardContent>
+      <CardContent sx={{ height: { xs: 200, sm: 260 }, pt: 0, minWidth: 0, minHeight: 0, "& .recharts-responsive-container": { minWidth: 0, minHeight: 0 } }}>{children}</CardContent>
     </Card>
   );
 }
@@ -229,14 +229,14 @@ function SavingsChart({ data }: { data: SavingsEntry[] }) {
   return (
     <ChartCard title="Risparmio mensile">
       <ResponsiveContainer width="100%" height="100%">
-        <BarChart data={data}>
+        <BarChart data={data} barCategoryGap="15%" maxBarSize={60}>
           <XAxis dataKey="month" tick={TICK_STYLE} />
           <YAxis tick={TICK_STYLE} tickFormatter={(v) => `€${v}`} />
-          <Tooltip formatter={(v: any) => `€${(v ?? 0).toFixed(2)}`} contentStyle={TOOLTIP_STYLE} />
+          <Tooltip formatter={(v: number) => `€${(v ?? 0).toFixed(2)}`} contentStyle={TOOLTIP_STYLE} />
           <Legend wrapperStyle={LEGEND_STYLE} />
-          <Bar dataKey="income" name="Entrate" fill={INCOME_COLOR} radius={[4, 4, 0, 0]} />
-          <Bar dataKey="expenses" name="Uscite" fill={EXPENSE_COLOR} radius={[4, 4, 0, 0]} />
-          <Bar dataKey="net" name="Netto" fill={NET_COLOR} radius={[4, 4, 0, 0]} />
+          <Bar dataKey="income" name="Entrate" fill={INCOME_COLOR} radius={[4, 4, 0, 0]}  />
+          <Bar dataKey="expenses" name="Uscite" fill={EXPENSE_COLOR} radius={[4, 4, 0, 0]}  />
+          <Bar dataKey="net" name="Netto" fill={NET_COLOR} radius={[4, 4, 0, 0]}  />
         </BarChart>
       </ResponsiveContainer>
     </ChartCard>
@@ -246,6 +246,22 @@ function SavingsChart({ data }: { data: SavingsEntry[] }) {
 function CapitalTrendChart({ data, isPro }: { data: CapitalTrendData; isPro: boolean }) {
   // Colori per linee account
   const accPalette = ["#4B6CB7", "#7C9BD6", "#C5A059", "#1A3673", "#A8853C", "#2B4FA8"];
+  
+  // Costruisci le linee basandoti sull'elenco accounts ritornato dal backend
+  const accountLines = isPro && data.accounts
+    ? data.accounts.map((accountName, i) => (
+        <Line
+          key={`acc-line-${i}-${accountName}`}
+          type="monotone"
+          dataKey={accountName}
+          name={accountName}
+          stroke={accPalette[i % accPalette.length]}
+          strokeWidth={1.5}
+          strokeDasharray="5 5"
+          dot={{ r: 3 }}
+        />
+      ))
+    : null;
   
   return (
     <ChartCard title="Andamento Capitale">
@@ -260,23 +276,10 @@ function CapitalTrendChart({ data, isPro }: { data: CapitalTrendData; isPro: boo
           <CartesianGrid strokeDasharray="3 3" stroke="#E5E2DC" />
           <XAxis dataKey="month" tick={TICK_STYLE} />
           <YAxis tick={TICK_STYLE} tickFormatter={(v) => `€${v}`} />
-          <Tooltip formatter={(v: any) => `€${(v ?? 0).toFixed(2)}`} contentStyle={TOOLTIP_STYLE} />
+          <Tooltip formatter={(v: number) => `€${(v ?? 0).toFixed(2)}`} contentStyle={TOOLTIP_STYLE} />
           <Legend wrapperStyle={LEGEND_STYLE} />
           <Area type="monotone" dataKey="total" name="Totale" fill="url(#capitalGradient)" stroke="#1A3673" strokeWidth={2} />
-          {isPro && data.by_account?.flatMap((accSeries, i) =>
-            accSeries.length > 0 ? (
-              <Line
-                key={accSeries[0].account}
-                data={accSeries}
-                dataKey="balance"
-                name={accSeries[0].account}
-                stroke={accPalette[i % accPalette.length]}
-                strokeWidth={1.5}
-                strokeDasharray="5 5"
-                dot={{ r: 3 }}
-              />
-            ) : null
-          )}
+          {accountLines}
         </ComposedChart>
       </ResponsiveContainer>
     </ChartCard>
@@ -330,13 +333,13 @@ function CategoryTrendChart({
         }
         sx={{ pb: 1 }}
       />
-      <CardContent sx={{ height: { xs: 220, sm: 280 }, pt: 0 }}>
+      <CardContent sx={{ height: { xs: 220, sm: 280 }, pt: 0, minWidth: 0, minHeight: 0 }}>
         <ResponsiveContainer width="100%" height="100%">
           <LineChart data={data}>
             <CartesianGrid strokeDasharray="3 3" stroke="#E5E2DC" />
             <XAxis dataKey="month" tick={TICK_STYLE} />
             <YAxis tick={TICK_STYLE} tickFormatter={(v) => `€${v}`} />
-            <Tooltip formatter={(v: any) => `€${(v ?? 0).toFixed(2)}`} contentStyle={TOOLTIP_STYLE} />
+            <Tooltip formatter={(v: number) => `€${(v ?? 0).toFixed(2)}`} contentStyle={TOOLTIP_STYLE} />
             <Legend wrapperStyle={LEGEND_STYLE} />
             {selectedCats.map((cat, i) => (
               <Line
@@ -502,13 +505,13 @@ function MonthlyByAccountChart({ rows }: { rows: AccountMonthEntry[] }) {
   return (
     <ChartCard title="Spesa mensile per conto">
       <ResponsiveContainer width="100%" height="100%">
-        <BarChart data={data}>
+        <BarChart data={data} barCategoryGap="15%" maxBarSize={60}>
           <XAxis dataKey="month" tick={TICK_STYLE} />
           <YAxis tick={TICK_STYLE} tickFormatter={(v) => `€${v}`} />
-          <Tooltip formatter={(v: any) => `€${(v ?? 0).toFixed(2)}`} contentStyle={TOOLTIP_STYLE} />
+          <Tooltip formatter={(v: number) => `€${(v ?? 0).toFixed(2)}`} contentStyle={TOOLTIP_STYLE} />
           <Legend wrapperStyle={LEGEND_STYLE} />
           {accounts.map((acc, i) => (
-            <Bar key={acc} dataKey={acc} stackId="a" fill={PALETTE[i % PALETTE.length]} />
+            <Bar key={acc} dataKey={acc} stackId="a" fill={PALETTE[i % PALETTE.length]}  />
           ))}
         </BarChart>
       </ResponsiveContainer>
@@ -527,7 +530,7 @@ function CategoryPieChart({ rows }: { rows: CategoryEntry[] }) {
             innerRadius={55} outerRadius={90} paddingAngle={3}>
             {slice.map((_, i) => <Cell key={i} fill={PALETTE[i % PALETTE.length]} />)}
           </Pie>
-          <Tooltip formatter={(v: any) => `€${(v ?? 0).toFixed(2)}`} contentStyle={TOOLTIP_STYLE} />
+          <Tooltip formatter={(v: number) => `€${(v ?? 0).toFixed(2)}`} contentStyle={TOOLTIP_STYLE} />
           <Legend iconType="circle" iconSize={10} wrapperStyle={LEGEND_STYLE} />
         </PieChart>
       </ResponsiveContainer>
@@ -540,13 +543,13 @@ function CategoryHistoryChart({ rows }: { rows: CategoryEntry[] }) {
   return (
     <ChartCard title="Top 5 categorie (storico)">
       <ResponsiveContainer width="100%" height="100%">
-        <BarChart data={data}>
+        <BarChart data={data} barCategoryGap="15%" maxBarSize={60}>
           <XAxis dataKey="month" tick={TICK_STYLE} />
           <YAxis tick={TICK_STYLE} tickFormatter={(v) => `€${v}`} />
-          <Tooltip formatter={(v: any) => `€${(v ?? 0).toFixed(2)}`} contentStyle={TOOLTIP_STYLE} />
+          <Tooltip formatter={(v: number) => `€${(v ?? 0).toFixed(2)}`} contentStyle={TOOLTIP_STYLE} />
           <Legend wrapperStyle={LEGEND_STYLE} />
           {cats.map((cat, i) => (
-            <Bar key={cat} dataKey={cat} fill={PALETTE[i % PALETTE.length]} radius={[3, 3, 0, 0]} />
+            <Bar key={cat} dataKey={cat} fill={PALETTE[i % PALETTE.length]} radius={[3, 3, 0, 0]}  />
           ))}
         </BarChart>
       </ResponsiveContainer>
@@ -558,11 +561,11 @@ function CategoryAvgChart({ avgs }: { avgs: CategoryAvg[] }) {
   return (
     <ChartCard title="Spesa media per categoria">
       <ResponsiveContainer width="100%" height="100%">
-        <BarChart data={avgs} layout="vertical">
+        <BarChart data={avgs} layout="vertical" barCategoryGap="15%" maxBarSize={40}>
           <XAxis type="number" tick={TICK_STYLE} tickFormatter={(v) => `€${v}`} />
           <YAxis type="category" dataKey="name" tick={TICK_STYLE} width={90} />
-          <Tooltip formatter={(v: any) => `€${(v ?? 0).toFixed(2)}`} contentStyle={TOOLTIP_STYLE} />
-          <Bar dataKey="avg" name="Media" fill="#1A3673" radius={[0, 4, 4, 0]} />
+          <Tooltip formatter={(v: number) => `€${(v ?? 0).toFixed(2)}`} contentStyle={TOOLTIP_STYLE} />
+          <Bar dataKey="avg" name="Media" fill="#1A3673" radius={[0, 4, 4, 0]}  />
         </BarChart>
       </ResponsiveContainer>
     </ChartCard>
@@ -573,11 +576,11 @@ function IncomeChart({ data }: { data: IncomeEntry[] }) {
   return (
     <ChartCard title="Entrate mensili">
       <ResponsiveContainer width="100%" height="100%">
-        <BarChart data={data}>
+        <BarChart data={data} barCategoryGap="15%" maxBarSize={60}>
           <XAxis dataKey="month" tick={TICK_STYLE} />
           <YAxis tick={TICK_STYLE} tickFormatter={(v) => `€${v}`} />
-          <Tooltip formatter={(v: any) => `€${(v ?? 0).toFixed(2)}`} contentStyle={TOOLTIP_STYLE} />
-          <Bar dataKey="total" name="Entrate" fill={INCOME_COLOR} radius={[4, 4, 0, 0]} />
+          <Tooltip formatter={(v: number) => `€${(v ?? 0).toFixed(2)}`} contentStyle={TOOLTIP_STYLE} />
+          <Bar dataKey="total" name="Entrate" fill={INCOME_COLOR} radius={[4, 4, 0, 0]}  />
         </BarChart>
       </ResponsiveContainer>
     </ChartCard>
@@ -605,7 +608,7 @@ function WealthPieChart({ accounts }: { accounts: AccountBalance[] }) {
             innerRadius={55} outerRadius={90} paddingAngle={3}>
             {positiveAccounts.map((_, i) => <Cell key={i} fill={PALETTE[i % PALETTE.length]} />)}
           </Pie>
-          <Tooltip formatter={(v: any) => `€${(v ?? 0).toFixed(2)}`} contentStyle={TOOLTIP_STYLE} />
+          <Tooltip formatter={(v: number) => `€${(v ?? 0).toFixed(2)}`} contentStyle={TOOLTIP_STYLE} />
           <Legend iconType="circle" iconSize={10} wrapperStyle={LEGEND_STYLE} />
         </PieChart>
       </ResponsiveContainer>
@@ -616,7 +619,7 @@ function WealthPieChart({ accounts }: { accounts: AccountBalance[] }) {
 function TopMerchantsChart({ data }: { data: TopMerchantsData }) {
   if (data.merchants.length === 0) {
     return (
-      <ChartCard title="Top Beneficiari">
+      <ChartCard title="Dove spendi di piu">
         <div style={{ display: "flex", alignItems: "center", justifyContent: "center", height: "100%", color: "var(--text-secondary)" }}>
           Nessun dato disponibile
         </div>
@@ -624,13 +627,13 @@ function TopMerchantsChart({ data }: { data: TopMerchantsData }) {
     );
   }
   return (
-    <ChartCard title="Top Beneficiari">
+    <ChartCard title="Dove spendi di piu">
       <ResponsiveContainer width="100%" height="100%">
-        <BarChart data={data.merchants} layout="vertical">
+        <BarChart data={data.merchants} layout="vertical" barCategoryGap="15%" maxBarSize={40}>
           <XAxis type="number" tick={TICK_STYLE} tickFormatter={(v) => `€${v}`} />
           <YAxis type="category" dataKey="name" tick={TICK_STYLE} width={120} />
           <Tooltip
-            formatter={(v: any, _name: any, props: any) => [`€${(v ?? 0).toFixed(2)} (x${props.payload.count})`, props.payload.category]}
+            formatter={(v: number, _name: string, props: { payload: { count: number; category: string } }) => [`€${(v ?? 0).toFixed(2)} (x${props.payload.count})`, props.payload.category]}
             contentStyle={TOOLTIP_STYLE}
           />
           <Bar dataKey="total" name="Spesa" radius={[0, 4, 4, 0]}>
@@ -683,7 +686,7 @@ function BudgetGaugeList({ data }: { data: BudgetStatusData }) {
           return (
             <Box key={item.category} sx={{ mb: 1.5 }}>
               <Box sx={{ display: "flex", justifyContent: "space-between", mb: 0.5 }}>
-                <Typography variant="body2" fontWeight={600}>
+                <Typography variant="body2" fontWeight={600} component="div">
                   {item.category}
                   {isOver && <Chip label="Sforato" size="small" sx={{ ml: 1, bgcolor: "#C5A059", color: "#fff", fontSize: "0.65rem", height: 18 }} />}
                   {isWarning && <Chip label="Quasi finito" size="small" sx={{ ml: 1, bgcolor: "#D4B47A", color: "#fff", fontSize: "0.65rem", height: 18 }} />}
@@ -714,6 +717,8 @@ function BudgetGaugeList({ data }: { data: BudgetStatusData }) {
 }
 
 function SavingsRateChart({ data }: { data: SavingsRateData }) {
+  const [viewMode, setViewMode] = useState<"absolute" | "percentage">("absolute");
+
   if (data.error || data.savings_rate.length === 0) {
     return (
       <ChartCard title="Tasso di Risparmio">
@@ -732,23 +737,46 @@ function SavingsRateChart({ data }: { data: SavingsRateData }) {
         title="Tasso di Risparmio"
         titleTypographyProps={{ variant: "subtitle2", fontWeight: 700 }}
         action={
-          <Typography variant="body2" color="text.secondary">
-            Media: {avgRate.toFixed(1)}%
-          </Typography>
+          <Box sx={{ display: "flex", alignItems: "center", gap: 2 }}>
+            <Typography variant="body2" color="text.secondary">
+              Media: {avgRate.toFixed(1)}%
+            </Typography>
+            <ToggleButtonGroup
+              size="small"
+              value={viewMode}
+              exclusive
+              onChange={(_, newMode) => { if (newMode) setViewMode(newMode); }}
+              aria-label="view mode"
+              sx={{ height: 28 }}
+            >
+              <ToggleButton value="absolute" aria-label="absolute" sx={{ px: 1, fontSize: "0.75rem", py: 0 }}>
+                €
+              </ToggleButton>
+              <ToggleButton value="percentage" aria-label="percentage" sx={{ px: 1, fontSize: "0.75rem", py: 0 }}>
+                %
+              </ToggleButton>
+            </ToggleButtonGroup>
+          </Box>
         }
         sx={{ pb: 1 }}
       />
-      <CardContent sx={{ height: { xs: 200, sm: 260 }, pt: 0 }}>
+      <CardContent sx={{ height: { xs: 200, sm: 260 }, pt: 0, minWidth: 0, minHeight: 0 }}>
         <ResponsiveContainer width="100%" height="100%">
           <ComposedChart data={data.savings_rate}>
             <CartesianGrid strokeDasharray="3 3" stroke="#E5E2DC" />
             <XAxis dataKey="month" tick={TICK_STYLE} />
-            <YAxis yAxisId="left" tick={TICK_STYLE} tickFormatter={(v) => `${v}%`} />
-            <YAxis yAxisId="right" orientation="right" tick={TICK_STYLE} tickFormatter={(v) => `€${v}`} />
+            {viewMode === "percentage" ? (
+              <YAxis tick={TICK_STYLE} tickFormatter={(v) => `${v}%`} />
+            ) : (
+              <YAxis tick={TICK_STYLE} tickFormatter={(v) => `€${v}`} />
+            )}
             <Tooltip contentStyle={TOOLTIP_STYLE} />
             <Legend wrapperStyle={LEGEND_STYLE} />
-            <Area yAxisId="left" type="monotone" dataKey="rate" name="Tasso %" fill={SAVINGS_COLOR} stroke={SAVINGS_COLOR} fillOpacity={0.2} />
-            <Bar yAxisId="right" dataKey="savings" name="Risparmio €" fill={INCOME_COLOR} radius={[4, 4, 0, 0]} />
+            {viewMode === "percentage" ? (
+              <Area type="monotone" dataKey="rate" name="Tasso %" fill={SAVINGS_COLOR} stroke={SAVINGS_COLOR} fillOpacity={0.2} />
+            ) : (
+              <Bar dataKey="savings" name="Risparmio €" fill={INCOME_COLOR} radius={[4, 4, 0, 0]}  />
+            )}
           </ComposedChart>
         </ResponsiveContainer>
       </CardContent>
@@ -769,14 +797,14 @@ function MonthComparisonChart({ data }: { data: MonthComparisonData }) {
   return (
     <ChartCard title="Confronto Spese per Categoria">
       <ResponsiveContainer width="100%" height="100%">
-        <BarChart data={data.comparisons}>
+        <BarChart data={data.comparisons} barCategoryGap="15%" maxBarSize={60}>
           <XAxis dataKey="category" tick={TICK_STYLE} />
           <YAxis tick={TICK_STYLE} tickFormatter={(v) => `€${v}`} />
-          <Tooltip formatter={(v: any) => `€${(v ?? 0).toFixed(2)}`} contentStyle={TOOLTIP_STYLE} />
+          <Tooltip formatter={(v: number) => `€${(v ?? 0).toFixed(2)}`} contentStyle={TOOLTIP_STYLE} />
           <Legend wrapperStyle={LEGEND_STYLE} />
-          <Bar dataKey="current_month" name="Questo mese" fill="#1A3673" radius={[3, 3, 0, 0]} />
-          <Bar dataKey="last_month" name="Mese scorso" fill="#C5A059" radius={[3, 3, 0, 0]} />
-          <Bar dataKey="avg_3m" name="Media 3m" fill="#4B6CB7" radius={[3, 3, 0, 0]} />
+          <Bar dataKey="avg_3m" name="Media 3m" fill="#4B6CB7" radius={[3, 3, 0, 0]}  />
+          <Bar dataKey="last_month" name="Mese scorso" fill="#C5A059" radius={[3, 3, 0, 0]}  />
+          <Bar dataKey="current_month" name="Questo mese" fill="#1A3673" radius={[3, 3, 0, 0]}  />
         </BarChart>
       </ResponsiveContainer>
     </ChartCard>
@@ -833,13 +861,14 @@ export default function AnalyticsPage() {
     setError(null);
     try {
       const monthStr = String(m);
+      // Richiedi sempre il limite Pro (10) — il backend lo capperà per utenti Free
       const [ov, cat, inc, wea, cap, mer] = await Promise.all([
         fetchApi<OverviewData>("/api/analytics/overview", id, { months: monthStr }),
         fetchApi<CategoriesData>("/api/analytics/categories-expense", id, { months: monthStr }),
         fetchApi<IncomeData>("/api/analytics/income", id, { months: monthStr }),
         fetchApi<WealthData>("/api/analytics/wealth", id, {}),
         fetchApi<CapitalTrendData>("/api/analytics/capital-trend", id, { months: monthStr }),
-        fetchApi<TopMerchantsData>("/api/analytics/top-merchants", id, { months: monthStr, limit: String(isPro ? 10 : 5) }),
+        fetchApi<TopMerchantsData>("/api/analytics/top-merchants", id, { months: monthStr, limit: "10" }),
       ]);
       setOverview(ov);
       setCategories(cat);
@@ -868,18 +897,10 @@ export default function AnalyticsPage() {
     } finally {
       setLoading(false);
     }
-  }, [isPro]);
-
-  // Primo caricamento (solo se non siamo in Telegram)
-  useEffect(() => {
-    const tg = (window as TelegramWindow).Telegram?.WebApp;
-    const id = tg?.initData ?? "";
-    if (!tg || id.length === 0) {
-      loadData(months, null);
-    }
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  }, []);
 
   useEffect(() => {
+    if (!mounted) return;
     if (isTelegram) {
       if (!initData) {
         setError("auth_401");
@@ -887,8 +908,10 @@ export default function AnalyticsPage() {
       } else {
         loadData(months, initData);
       }
+    } else {
+      loadData(months, null);
     }
-  }, [isTelegram, initData, months, loadData]);
+  }, [isTelegram, initData, months, loadData, mounted]);
 
   const handleMonthsChange = (v: number) => {
     setMonths(v);
@@ -927,7 +950,9 @@ export default function AnalyticsPage() {
         value={tab}
         onChange={(_, v) => setTab(v)}
         sx={{ mb: 2, minHeight: 40 }}
-        variant="fullWidth"
+        variant="scrollable"
+        scrollButtons="auto"
+        allowScrollButtonsMobile
       >
         <Tab label="📈 Panoramica" sx={{ fontSize: "0.75rem", minHeight: 40 }} />
         <Tab label="💳 Spese" sx={{ fontSize: "0.75rem", minHeight: 40 }} />
@@ -1003,14 +1028,6 @@ export default function AnalyticsPage() {
               <CategoryHistoryChart rows={categories.by_category} />
               {topMerchants && <TopMerchantsChart data={topMerchants} />}
               <CategoryAvgChart avgs={categories.averages} />
-            </>
-          )}
-
-          {/* Tab 2: Entrate */}
-          {tab === 2 && (
-            <>
-              <IncomeChart data={income.monthly} />
-              <WealthPieChart accounts={wealth.accounts} />
               {isPro && monthComparison && (
                 <MonthComparisonChart data={monthComparison} />
               )}
@@ -1019,6 +1036,14 @@ export default function AnalyticsPage() {
                   <MonthComparisonChart data={{ comparisons: [], plan_type: "free", error: "Pro required" }} />
                 </PremiumGate>
               )}
+            </>
+          )}
+
+          {/* Tab 2: Entrate */}
+          {tab === 2 && (
+            <>
+              <IncomeChart data={income.monthly} />
+              <WealthPieChart accounts={wealth.accounts} />
             </>
           )}
 

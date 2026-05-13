@@ -89,3 +89,52 @@ def test_get_non_active_user(mock_db_session):
     
     user = store.get_user(chat_id)
     assert user is None
+
+
+def test_log_message_and_get_history(mock_db_session):
+    store = mock_db_session
+    chat_id = "42"
+    store.add_user(chat_id=chat_id)
+
+    store.log_message(chat_id, source="telegram", role="user", text="ho speso 20€")
+    store.log_message(chat_id, source="webapp", role="bot", text="✅ Registrato", metadata={"amount": 20.0})
+
+    history = store.get_chat_history(chat_id, limit=10)
+    assert len(history) == 2
+    assert history[0]["role"] == "user"
+    assert history[0]["source"] == "telegram"
+    assert history[1]["role"] == "bot"
+    assert history[1]["metadata"]["amount"] == 20.0
+
+
+def test_log_message_returns_id(mock_db_session):
+    store = mock_db_session
+    chat_id = "43"
+    store.add_user(chat_id=chat_id)
+
+    msg_id = store.log_message(chat_id, source="webapp", role="user", text="test")
+    assert isinstance(msg_id, int)
+    assert msg_id > 0
+
+
+def test_get_chat_history_order_and_limit(mock_db_session):
+    store = mock_db_session
+    chat_id = "44"
+    store.add_user(chat_id=chat_id)
+
+    for i in range(5):
+        store.log_message(chat_id, source="telegram", role="user", text=f"msg {i}")
+
+    history = store.get_chat_history(chat_id, limit=3)
+    assert len(history) == 3
+    # Deve essere in ordine cronologico asc (il più recente per ultimo)
+    assert history[-1]["text"] == "msg 4"
+
+
+def test_get_chat_history_empty(mock_db_session):
+    store = mock_db_session
+    chat_id = "45"
+    store.add_user(chat_id=chat_id)
+
+    history = store.get_chat_history(chat_id)
+    assert history == []
