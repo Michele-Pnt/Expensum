@@ -29,7 +29,15 @@ from src.dashboard_message import build_dashboard_text
 
 # Inizializza l'app Flask
 app = Flask(__name__)
-app.secret_key = os.getenv("FLASK_SECRET_KEY") or os.urandom(24)
+_flask_secret = os.getenv("FLASK_SECRET_KEY")
+if not _flask_secret:
+    raise RuntimeError(
+        "FLASK_SECRET_KEY non impostata. L'app richiede una secret key "
+        "persistente per firmare i cookie di sessione. Genera con "
+        "`python -c 'import secrets; print(secrets.token_urlsafe(48))'` "
+        "e aggiungila al .env."
+    )
+app.secret_key = _flask_secret
 
 @app.after_request
 def skip_ngrok_interstitial(response):
@@ -2394,10 +2402,6 @@ def _validate_telegram_init_data(init_data_raw: str) -> dict | None:
 
     Spec: https://core.telegram.org/bots/webapps#validating-data-received-via-the-mini-app
     """
-    import logging
-    _fh = logging.FileHandler("/tmp/tg_hmac_debug.log")
-    _fh.setLevel(logging.DEBUG)
-    logging.getLogger().addHandler(_fh)
     token = Config.TELEGRAM_BOT_TOKEN.encode()
     secret_key = hmac.new(b"WebAppData", token, hashlib.sha256).digest()
 
@@ -2414,18 +2418,10 @@ def _validate_telegram_init_data(init_data_raw: str) -> dict | None:
             params[k] = unquote(v)  # signature inclusa nel dcs (Bot API 7.0+)
 
     if not received_hash:
-        logging.warning("[HMAC] No hash field found in initData")
         return None
 
     data_check_string = "\n".join(f"{k}={v}" for k, v in sorted(params.items()))
     expected_hash = hmac.new(secret_key, data_check_string.encode(), hashlib.sha256).hexdigest()
-
-    logging.warning(f"[HMAC] token_len={len(token)}, token_first5={token[:5]!r}")
-    logging.warning(f"[HMAC] data_check_string keys={list(sorted(params.keys()))}")
-    logging.warning(f"[HMAC] data_check_string={data_check_string!r}")
-    logging.warning(f"[HMAC] init_data_raw={init_data_raw!r}")
-    logging.warning(f"[HMAC] expected={expected_hash[:16]}..., received={received_hash[:16]}...")
-    logging.warning(f"[HMAC] match={expected_hash == received_hash}")
 
     if not hmac.compare_digest(expected_hash, received_hash):
         return None
