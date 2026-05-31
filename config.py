@@ -112,12 +112,7 @@ class Config:
     def validate(cls) -> None:
         """Valida che tutte le variabili obbligatorie siano presenti."""
         required = {
-            "NOTION_API_KEY": cls.NOTION_API_KEY,
-            "NOTION_EXPENSE_DATABASE_ID": cls.NOTION_EXPENSE_DATABASE_ID,
-            "NOTION_INCOME_DATABASE_ID": cls.NOTION_INCOME_DATABASE_ID,
-            "NOTION_ACCOUNTS_DATABASE_ID": cls.NOTION_ACCOUNTS_DATABASE_ID,
             "TELEGRAM_BOT_TOKEN": cls.TELEGRAM_BOT_TOKEN,
-            "TELEGRAM_CHAT_ID": cls.TELEGRAM_CHAT_ID,
             "NOTION_CLIENT_ID": cls.NOTION_CLIENT_ID,
             "NOTION_CLIENT_SECRET": cls.NOTION_CLIENT_SECRET,
         }
