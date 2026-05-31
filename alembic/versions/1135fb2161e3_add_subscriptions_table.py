@@ -29,7 +29,12 @@ def upgrade() -> None:
     sa.ForeignKeyConstraint(['user_id'], ['users.chat_id'], ),
     sa.PrimaryKeyConstraint('id')
     )
-    op.drop_column('users', 'notion_api_key')
+    # notion_api_key potrebbe non esistere su DB freschi — drop condizionale
+    bind = op.get_bind()
+    inspector = sa.inspect(bind)
+    cols = [c['name'] for c in inspector.get_columns('users')]
+    if 'notion_api_key' in cols:
+        op.drop_column('users', 'notion_api_key')
     # ### end Alembic commands ###
 
 
