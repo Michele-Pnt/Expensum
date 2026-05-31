@@ -68,14 +68,15 @@ def run_migrations_online() -> None:
     and associate a connection with the context.
 
     """
-    # Crea automaticamente solo le tabelle base pre-esistenti
+    # Crea solo la tabella users se non esiste — necessario perché le migration
+    # successive referenziano users.chat_id come FK prima di crearla.
     from sqlalchemy import create_engine as _create_engine
     from src.user_store import Base
     _db_url = config.get_main_option("sqlalchemy.url")
     _base_engine = _create_engine(_db_url)
-    legacy_tables = ['users', 'daily_usage', 'feedbacks', 'database_schemas', 'oauth_sessions']
-    tables = [Base.metadata.tables[t] for t in legacy_tables if t in Base.metadata.tables]
-    Base.metadata.create_all(bind=_base_engine, tables=tables)
+    users_table = Base.metadata.tables.get('users')
+    if users_table is not None:
+        Base.metadata.create_all(bind=_base_engine, tables=[users_table])
 
     connectable = engine_from_config(
         config.get_section(config.config_ini_section, {}),
