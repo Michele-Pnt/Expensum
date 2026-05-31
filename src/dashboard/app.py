@@ -2,6 +2,7 @@ import os
 import re
 import sys
 import json
+import uuid
 import logging
 import threading
 from pathlib import Path
@@ -9,6 +10,9 @@ from functools import wraps
 
 logger = logging.getLogger(__name__)
 from flask import Flask, render_template, request, redirect, url_for, session, flash, jsonify
+from flask_wtf.csrf import CSRFProtect
+from flask_limiter import Limiter
+from flask_limiter.util import get_remote_address
 import psutil
 from datetime import datetime, timedelta
 import requests
@@ -38,6 +42,26 @@ if not _flask_secret:
         "e aggiungila al .env."
     )
 app.secret_key = _flask_secret
+app.config['WTF_CSRF_CHECK_DEFAULT'] = False   # CSRF applicato solo ai form, non alle JSON API
+app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'  # blocca invio cookie su richieste cross-origin
+app.config['SESSION_COOKIE_HTTPONLY'] = True    # cookie non accessibile da JavaScript
+app.config['SESSION_COOKIE_SECURE'] = os.getenv('FLASK_ENV') == 'production'  # HTTPS only in prod
+csrf = CSRFProtect(app)
+limiter = Limiter(app=app, key_func=get_remote_address, default_limits=[])
+
+
+@app.before_request
+def enforce_csrf_on_forms():
+    """Applica CSRF solo alle route con form HTML, non alle API JSON."""
+    if request.method in ("GET", "HEAD", "OPTIONS", "TRACE"):
+        return
+    if request.path.startswith("/api/"):
+        return
+    # Esentata perché usa già il proprio token monouso (OAuthSession.state)
+    # e il WebView di Telegram non invia cookie cross-origin (SameSite=Lax)
+    if request.path == "/auth/telegram-login":
+        return
+    csrf.protect()
 
 @app.after_request
 def skip_ngrok_interstitial(response):
@@ -199,6 +223,7 @@ def web_app_entry():
 
 
 @app.route("/login", methods=["GET", "POST"])
+@limiter.limit("5 per minute")
 def web_login():
     """Login web con email e password."""
     chat_id = _get_session_chat_id()
@@ -221,6 +246,64 @@ def web_login():
         error = "Email o password errati."
 
     return render_template("login.html", error=error)
+
+
+@app.route("/register", methods=["GET", "POST"])
+@limiter.limit("5 per minute")
+def web_register():
+    """Registrazione web: crea un account senza passare da Telegram."""
+    chat_id = _get_session_chat_id()
+    if chat_id:
+        return redirect(_resolve_authenticated_redirect(chat_id))
+
+    if request.method == "GET":
+        return render_template("register.html", error=None)
+
+    import re
+    first_name = (request.form.get("first_name") or "").strip()
+    last_name = (request.form.get("last_name") or "").strip()
+    email = (request.form.get("email") or "").strip().lower()
+    password = request.form.get("password") or ""
+    password_confirm = request.form.get("password_confirm") or ""
+
+    def _err(msg: str):
+        return render_template("register.html", error=msg)
+
+    if not first_name or not last_name:
+        return _err("Inserisci nome e cognome.")
+    if not re.match(r"^[^@\s]+@[^@\s]+\.[^@\s]+$", email):
+        return _err("Email non valida.")
+    if len(password) < 8:
+        return _err("La password deve essere di almeno 8 caratteri.")
+    if password != password_confirm:
+        return _err("Le password non coincidono.")
+    if store.get_user_by_email(email):
+        return _err("Email già registrata.")
+
+    web_chat_id = f"web_{uuid.uuid4().hex}"
+    try:
+        store.add_user(
+            chat_id=web_chat_id,
+            storage_backend="postgres",
+            setup_status="COMPLETED",
+            setup_completed_at=datetime.utcnow(),
+            username=f"{first_name} {last_name}",
+            is_active=True,
+        )
+        store.set_credentials(web_chat_id, email, password)
+    except Exception:
+        logger.exception("Errore registrazione web per email=%s", email)
+        return _err("Errore durante la registrazione. Riprova.")
+
+    session["user_logged_in"] = True
+    session["chat_id"] = web_chat_id
+    return redirect("/onboarding")
+
+
+@app.route("/privacy")
+def privacy_policy():
+    """Informativa sulla privacy (GDPR Art. 13)."""
+    return render_template("privacy.html")
 
 
 @app.route("/logout")
@@ -735,8 +818,8 @@ def _process_oauth_background(
                     "⚠️ <b>Nessun database trovato</b>\n\n"
                     "L'integrazione non riesce a vedere i database del template Moneo.\n\n"
                     "👉 <b>Cosa fare:</b>\n"
-                    "1. Apri Notion → cerca la pagina <b>Dashboard Tracky Finance</b>\n"
-                    "2. Clicca su <b>...</b> in alto a destra → <b>Connect to</b> → seleziona <b>Traky Finance Agent</b>\n"
+                    "1. Apri Notion → cerca la pagina <b>Dashboard Expensum Finance</b>\n"
+                    "2. Clicca su <b>...</b> in alto a destra → <b>Connect to</b> → seleziona <b>Expensum Finance Agent</b>\n"
                     "3. Riapri <b>/registrati</b> e riprova\n\n"
                     "<i>Assicurati di condividere la pagina root e tutte le sotto-pagine con l'integrazione.</i>"
                 )
@@ -746,7 +829,7 @@ def _process_oauth_background(
                     "Ho trovato alcuni database ma ne mancano altri.\n\n"
                     "👉 <b>Cosa fare:</b>\n"
                     "1. Assicurati che nel template ci siano tutti i <b>Database</b> (non solo pagine).\n"
-                    "2. Condividi la pagina root <b>Dashboard Tracky Finance</b> con l'integrazione.\n"
+                    "2. Condividi la pagina root <b>Dashboard Expensum Finance</b> con l'integrazione.\n"
                     "3. Riapri <b>/registrati</b> e riprova.\n\n"
                     "<b>Stato verifica:</b>\n"
                 )
@@ -887,6 +970,7 @@ def _process_postgres_background(chat_id: str) -> None:
 
 
 @app.route("/auth/postgres", methods=["GET", "POST"])
+@limiter.limit("5 per minute")
 def auth_postgres_start():
     """Registrazione su PostgreSQL: raccoglie email e password prima di creare l'utente."""
     reg_token = request.args.get("reg_token") or request.form.get("reg_token")
@@ -2468,6 +2552,92 @@ def api_auth_session():
 
 
 # ---------------------------------------------------------------------------
+# Settings API
+# ---------------------------------------------------------------------------
+
+@app.route("/api/settings", methods=["GET"])
+def api_settings_get():
+    """Dati account e piano per la pagina Impostazioni."""
+    from src.user_store import User
+    chat_id, auth_mode = _resolve_request_chat_id()
+    if not chat_id:
+        return jsonify({"error": "Unauthorized"}), 401
+
+    with store.Session() as s:
+        user = s.query(User).filter_by(chat_id=chat_id).first()
+        if not user:
+            return jsonify({"error": "User not found"}), 404
+
+        telegram_connected = not str(chat_id).startswith("web_")
+        name_parts = (user.username or "").strip().split(" ", 1)
+        first_name = name_parts[0] if name_parts else None
+        last_name = name_parts[1] if len(name_parts) > 1 else None
+
+    plan = store.get_user_plan(chat_id)
+    reset_at = plan.get("tokens_reset_at")
+    tokens_usage_percent = 0
+    tokens_total = plan.get("tokens_total", 1)
+    if tokens_total:
+        used = plan.get("tokens_used_current_cycle", 0) + plan.get("tokens_reserved_current_cycle", 0)
+        tokens_usage_percent = round(used / tokens_total * 100, 1)
+
+    return jsonify({
+        "chat_id": chat_id,
+        "auth_mode": auth_mode,
+        "account": {
+            "email": user.email if hasattr(user, "email") else None,
+            "first_name": first_name,
+            "last_name": last_name,
+            "telegram_connected": telegram_connected,
+            "telegram_chat_id": chat_id if telegram_connected else None,
+            "storage_backend": user.storage_backend,
+            "is_active": user.is_active,
+        },
+        "plan": {
+            "plan_type": plan.get("plan_type", "free"),
+            "tokens_total": tokens_total,
+            "tokens_used_current_cycle": plan.get("tokens_used_current_cycle", 0),
+            "tokens_reserved_current_cycle": plan.get("tokens_reserved_current_cycle", 0),
+            "tokens_remaining": plan.get("tokens_remaining", 0),
+            "tokens_usage_percent": tokens_usage_percent,
+            "tokens_reset_at": reset_at.isoformat() if reset_at else None,
+            "alert": plan.get("alert"),
+        },
+    })
+
+
+@app.route("/api/settings/logout", methods=["POST"])
+def api_settings_logout():
+    """Sospende l'account (is_active=False) e invalida la sessione corrente."""
+    chat_id, _ = _resolve_request_chat_id()
+    if not chat_id:
+        return jsonify({"error": "Unauthorized"}), 401
+
+    store.deactivate_user(chat_id)
+    session.clear()
+    return jsonify({"ok": True, "redirect_url": "/login"})
+
+
+@app.route("/api/settings/delete-account", methods=["POST"])
+def api_settings_delete_account():
+    """Elimina definitivamente account e dati locali. Richiede confirm='DELETE'."""
+    chat_id, _ = _resolve_request_chat_id()
+    if not chat_id:
+        return jsonify({"error": "Unauthorized"}), 401
+
+    body = request.get_json(silent=True) or {}
+    if (body.get("confirm") or "").strip().upper() != "DELETE":
+        return jsonify({"error": "Conferma non valida. Scrivi DELETE per procedere."}), 400
+
+    result = store.delete_user_completely(chat_id)
+    if result == "not_found":
+        return jsonify({"error": "Utente non trovato."}), 404
+
+    session.clear()
+    return jsonify({"ok": True, "redirect_url": "/login"})
+
+
+# ---------------------------------------------------------------------------
 # Onboarding API
 # ---------------------------------------------------------------------------
 
@@ -3309,6 +3479,450 @@ def api_get_reports_for_user():
         for r in reports
     ]
     return jsonify({"reports": summary})
+
+
+# ---------------------------------------------------------------------------
+# /api/space — CRUD completo per la pagina "Il mio Spazio"
+# ---------------------------------------------------------------------------
+
+def _pg_or_401(s, chat_id):
+    """Restituisce (PostgresStorage, None) o (None, response 400) se backend != postgres."""
+    from src.user_store import User
+    user = s.query(User).filter_by(chat_id=chat_id).first()
+    if not user or user.storage_backend != "postgres":
+        return None, (jsonify({"error": "Solo backend PostgreSQL supportato"}), 400)
+    return PostgresStorage(session=s, user_id=chat_id), None
+
+
+# ── Accounts ─────────────────────────────────────────────────────────────────
+
+@app.route("/api/space/accounts", methods=["GET"])
+@_tg_webapp_auth
+def space_accounts_list():
+    from flask import g
+    with store.Session() as s:
+        pg, err = _pg_or_401(s, g.chat_id)
+        if err:
+            return err
+        return jsonify({"accounts": pg.fetch_accounts()})
+
+
+@app.route("/api/space/accounts", methods=["POST"])
+@_tg_webapp_auth
+def space_accounts_create():
+    from flask import g
+    data = request.json or {}
+    name = (data.get("name") or "").strip()
+    if not name:
+        return jsonify({"error": "Il campo 'name' è obbligatorio"}), 400
+    with store.Session() as s:
+        pg, err = _pg_or_401(s, g.chat_id)
+        if err:
+            return err
+        result = pg.create_account(
+            name,
+            initial_balance=float(data.get("initial_balance") or 0),
+            account_type=data.get("account_type") or None,
+        )
+        return jsonify(result), 201
+
+
+@app.route("/api/space/accounts/<int:account_id>", methods=["PUT"])
+@_tg_webapp_auth
+def space_accounts_update(account_id: int):
+    from flask import g
+    data = request.json or {}
+    with store.Session() as s:
+        pg, err = _pg_or_401(s, g.chat_id)
+        if err:
+            return err
+        result = pg.update_account(
+            account_id,
+            name=data.get("name") or None,
+            balance=float(data["balance"]) if data.get("balance") not in (None, "") else None,
+            account_type=data.get("account_type") or None,
+        )
+        if result is None:
+            return jsonify({"error": "Conto non trovato"}), 404
+        return jsonify(result)
+
+
+@app.route("/api/space/accounts/<int:account_id>", methods=["DELETE"])
+@_tg_webapp_auth
+def space_accounts_delete(account_id: int):
+    from flask import g
+    with store.Session() as s:
+        pg, err = _pg_or_401(s, g.chat_id)
+        if err:
+            return err
+        ok = pg.delete_account(account_id)
+        if not ok:
+            return jsonify({"error": "Conto non trovato"}), 404
+        return jsonify({"status": "ok"})
+
+
+# ── Categories ────────────────────────────────────────────────────────────────
+
+@app.route("/api/space/categories", methods=["GET"])
+@_tg_webapp_auth
+def space_categories_list():
+    from flask import g
+    with store.Session() as s:
+        pg, err = _pg_or_401(s, g.chat_id)
+        if err:
+            return err
+        return jsonify({"categories": pg.fetch_categories_full()})
+
+
+@app.route("/api/space/categories/suggestions", methods=["GET"])
+@_tg_webapp_auth
+def space_categories_suggestions():
+    from flask import g
+    with store.Session() as s:
+        pg, err = _pg_or_401(s, g.chat_id)
+        if err:
+            return err
+        return jsonify({"suggestions": pg.get_budget_suggestions()})
+
+
+@app.route("/api/space/categories/<int:cat_id>/accept-suggestion", methods=["POST"])
+@_tg_webapp_auth
+def space_categories_accept_suggestion(cat_id: int):
+    from flask import g
+    data = request.json or {}
+    suggested = data.get("suggested_budget")
+    if suggested is None:
+        return jsonify({"error": "suggested_budget obbligatorio"}), 400
+    with store.Session() as s:
+        pg, err = _pg_or_401(s, g.chat_id)
+        if err:
+            return err
+        result = pg.update_category(cat_id, monthly_budget=float(suggested))
+        if result is None:
+            return jsonify({"error": "Categoria non trovata"}), 404
+        return jsonify(result)
+
+
+@app.route("/api/space/categories", methods=["POST"])
+@_tg_webapp_auth
+def space_categories_create():
+    from flask import g
+    data = request.json or {}
+    name = (data.get("name") or "").strip()
+    if not name:
+        return jsonify({"error": "Il campo 'name' è obbligatorio"}), 400
+    with store.Session() as s:
+        pg, err = _pg_or_401(s, g.chat_id)
+        if err:
+            return err
+        existing = {n.lower() for n in pg.get_category_names()}
+        if name.lower() in existing:
+            return jsonify({"error": f"Categoria '{name}' già esistente"}), 409
+        monthly_budget = float(data["monthly_budget"]) if data.get("monthly_budget") not in (None, "") else None
+        result = pg.create_category(name, monthly_budget=monthly_budget)
+        return jsonify(result), 201
+
+
+@app.route("/api/space/categories/<int:cat_id>", methods=["PUT"])
+@_tg_webapp_auth
+def space_categories_update(cat_id: int):
+    from flask import g
+    data = request.json or {}
+    with store.Session() as s:
+        pg, err = _pg_or_401(s, g.chat_id)
+        if err:
+            return err
+        monthly_budget = float(data["monthly_budget"]) if data.get("monthly_budget") not in (None, "") else None
+        result = pg.update_category(cat_id, name=data.get("name") or None, monthly_budget=monthly_budget)
+        if result is None:
+            return jsonify({"error": "Categoria non trovata"}), 404
+        return jsonify(result)
+
+
+@app.route("/api/space/categories/<int:cat_id>", methods=["DELETE"])
+@_tg_webapp_auth
+def space_categories_delete(cat_id: int):
+    from flask import g
+    with store.Session() as s:
+        pg, err = _pg_or_401(s, g.chat_id)
+        if err:
+            return err
+        ok = pg.delete_category(cat_id)
+        if not ok:
+            return jsonify({"error": "Categoria non trovata"}), 404
+        return jsonify({"status": "ok"})
+
+
+# ── Subscriptions ─────────────────────────────────────────────────────────────
+
+@app.route("/api/space/subscriptions", methods=["GET"])
+@_tg_webapp_auth
+def space_subscriptions_list():
+    from flask import g
+    with store.Session() as s:
+        pg, err = _pg_or_401(s, g.chat_id)
+        if err:
+            return err
+        return jsonify({"subscriptions": pg.fetch_subscriptions_with_account_name()})
+
+
+@app.route("/api/space/subscriptions", methods=["POST"])
+@_tg_webapp_auth
+def space_subscriptions_create():
+    from flask import g
+    data = request.json or {}
+    name = (data.get("name") or "").strip()
+    if not name:
+        return jsonify({"error": "Il campo 'name' è obbligatorio"}), 400
+    with store.Session() as s:
+        pg, err = _pg_or_401(s, g.chat_id)
+        if err:
+            return err
+        result = pg.create_subscription(
+            name,
+            amount=float(data["amount"]) if data.get("amount") not in (None, "") else None,
+            last_billed=data.get("last_billed") or None,
+            sub_type=data.get("sub_type") or None,
+            account_id=int(data["account_id"]) if data.get("account_id") else None,
+            category_id=int(data["category_id"]) if data.get("category_id") else None,
+        )
+        return jsonify(result), 201
+
+
+@app.route("/api/space/subscriptions/<int:sub_id>", methods=["PUT"])
+@_tg_webapp_auth
+def space_subscriptions_update(sub_id: int):
+    from flask import g
+    data = request.json or {}
+    with store.Session() as s:
+        pg, err = _pg_or_401(s, g.chat_id)
+        if err:
+            return err
+        from datetime import datetime as _dt
+        last_billed = None
+        if data.get("last_billed"):
+            try:
+                last_billed = _dt.strptime(data["last_billed"], "%Y-%m-%d").date()
+            except ValueError:
+                pass
+        result = pg.update_subscription(
+            sub_id,
+            name=data.get("name") or None,
+            amount=float(data["amount"]) if data.get("amount") not in (None, "") else None,
+            last_billed=last_billed,
+            sub_type=data.get("sub_type") or None,
+            account_id=int(data["account_id"]) if data.get("account_id") else None,
+            category_id=int(data["category_id"]) if data.get("category_id") else None,
+        )
+        if result is None:
+            return jsonify({"error": "Abbonamento non trovato"}), 404
+        return jsonify(result)
+
+
+@app.route("/api/space/subscriptions/<int:sub_id>", methods=["DELETE"])
+@_tg_webapp_auth
+def space_subscriptions_delete(sub_id: int):
+    from flask import g
+    with store.Session() as s:
+        pg, err = _pg_or_401(s, g.chat_id)
+        if err:
+            return err
+        ok = pg.delete_subscription(sub_id)
+        if not ok:
+            return jsonify({"error": "Abbonamento non trovato"}), 404
+        return jsonify({"status": "ok"})
+
+
+# ── Expenses ──────────────────────────────────────────────────────────────────
+
+@app.route("/api/space/expenses", methods=["GET"])
+@_tg_webapp_auth
+def space_expenses_list():
+    from flask import g
+    from datetime import date as _date
+    today = _date.today()
+    start = request.args.get("start", _date(today.year, today.month, 1).isoformat())
+    end = request.args.get("end", today.isoformat())
+    limit = min(int(request.args.get("limit", 25)), 100)
+    offset = int(request.args.get("offset", 0))
+    try:
+        from datetime import datetime as _dt
+        start_d = _dt.strptime(start, "%Y-%m-%d").date()
+        end_d = _dt.strptime(end, "%Y-%m-%d").date()
+    except ValueError:
+        return jsonify({"error": "Formato data non valido (YYYY-MM-DD)"}), 400
+    with store.Session() as s:
+        pg, err = _pg_or_401(s, g.chat_id)
+        if err:
+            return err
+        items, total = pg.fetch_expenses_paginated(start_d, end_d, limit=limit, offset=offset)
+        return jsonify({"expenses": items, "total": total})
+
+
+@app.route("/api/space/expenses", methods=["POST"])
+@_tg_webapp_auth
+def space_expenses_create():
+    from flask import g
+    from datetime import datetime as _dt
+    data = request.json or {}
+    name = (data.get("name") or "").strip()
+    if not name or not data.get("amount") or not data.get("date"):
+        return jsonify({"error": "name, amount e date sono obbligatori"}), 400
+    try:
+        exp_date = _dt.strptime(data["date"], "%Y-%m-%d").date()
+    except ValueError:
+        return jsonify({"error": "Formato data non valido"}), 400
+    with store.Session() as s:
+        pg, err = _pg_or_401(s, g.chat_id)
+        if err:
+            return err
+        result = pg.create_expense(
+            expense_date=exp_date,
+            amount=float(data["amount"]),
+            name=name,
+            category_name=data.get("category") or "",
+            account_id=data.get("account_id"),
+        )
+        return jsonify(result), 201
+
+
+@app.route("/api/space/expenses/<int:expense_id>", methods=["PUT"])
+@_tg_webapp_auth
+def space_expenses_update(expense_id: int):
+    from flask import g
+    from datetime import datetime as _dt
+    data = request.json or {}
+    with store.Session() as s:
+        pg, err = _pg_or_401(s, g.chat_id)
+        if err:
+            return err
+        exp_date = None
+        if data.get("date"):
+            try:
+                exp_date = _dt.strptime(data["date"], "%Y-%m-%d").date()
+            except ValueError:
+                return jsonify({"error": "Formato data non valido"}), 400
+        result = pg.update_expense(
+            expense_id,
+            name=data.get("name") or None,
+            amount=float(data["amount"]) if data.get("amount") not in (None, "") else None,
+            date=exp_date,
+            category_id=int(data["category_id"]) if data.get("category_id") else None,
+            account_id=int(data["account_id"]) if data.get("account_id") else None,
+        )
+        if result is None:
+            return jsonify({"error": "Spesa non trovata"}), 404
+        return jsonify(result)
+
+
+@app.route("/api/space/expenses/<int:expense_id>", methods=["DELETE"])
+@_tg_webapp_auth
+def space_expenses_delete(expense_id: int):
+    from flask import g
+    with store.Session() as s:
+        pg, err = _pg_or_401(s, g.chat_id)
+        if err:
+            return err
+        ok = pg.delete_expense(expense_id)
+        if not ok:
+            return jsonify({"error": "Spesa non trovata"}), 404
+        return jsonify({"status": "ok"})
+
+
+# ── Incomes ───────────────────────────────────────────────────────────────────
+
+@app.route("/api/space/incomes", methods=["GET"])
+@_tg_webapp_auth
+def space_incomes_list():
+    from flask import g
+    from datetime import date as _date
+    today = _date.today()
+    start = request.args.get("start", _date(today.year, today.month, 1).isoformat())
+    end = request.args.get("end", today.isoformat())
+    limit = min(int(request.args.get("limit", 25)), 100)
+    offset = int(request.args.get("offset", 0))
+    try:
+        from datetime import datetime as _dt
+        start_d = _dt.strptime(start, "%Y-%m-%d").date()
+        end_d = _dt.strptime(end, "%Y-%m-%d").date()
+    except ValueError:
+        return jsonify({"error": "Formato data non valido (YYYY-MM-DD)"}), 400
+    with store.Session() as s:
+        pg, err = _pg_or_401(s, g.chat_id)
+        if err:
+            return err
+        items, total = pg.fetch_incomes_paginated(start_d, end_d, limit=limit, offset=offset)
+        return jsonify({"incomes": items, "total": total})
+
+
+@app.route("/api/space/incomes", methods=["POST"])
+@_tg_webapp_auth
+def space_incomes_create():
+    from flask import g
+    from datetime import datetime as _dt
+    data = request.json or {}
+    name = (data.get("name") or "").strip()
+    if not name or not data.get("amount") or not data.get("date"):
+        return jsonify({"error": "name, amount e date sono obbligatori"}), 400
+    try:
+        inc_date = _dt.strptime(data["date"], "%Y-%m-%d").date()
+    except ValueError:
+        return jsonify({"error": "Formato data non valido"}), 400
+    with store.Session() as s:
+        pg, err = _pg_or_401(s, g.chat_id)
+        if err:
+            return err
+        result = pg.create_income(
+            income_date=inc_date,
+            amount=float(data["amount"]),
+            name=name,
+            account_id=data.get("account_id"),
+            income_type=data.get("income_type") or None,
+        )
+        return jsonify(result), 201
+
+
+@app.route("/api/space/incomes/<int:income_id>", methods=["PUT"])
+@_tg_webapp_auth
+def space_incomes_update(income_id: int):
+    from flask import g
+    from datetime import datetime as _dt
+    data = request.json or {}
+    with store.Session() as s:
+        pg, err = _pg_or_401(s, g.chat_id)
+        if err:
+            return err
+        inc_date = None
+        if data.get("date"):
+            try:
+                inc_date = _dt.strptime(data["date"], "%Y-%m-%d").date()
+            except ValueError:
+                return jsonify({"error": "Formato data non valido"}), 400
+        result = pg.update_income(
+            income_id,
+            name=data.get("name") or None,
+            amount=float(data["amount"]) if data.get("amount") not in (None, "") else None,
+            date=inc_date,
+            income_type=data.get("income_type") or None,
+            account_id=int(data["account_id"]) if data.get("account_id") else None,
+        )
+        if result is None:
+            return jsonify({"error": "Entrata non trovata"}), 404
+        return jsonify(result)
+
+
+@app.route("/api/space/incomes/<int:income_id>", methods=["DELETE"])
+@_tg_webapp_auth
+def space_incomes_delete(income_id: int):
+    from flask import g
+    with store.Session() as s:
+        pg, err = _pg_or_401(s, g.chat_id)
+        if err:
+            return err
+        ok = pg.delete_income(income_id)
+        if not ok:
+            return jsonify({"error": "Entrata non trovata"}), 404
+        return jsonify({"status": "ok"})
 
 
 if __name__ == "__main__":

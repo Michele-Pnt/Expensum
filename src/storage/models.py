@@ -4,8 +4,8 @@ import uuid
 from sqlalchemy import (
     Column,
     String,
-    Float,
     Integer,
+    Numeric,
     Date,
     DateTime,
     ForeignKey,
@@ -31,7 +31,7 @@ class Expense(Base):
     id = Column(Integer, primary_key=True, autoincrement=True)
     user_id = Column(String, ForeignKey("users.chat_id"), nullable=False)
     expense_date = Column(Date, nullable=False)
-    amount = Column(Float, nullable=False)
+    amount = Column(Numeric(12, 2), nullable=False)
     name = Column(String, nullable=False)
     # Legacy bridge — sarà NULL dopo il backfill; NON usare nel codice applicativo.
     category_name = Column(String, nullable=True)
@@ -48,7 +48,7 @@ class Income(Base):
     id = Column(Integer, primary_key=True, autoincrement=True)
     user_id = Column(String, ForeignKey("users.chat_id"), nullable=False)
     income_date = Column(Date, nullable=False)
-    amount = Column(Float, nullable=False)
+    amount = Column(Numeric(12, 2), nullable=False)
     name = Column(String, nullable=False)
     account_id = Column(Integer, ForeignKey("accounts.id"), nullable=False)
     income_type = Column(String, nullable=True)
@@ -66,7 +66,7 @@ class Account(Base):
     id = Column(Integer, primary_key=True, autoincrement=True)
     user_id = Column(String, ForeignKey("users.chat_id"), nullable=False)
     name = Column(String, nullable=False)
-    opening_balance = Column(Float, default=0.0)
+    opening_balance = Column(Numeric(12, 2), default=0)
     currency = Column(String, default="EUR")
     account_type = Column(String, nullable=True)
 
@@ -96,7 +96,7 @@ class UserCategory(Base):
     id = Column(Integer, primary_key=True, autoincrement=True)
     user_id = Column(String, ForeignKey("users.chat_id"), nullable=False)
     name = Column(String, nullable=False)
-    monthly_budget = Column(Float, nullable=True)
+    monthly_budget = Column(Numeric(12, 2), nullable=True)
 
     __table_args__ = (
         UniqueConstraint("user_id", "name", name="uq_user_categories_user_name"),
@@ -115,7 +115,7 @@ class UserCategoryNotionLink(Base):
     category_id = Column(Integer, ForeignKey("user_categories.id"), primary_key=True)
     notion_page_id = Column(String, nullable=True, unique=True)
     synced_at = Column(DateTime, nullable=True)
-    average = Column(Float, nullable=True)
+    average = Column(Numeric(12, 2), nullable=True)
 
 
 class Subscription(Base):
@@ -126,7 +126,7 @@ class Subscription(Base):
     id = Column(Integer, primary_key=True, autoincrement=True)
     user_id = Column(String, ForeignKey("users.chat_id"), nullable=False)
     name = Column(String, nullable=False)
-    amount = Column(Float, nullable=True)
+    amount = Column(Numeric(12, 2), nullable=True)
     last_billed = Column(Date, nullable=True)
     sub_type = Column(String, nullable=True)
     account_id = Column(Integer, ForeignKey("accounts.id"), nullable=True)

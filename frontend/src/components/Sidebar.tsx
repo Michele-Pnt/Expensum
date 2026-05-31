@@ -4,7 +4,7 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { Drawer, List, ListItem, ListItemButton, ListItemText, Box } from "@mui/material";
-import { BarChart2, MessageCircle, CreditCard, MessageSquare, Home, FileText } from "lucide-react";
+import { BarChart2, MessageCircle, CreditCard, MessageSquare, FileText, User, Settings } from "lucide-react";
 import styles from "./Sidebar.module.css";
 
 const drawerWidth = 240;
@@ -26,8 +26,10 @@ export default function Sidebar({ mobileOpen = false, desktopOpen = true, onTogg
   ];
 
   const bottomNavItems = [
+    { name: "Il mio Spazio", path: "/spazio", icon: <User size={18} /> },
     { name: "Feedback", path: "/feedback", icon: <MessageSquare size={18} /> },
     { name: "Abbonamenti", path: "/abbonamenti", icon: <CreditCard size={18} /> },
+    { name: "Impostazioni", path: "/impostazioni", icon: <Settings size={18} /> },
   ];
 
   const drawerContent = (

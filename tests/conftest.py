@@ -29,6 +29,17 @@ if project_root not in sys.path:
 from src.user_store import UserStore, Base
 
 
+@pytest.fixture(autouse=True)
+def reset_rate_limiter():
+    """Svuota lo storage del rate limiter tra i test per evitare contaminazione incrociata."""
+    try:
+        from src.dashboard.app import limiter
+        limiter.reset()
+    except ImportError:
+        pass
+    yield
+
+
 @pytest.fixture
 def mock_db_session():
     """Restituisce un database SQLite in memoria, isolato e azzerato per ogni test."""
@@ -44,7 +55,7 @@ def app():
     """Fixture necessaria per pytest-flask. L'import avviene qui, non a livello di modulo,
     per evitare che la collection dei test apra una connessione al DB reale."""
     from src.dashboard.app import app as flask_app
-    flask_app.config.update({"TESTING": True})
+    flask_app.config.update({"TESTING": True, "WTF_CSRF_ENABLED": False})
     yield flask_app
 
 @pytest.fixture

@@ -1,0 +1,195 @@
+.widget {
+  position: fixed;
+  bottom: 80px;
+  right: 16px;
+  z-index: 50;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 5px;
+  pointer-events: none;
+}
+
+.head {
+  position: relative;
+  width: 64px;
+  height: 64px;
+  border-radius: 50%;
+  background: linear-gradient(145deg, #1e4080, #1A3673);
+  border: 2px solid rgba(197, 160, 89, 0.45);
+  box-shadow: 0 4px 20px rgba(26, 54, 115, 0.55), 0 0 0 3px rgba(197, 160, 89, 0.1);
+  animation: moneoFloat 3s ease-in-out infinite;
+}
+
+.earLeft, .earRight {
+  position: absolute;
+  top: -11px;
+  width: 17px;
+  height: 19px;
+  background: #1A3673;
+  clip-path: polygon(50% 0%, 0% 100%, 100% 100%);
+}
+.earLeft  { left: 9px; }
+.earRight { right: 9px; }
+
+.earLeft::after, .earRight::after {
+  content: '';
+  position: absolute;
+  bottom: 3px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 9px;
+  height: 11px;
+  background: rgba(197, 160, 89, 0.28);
+  clip-path: polygon(50% 0%, 0% 100%, 100% 100%);
+}
+
+.eyes {
+  position: absolute;
+  top: 21px;
+  left: 0;
+  right: 0;
+  display: flex;
+  justify-content: center;
+  gap: 13px;
+}
+
+.eyeWrap {
+  position: relative;
+  width: 14px;
+  height: 14px;
+}
+
+.eye {
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: #f0f2f8;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  transition: transform 0.3s ease;
+}
+
+.pupil {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #0B1120;
+  transition: transform 0.3s ease, width 0.3s ease, height 0.3s ease;
+}
+
+.lid {
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  background: #1e4080;
+  transform-origin: top center;
+  transform: scaleY(0);
+  animation: blink 4s ease-in-out infinite;
+}
+.lidRight { animation-delay: 0.07s; }
+
+@keyframes blink {
+  0%, 89%, 100% { transform: scaleY(0); }
+  93%           { transform: scaleY(1); }
+}
+
+.nose {
+  position: absolute;
+  top: 37px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 5px;
+  height: 4px;
+  border-radius: 50%;
+  background: #C5A059;
+  opacity: 0.85;
+}
+
+.mouth {
+  position: absolute;
+  bottom: 12px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 22px;
+  height: 9px;
+  border-bottom: 2.5px solid #C5A059;
+  border-radius: 0 0 22px 22px;
+  transition: all 0.25s ease;
+}
+
+.cheek {
+  position: absolute;
+  top: 35px;
+  width: 11px;
+  height: 7px;
+  border-radius: 50%;
+  background: rgba(255, 140, 120, 0.4);
+  opacity: 0;
+  transition: opacity 0.3s ease;
+}
+.cheekLeft  { left: 4px; }
+.cheekRight { right: 4px; }
+
+.label {
+  font-size: 0.62rem;
+  color: rgba(176, 181, 185, 0.55);
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  font-family: 'Inter', system-ui, sans-serif;
+}
+
+/* ── Idle ── */
+@keyframes moneoFloat {
+  0%, 100% { transform: translateY(0); }
+  50%       { transform: translateY(-5px); }
+}
+
+/* ── Thinking ── */
+.thinking { animation: moneoThink 0.85s ease-in-out infinite; }
+.thinking .pupil { transform: translate(-2px, -2px); }
+.thinking .mouth { width: 11px; height: 11px; border: 2.5px solid #C5A059; border-radius: 50%; bottom: 11px; }
+@keyframes moneoThink {
+  0%, 100% { transform: rotate(-7deg) translateY(0); }
+  50%       { transform: rotate(7deg) translateY(-2px); }
+}
+
+/* ── Happy ── */
+.happy { animation: moneoHappy 0.5s ease-in-out infinite; }
+.happy .eye { transform: scaleY(0.12); }
+.happy .pupil { opacity: 0; }
+.happy .lid { animation: none; transform: scaleY(0); }
+.happy .mouth { width: 30px; height: 15px; border-bottom: 3px solid #C5A059; border-radius: 0 0 30px 30px; bottom: 10px; }
+.happy .cheek { opacity: 1; }
+@keyframes moneoHappy {
+  0%, 100% { transform: translateY(0) scale(1); }
+  30%       { transform: translateY(-7px) scale(1.06); }
+  70%       { transform: translateY(2px) scale(0.96); }
+}
+
+/* ── Error ── */
+.error { animation: moneoError 0.38s ease-in-out 3 forwards; }
+.error .pupil { transform: translateY(2px); }
+.error .mouth { border-bottom: none; border-top: 2.5px solid #C5A059; border-radius: 22px 22px 0 0; bottom: 10px; height: 9px; }
+@keyframes moneoError {
+  0%, 100% { transform: translateX(0); }
+  25%       { transform: translateX(-6px); }
+  75%       { transform: translateX(6px); }
+}
+
+/* ── Recording ── */
+.recording { animation: moneoRecord 0.6s ease-in-out infinite; }
+.recording .eye { transform: scale(1.18); }
+.recording .pupil { width: 9px; height: 9px; }
+.recording .mouth { width: 15px; height: 13px; background: rgba(11, 17, 32, 0.65); border: 2.5px solid #C5A059; border-radius: 50%; bottom: 10px; }
+@keyframes moneoRecord {
+  0%, 100% { transform: scale(1); box-shadow: 0 4px 20px rgba(26, 54, 115, 0.55), 0 0 0 3px rgba(197, 160, 89, 0.1); }
+  50%       { transform: scale(1.05); box-shadow: 0 4px 28px rgba(26, 54, 115, 0.65), 0 0 0 6px rgba(197, 160, 89, 0.22); }
+}
+
+@media (max-width: 480px) {
+  .widget { display: none; }
+}

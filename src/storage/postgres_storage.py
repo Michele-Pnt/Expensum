@@ -9,6 +9,7 @@ Invarianti:
 """
 
 from datetime import date, datetime
+from decimal import Decimal
 
 from sqlalchemy import func, text
 from sqlalchemy.orm import Session
@@ -17,6 +18,13 @@ import uuid
 
 from src.storage.base import FinancialStorage
 from src.storage.models import Account, UserCategory, UserCategoryNotionLink, Expense, Income, Subscription, SavedReport
+
+
+def _d(v) -> float:
+    """Converte Decimal (o qualsiasi numero) in float. Sicuro su None."""
+    if v is None:
+        return 0.0
+    return float(v)
 
 
 class PostgresStorage(FinancialStorage):
@@ -46,23 +54,24 @@ class PostgresStorage(FinancialStorage):
         self._session.flush()
         return new_cat.id
 
-    def _compute_balance(self, account: Account) -> float:
+    def _compute_balance(self, account: Account) -> Decimal:
         """Calcola il saldo corrente: opening_balance + entrate - uscite."""
         total_income = self._session.query(
             func.coalesce(func.sum(Income.amount), 0)
         ).filter(
             Income.user_id == self._user_id,
             Income.account_id == account.id,
-        ).scalar() or 0.0
+        ).scalar() or 0
 
         total_expense = self._session.query(
             func.coalesce(func.sum(Expense.amount), 0)
         ).filter(
             Expense.user_id == self._user_id,
             Expense.account_id == account.id,
-        ).scalar() or 0.0
+        ).scalar() or 0
 
-        return (account.opening_balance or 0.0) + total_income - total_expense
+        opening = account.opening_balance if account.opening_balance is not None else Decimal(0)
+        return Decimal(str(opening)) + Decimal(str(total_income)) - Decimal(str(total_expense))
 
     # ------------------------------------------------------------------ categories
 
@@ -92,8 +101,8 @@ class PostgresStorage(FinancialStorage):
             {
                 "id": cat.id,
                 "name": cat.name,
-                "monthly_budget": cat.monthly_budget,
-                "average": link.average if link else 0.0,
+                "monthly_budget": _d(cat.monthly_budget) if cat.monthly_budget is not None else None,
+                "average": _d(link.average) if link else 0.0,
             }
             for cat, link in rows
         ]
@@ -169,7 +178,7 @@ class PostgresStorage(FinancialStorage):
         return {
             "id": expense.id,
             "date": expense.expense_date,
-            "amount": expense.amount,
+            "amount": _d(expense.amount),
             "name": expense.name,
             "category": category_name,
             "account_id": expense.account_id,
@@ -188,7 +197,7 @@ class PostgresStorage(FinancialStorage):
             {
                 "id": exp.id,
                 "date": exp.expense_date,
-                "amount": exp.amount,
+                "amount": _d(exp.amount),
                 "name": exp.name,
                 "category": cat.name if cat else (exp.category_name or ""),
                 "account_id": exp.account_id,
@@ -226,7 +235,7 @@ class PostgresStorage(FinancialStorage):
         return {
             "id": income.id,
             "date": income.income_date,
-            "amount": income.amount,
+            "amount": _d(income.amount),
             "name": income.name,
             "account_id": income.account_id,
             "income_type": income.income_type,
@@ -243,7 +252,7 @@ class PostgresStorage(FinancialStorage):
             {
                 "id": r.id,
                 "date": r.income_date,
-                "amount": r.amount,
+                "amount": _d(r.amount),
                 "name": r.name,
                 "account_id": r.account_id,
                 "income_type": r.income_type,
@@ -262,8 +271,8 @@ class PostgresStorage(FinancialStorage):
             {
                 "id": r.id,
                 "name": r.name,
-                "current_balance": self._compute_balance(r),
-                "opening_balance": r.opening_balance,
+                "current_balance": _d(self._compute_balance(r)),
+                "opening_balance": _d(r.opening_balance),
                 "currency": r.currency,
                 "account_type": r.account_type,
             }
@@ -398,7 +407,7 @@ class PostgresStorage(FinancialStorage):
             {
                 "id": r.id,
                 "name": r.name,
-                "amount": r.amount,
+                "amount": _d(r.amount),
                 "last_billed": r.last_billed.isoformat() if r.last_billed else None,
                 "sub_type": r.sub_type,
                 "account_id": r.account_id,
@@ -434,7 +443,7 @@ class PostgresStorage(FinancialStorage):
         return {
             "id": subscription.id,
             "name": subscription.name,
-            "amount": subscription.amount,
+            "amount": _d(subscription.amount),
             "last_billed": subscription.last_billed.isoformat() if subscription.last_billed else None,
             "sub_type": subscription.sub_type,
             "account_id": subscription.account_id,
@@ -474,7 +483,7 @@ class PostgresStorage(FinancialStorage):
         return {
             "id": row.id,
             "name": row.name,
-            "amount": row.amount,
+            "amount": _d(row.amount),
             "last_billed": row.last_billed.isoformat() if row.last_billed else None,
             "sub_type": row.sub_type,
             "account_id": row.account_id,
@@ -492,6 +501,193 @@ class PostgresStorage(FinancialStorage):
         self._session.delete(row)
         self._session.commit()
         return True
+
+    # ------------------------------------------------------------------ expense CRUD
+
+    def fetch_expenses_paginated(
+        self,
+        start_date: date,
+        end_date: date,
+        limit: int = 25,
+        offset: int = 0,
+    ) -> tuple[list[dict], int]:
+        """Restituisce spese paginate nell'intervallo con totale righe."""
+        base_q = self._session.query(Expense, UserCategory).outerjoin(
+            UserCategory, UserCategory.id == Expense.category_id
+        ).filter(
+            Expense.user_id == self._user_id,
+            Expense.expense_date >= start_date,
+            Expense.expense_date <= end_date,
+        )
+        total = base_q.count()
+        rows = base_q.order_by(Expense.expense_date.desc()).limit(limit).offset(offset).all()
+        items = [
+            {
+                "id": exp.id,
+                "date": exp.expense_date.isoformat(),
+                "name": exp.name,
+                "amount": float(exp.amount),
+                "category": cat.name if cat else (exp.category_name or ""),
+                "category_id": exp.category_id,
+                "account": None,
+                "account_id": exp.account_id,
+            }
+            for exp, cat in rows
+        ]
+        # arricchisci con nome conto
+        acc_map = {a["id"]: a["name"] for a in self.fetch_accounts()}
+        for item in items:
+            item["account"] = acc_map.get(item["account_id"], "")
+        return items, total
+
+    def update_expense(self, expense_id: int, **kwargs) -> dict | None:
+        """Aggiorna una spesa (name, amount, date, category_id, account_id)."""
+        row = self._session.query(Expense).filter(
+            Expense.id == expense_id,
+            Expense.user_id == self._user_id,
+        ).first()
+        if not row:
+            return None
+        if "name" in kwargs and kwargs["name"] is not None:
+            row.name = kwargs["name"]
+        if "amount" in kwargs and kwargs["amount"] is not None:
+            row.amount = kwargs["amount"]
+        if "date" in kwargs and kwargs["date"] is not None:
+            row.expense_date = kwargs["date"]
+        if "category_id" in kwargs:
+            row.category_id = kwargs["category_id"]
+        if "account_id" in kwargs:
+            row.account_id = kwargs["account_id"]
+        self._session.commit()
+        return {"id": row.id, "name": row.name, "amount": float(row.amount)}
+
+    def delete_expense(self, expense_id: int) -> bool:
+        """Elimina una spesa."""
+        row = self._session.query(Expense).filter(
+            Expense.id == expense_id,
+            Expense.user_id == self._user_id,
+        ).first()
+        if not row:
+            return False
+        self._session.delete(row)
+        self._session.commit()
+        return True
+
+    # ------------------------------------------------------------------ income CRUD
+
+    def fetch_incomes_paginated(
+        self,
+        start_date: date,
+        end_date: date,
+        limit: int = 25,
+        offset: int = 0,
+    ) -> tuple[list[dict], int]:
+        """Restituisce entrate paginate nell'intervallo con totale righe."""
+        base_q = self._session.query(Income).filter(
+            Income.user_id == self._user_id,
+            Income.income_date >= start_date,
+            Income.income_date <= end_date,
+        )
+        total = base_q.count()
+        rows = base_q.order_by(Income.income_date.desc()).limit(limit).offset(offset).all()
+        acc_map = {a["id"]: a["name"] for a in self.fetch_accounts()}
+        return [
+            {
+                "id": r.id,
+                "date": r.income_date.isoformat(),
+                "name": r.name,
+                "amount": float(r.amount),
+                "income_type": r.income_type,
+                "account": acc_map.get(r.account_id, ""),
+                "account_id": r.account_id,
+            }
+            for r in rows
+        ], total
+
+    def update_income(self, income_id: int, **kwargs) -> dict | None:
+        """Aggiorna un'entrata (name, amount, date, income_type, account_id)."""
+        row = self._session.query(Income).filter(
+            Income.id == income_id,
+            Income.user_id == self._user_id,
+        ).first()
+        if not row:
+            return None
+        if "name" in kwargs and kwargs["name"] is not None:
+            row.name = kwargs["name"]
+        if "amount" in kwargs and kwargs["amount"] is not None:
+            row.amount = kwargs["amount"]
+        if "date" in kwargs and kwargs["date"] is not None:
+            row.income_date = kwargs["date"]
+        if "income_type" in kwargs:
+            row.income_type = kwargs["income_type"]
+        if "account_id" in kwargs:
+            row.account_id = kwargs["account_id"]
+        self._session.commit()
+        return {"id": row.id, "name": row.name, "amount": float(row.amount)}
+
+    def delete_income(self, income_id: int) -> bool:
+        """Elimina un'entrata."""
+        row = self._session.query(Income).filter(
+            Income.id == income_id,
+            Income.user_id == self._user_id,
+        ).first()
+        if not row:
+            return False
+        self._session.delete(row)
+        self._session.commit()
+        return True
+
+    def fetch_subscriptions_with_account_name(self) -> list[dict]:
+        """Restituisce abbonamenti con nome conto risolto."""
+        subs = self.fetch_subscriptions()
+        acc_map = {a["id"]: a["name"] for a in self.fetch_accounts()}
+        for s in subs:
+            s["account_name"] = acc_map.get(s.get("account_id"), "") or ""
+        return subs
+
+    def get_budget_suggestions(self) -> dict[str, float]:
+        """Calcola spesa media mensile per categoria sugli ultimi 3 mesi come suggerimento budget."""
+        from datetime import date as _date
+        import calendar
+
+        today = _date.today()
+        three_months_ago = _date(today.year, today.month, 1)
+        # vai indietro di 3 mesi
+        m = today.month - 3
+        y = today.year
+        if m <= 0:
+            m += 12
+            y -= 1
+        three_months_ago = _date(y, m, 1)
+
+        rows = self._session.query(Expense, UserCategory).outerjoin(
+            UserCategory, UserCategory.id == Expense.category_id
+        ).filter(
+            Expense.user_id == self._user_id,
+            Expense.expense_date >= three_months_ago,
+            Expense.expense_date <= today,
+        ).all()
+
+        totals: dict[str, float] = {}
+        for exp, cat in rows:
+            name = cat.name if cat else (exp.category_name or "Altro")
+            totals[name] = totals.get(name, 0.0) + float(exp.amount)
+
+        return {name: round(total / 3, 2) for name, total in totals.items()}
+
+    def fetch_categories_full(self) -> list[dict]:
+        """Restituisce categorie con id, name e monthly_budget come float."""
+        rows = self._session.query(UserCategory).filter(
+            UserCategory.user_id == self._user_id
+        ).all()
+        return [
+            {
+                "id": r.id,
+                "name": r.name,
+                "monthly_budget": float(r.monthly_budget) if r.monthly_budget is not None else None,
+            }
+            for r in rows
+        ]
 
     # ------------------------------------------------------------------ reports
 

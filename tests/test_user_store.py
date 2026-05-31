@@ -1,6 +1,7 @@
 import pytest
-from datetime import date
-from src.user_store import User, DailyMetrics, Feedback, OAuthSession
+from datetime import date, datetime
+from src.user_store import User, DailyMetrics, Feedback, OAuthSession, PlanChange, UserPlan
+import src.storage.models  # registra UserCategory e tabelle storage nella Base condivisa
 
 pytestmark = pytest.mark.integration
 
@@ -138,3 +139,35 @@ def test_get_chat_history_empty(mock_db_session):
 
     history = store.get_chat_history(chat_id)
     assert history == []
+
+
+def test_delete_user_completely_removes_all_tables(mock_db_session):
+    """Verifica che delete_user_completely cancelli 0 record in TUTTE le tabelle collegate."""
+    store = mock_db_session
+    chat_id = "99999"
+    store.add_user(chat_id=chat_id, username="delete-me")
+
+    # Inizializza piano (crea UserPlan row)
+    store.get_user_plan(chat_id)
+
+    # Inserisce un record PlanChange
+    with store.Session() as session:
+        session.add(PlanChange(
+            chat_id=chat_id,
+            from_plan="free",
+            to_plan="pro",
+            change_type="upgrade",
+            changed_at=datetime.utcnow(),
+        ))
+        session.add(Feedback(chat_id=chat_id, message="ciao"))
+        session.commit()
+
+    result = store.delete_user_completely(chat_id)
+    assert result != "not_found"
+
+    with store.Session() as session:
+        assert session.query(PlanChange).filter_by(chat_id=chat_id).count() == 0
+        assert session.query(UserPlan).filter_by(chat_id=chat_id).count() == 0
+        assert session.query(Feedback).filter_by(chat_id=chat_id).count() == 0
+        assert session.query(OAuthSession).filter_by(chat_id=chat_id).count() == 0
+        assert session.query(User).filter_by(chat_id=chat_id).first() is None

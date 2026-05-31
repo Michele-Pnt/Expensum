@@ -32,6 +32,10 @@ const nextConfig: NextConfig = {
         destination: "http://localhost:5000/login",
       },
       {
+        source: "/register",
+        destination: "http://localhost:5000/register",
+      },
+      {
         source: "/logout",
         destination: "http://localhost:5000/logout",
       },

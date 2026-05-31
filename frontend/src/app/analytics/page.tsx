@@ -151,17 +151,27 @@ function pivotTopCategories(rows: CategoryEntry[]): {
 // Slider periodo
 // ---------------------------------------------------------------------------
 
-function PeriodSlider({ value, onChange, maxMonths }: { value: number; onChange: (v: number) => void; maxMonths: number }) {
+function PeriodSlider({ value, onChange, maxMonths, actualMonths }: {
+  value: number;
+  onChange: (v: number) => void;
+  maxMonths: number;
+  actualMonths?: number;
+}) {
   const marks = Array.from({ length: maxMonths }, (_, i) => {
     const val = i + 1;
-    // Mostra etichetta ogni mese fino a 12, poi ogni 3 mesi
     const showLabel = val <= 12 || val === maxMonths || val % 3 === 0;
     return { value: val, label: showLabel ? `${val}` : "" };
   });
+  const showActual = actualMonths !== undefined && actualMonths < value;
   return (
     <Box sx={{ px: 2, mb: 3 }}>
       <Typography variant="body2" color="text.secondary" mb={1}>
         Storico: <strong>ultimi {value} {value === 1 ? "mese" : "mesi"}</strong>
+        {showActual && (
+          <Typography component="span" variant="body2" color="text.disabled" sx={{ ml: 1 }}>
+            ({actualMonths} {actualMonths === 1 ? "mese trovato" : "mesi trovati"})
+          </Typography>
+        )}
       </Typography>
       <Slider
         value={value}
@@ -220,7 +230,11 @@ function ChartCard({ title, children, badge }: { title: string; children: ReactN
         titleTypographyProps={{ variant: "subtitle2", fontWeight: 700 }}
         sx={{ pb: 1 }}
       />
-      <CardContent sx={{ height: { xs: 200, sm: 260 }, pt: 0, minWidth: 0, minHeight: 0, "& .recharts-responsive-container": { minWidth: 0, minHeight: 0 } }}>{children}</CardContent>
+      <CardContent sx={{ pt: 0, pb: "8px !important" }}>
+        <Box sx={{ width: "100%", height: { xs: 200, sm: 260 }, minWidth: 0 }}>
+          {children}
+        </Box>
+      </CardContent>
     </Card>
   );
 }
@@ -228,11 +242,11 @@ function ChartCard({ title, children, badge }: { title: string; children: ReactN
 function SavingsChart({ data }: { data: SavingsEntry[] }) {
   return (
     <ChartCard title="Risparmio mensile">
-      <ResponsiveContainer width="100%" height="100%">
+      <ResponsiveContainer width="100%" height="100%" minWidth={0}>
         <BarChart data={data} barCategoryGap="15%" maxBarSize={60}>
           <XAxis dataKey="month" tick={TICK_STYLE} />
           <YAxis tick={TICK_STYLE} tickFormatter={(v) => `€${v}`} />
-          <Tooltip formatter={(v: number) => `€${(v ?? 0).toFixed(2)}`} contentStyle={TOOLTIP_STYLE} />
+          <Tooltip formatter={(v: unknown) => `€${((v as number) ?? 0).toFixed(2)}`} contentStyle={TOOLTIP_STYLE} />
           <Legend wrapperStyle={LEGEND_STYLE} />
           <Bar dataKey="income" name="Entrate" fill={INCOME_COLOR} radius={[4, 4, 0, 0]}  />
           <Bar dataKey="expenses" name="Uscite" fill={EXPENSE_COLOR} radius={[4, 4, 0, 0]}  />
@@ -265,7 +279,7 @@ function CapitalTrendChart({ data, isPro }: { data: CapitalTrendData; isPro: boo
   
   return (
     <ChartCard title="Andamento Capitale">
-      <ResponsiveContainer width="100%" height="100%">
+      <ResponsiveContainer width="100%" height="100%" minWidth={0}>
         <ComposedChart data={data.capital_trend}>
           <defs>
             <linearGradient id="capitalGradient" x1="0" y1="0" x2="0" y2="1">
@@ -276,7 +290,7 @@ function CapitalTrendChart({ data, isPro }: { data: CapitalTrendData; isPro: boo
           <CartesianGrid strokeDasharray="3 3" stroke="#E5E2DC" />
           <XAxis dataKey="month" tick={TICK_STYLE} />
           <YAxis tick={TICK_STYLE} tickFormatter={(v) => `€${v}`} />
-          <Tooltip formatter={(v: number) => `€${(v ?? 0).toFixed(2)}`} contentStyle={TOOLTIP_STYLE} />
+          <Tooltip formatter={(v: unknown) => `€${((v as number) ?? 0).toFixed(2)}`} contentStyle={TOOLTIP_STYLE} />
           <Legend wrapperStyle={LEGEND_STYLE} />
           <Area type="monotone" dataKey="total" name="Totale" fill="url(#capitalGradient)" stroke="#1A3673" strokeWidth={2} />
           {accountLines}
@@ -293,7 +307,16 @@ function CategoryTrendChart({
   categories: string[];
   isPro: boolean;
 }) {
-  const [selectedCats, setSelectedCats] = useState<string[]>(categories.slice(0, isPro ? 3 : 1));
+  // Categoria con spesa totale più alta (usata per utenti Free)
+  const topCategory = (() => {
+    const totals: Record<string, number> = {};
+    for (const r of rows) totals[r.name] = (totals[r.name] ?? 0) + r.amount;
+    return Object.entries(totals).sort((a, b) => b[1] - a[1])[0]?.[0] ?? categories[0];
+  })();
+
+  const [selectedCats, setSelectedCats] = useState<string[]>(
+    isPro ? categories : (topCategory ? [topCategory] : [])
+  );
 
   // Pivot: mese -> { cat: amount }
   const pivot = new Map<string, Record<string, number>>();
@@ -312,7 +335,7 @@ function CategoryTrendChart({
         title={
           <Box sx={{ display: "flex", alignItems: "center", gap: 2, flexWrap: "wrap" }}>
             <Typography variant="subtitle2" fontWeight={700}>Andamento per Categoria</Typography>
-            {isPro && (
+            {isPro ? (
               <FormControl size="small" sx={{ minWidth: 200 }}>
                 <InputLabel sx={{ fontSize: "0.75rem" }}>Categorie</InputLabel>
                 <Select
@@ -328,18 +351,31 @@ function CategoryTrendChart({
                   ))}
                 </Select>
               </FormControl>
+            ) : (
+              <Chip
+                label="PRO — vedi tutte le categorie"
+                size="small"
+                sx={{
+                  background: "linear-gradient(135deg, #C5A059, #D4B47A)",
+                  color: "#fff",
+                  fontWeight: 700,
+                  fontSize: "0.65rem",
+                  cursor: "default",
+                }}
+              />
             )}
           </Box>
         }
         sx={{ pb: 1 }}
       />
-      <CardContent sx={{ height: { xs: 220, sm: 280 }, pt: 0, minWidth: 0, minHeight: 0 }}>
-        <ResponsiveContainer width="100%" height="100%">
+      <CardContent sx={{ pt: 0, pb: "8px !important" }}>
+        <Box sx={{ width: "100%", height: { xs: 220, sm: 280 }, minWidth: 0 }}>
+        <ResponsiveContainer width="100%" height="100%" minWidth={0}>
           <LineChart data={data}>
             <CartesianGrid strokeDasharray="3 3" stroke="#E5E2DC" />
             <XAxis dataKey="month" tick={TICK_STYLE} />
             <YAxis tick={TICK_STYLE} tickFormatter={(v) => `€${v}`} />
-            <Tooltip formatter={(v: number) => `€${(v ?? 0).toFixed(2)}`} contentStyle={TOOLTIP_STYLE} />
+            <Tooltip formatter={(v: unknown) => `€${((v as number) ?? 0).toFixed(2)}`} contentStyle={TOOLTIP_STYLE} />
             <Legend wrapperStyle={LEGEND_STYLE} />
             {selectedCats.map((cat, i) => (
               <Line
@@ -355,6 +391,7 @@ function CategoryTrendChart({
             ))}
           </LineChart>
         </ResponsiveContainer>
+        </Box>
       </CardContent>
     </Card>
   );
@@ -504,11 +541,11 @@ function MonthlyByAccountChart({ rows }: { rows: AccountMonthEntry[] }) {
   const accounts = uniqueAccounts(rows);
   return (
     <ChartCard title="Spesa mensile per conto">
-      <ResponsiveContainer width="100%" height="100%">
+      <ResponsiveContainer width="100%" height="100%" minWidth={0}>
         <BarChart data={data} barCategoryGap="15%" maxBarSize={60}>
           <XAxis dataKey="month" tick={TICK_STYLE} />
           <YAxis tick={TICK_STYLE} tickFormatter={(v) => `€${v}`} />
-          <Tooltip formatter={(v: number) => `€${(v ?? 0).toFixed(2)}`} contentStyle={TOOLTIP_STYLE} />
+          <Tooltip formatter={(v: unknown) => `€${((v as number) ?? 0).toFixed(2)}`} contentStyle={TOOLTIP_STYLE} />
           <Legend wrapperStyle={LEGEND_STYLE} />
           {accounts.map((acc, i) => (
             <Bar key={acc} dataKey={acc} stackId="a" fill={PALETTE[i % PALETTE.length]}  />
@@ -524,13 +561,13 @@ function CategoryPieChart({ rows }: { rows: CategoryEntry[] }) {
   const slice = rows.filter((r) => r.month === lastMonth);
   return (
     <ChartCard title={`Spese per categoria (${lastMonth ?? "—"})`}>
-      <ResponsiveContainer width="100%" height="100%">
+      <ResponsiveContainer width="100%" height="100%" minWidth={0}>
         <PieChart>
           <Pie data={slice} dataKey="amount" nameKey="name" cx="50%" cy="50%"
             innerRadius={55} outerRadius={90} paddingAngle={3}>
             {slice.map((_, i) => <Cell key={i} fill={PALETTE[i % PALETTE.length]} />)}
           </Pie>
-          <Tooltip formatter={(v: number) => `€${(v ?? 0).toFixed(2)}`} contentStyle={TOOLTIP_STYLE} />
+          <Tooltip formatter={(v: unknown) => `€${((v as number) ?? 0).toFixed(2)}`} contentStyle={TOOLTIP_STYLE} />
           <Legend iconType="circle" iconSize={10} wrapperStyle={LEGEND_STYLE} />
         </PieChart>
       </ResponsiveContainer>
@@ -542,11 +579,11 @@ function CategoryHistoryChart({ rows }: { rows: CategoryEntry[] }) {
   const { data, cats } = pivotTopCategories(rows);
   return (
     <ChartCard title="Top 5 categorie (storico)">
-      <ResponsiveContainer width="100%" height="100%">
+      <ResponsiveContainer width="100%" height="100%" minWidth={0}>
         <BarChart data={data} barCategoryGap="15%" maxBarSize={60}>
           <XAxis dataKey="month" tick={TICK_STYLE} />
           <YAxis tick={TICK_STYLE} tickFormatter={(v) => `€${v}`} />
-          <Tooltip formatter={(v: number) => `€${(v ?? 0).toFixed(2)}`} contentStyle={TOOLTIP_STYLE} />
+          <Tooltip formatter={(v: unknown) => `€${((v as number) ?? 0).toFixed(2)}`} contentStyle={TOOLTIP_STYLE} />
           <Legend wrapperStyle={LEGEND_STYLE} />
           {cats.map((cat, i) => (
             <Bar key={cat} dataKey={cat} fill={PALETTE[i % PALETTE.length]} radius={[3, 3, 0, 0]}  />
@@ -560,11 +597,11 @@ function CategoryHistoryChart({ rows }: { rows: CategoryEntry[] }) {
 function CategoryAvgChart({ avgs }: { avgs: CategoryAvg[] }) {
   return (
     <ChartCard title="Spesa media per categoria">
-      <ResponsiveContainer width="100%" height="100%">
+      <ResponsiveContainer width="100%" height="100%" minWidth={0}>
         <BarChart data={avgs} layout="vertical" barCategoryGap="15%" maxBarSize={40}>
           <XAxis type="number" tick={TICK_STYLE} tickFormatter={(v) => `€${v}`} />
           <YAxis type="category" dataKey="name" tick={TICK_STYLE} width={90} />
-          <Tooltip formatter={(v: number) => `€${(v ?? 0).toFixed(2)}`} contentStyle={TOOLTIP_STYLE} />
+          <Tooltip formatter={(v: unknown) => `€${((v as number) ?? 0).toFixed(2)}`} contentStyle={TOOLTIP_STYLE} />
           <Bar dataKey="avg" name="Media" fill="#1A3673" radius={[0, 4, 4, 0]}  />
         </BarChart>
       </ResponsiveContainer>
@@ -575,11 +612,11 @@ function CategoryAvgChart({ avgs }: { avgs: CategoryAvg[] }) {
 function IncomeChart({ data }: { data: IncomeEntry[] }) {
   return (
     <ChartCard title="Entrate mensili">
-      <ResponsiveContainer width="100%" height="100%">
+      <ResponsiveContainer width="100%" height="100%" minWidth={0}>
         <BarChart data={data} barCategoryGap="15%" maxBarSize={60}>
           <XAxis dataKey="month" tick={TICK_STYLE} />
           <YAxis tick={TICK_STYLE} tickFormatter={(v) => `€${v}`} />
-          <Tooltip formatter={(v: number) => `€${(v ?? 0).toFixed(2)}`} contentStyle={TOOLTIP_STYLE} />
+          <Tooltip formatter={(v: unknown) => `€${((v as number) ?? 0).toFixed(2)}`} contentStyle={TOOLTIP_STYLE} />
           <Bar dataKey="total" name="Entrate" fill={INCOME_COLOR} radius={[4, 4, 0, 0]}  />
         </BarChart>
       </ResponsiveContainer>
@@ -602,13 +639,13 @@ function WealthPieChart({ accounts }: { accounts: AccountBalance[] }) {
 
   return (
     <ChartCard title="Capitale per conto">
-      <ResponsiveContainer width="100%" height="100%">
+      <ResponsiveContainer width="100%" height="100%" minWidth={0}>
         <PieChart>
           <Pie data={positiveAccounts} dataKey="balance" nameKey="name" cx="50%" cy="50%"
             innerRadius={55} outerRadius={90} paddingAngle={3}>
             {positiveAccounts.map((_, i) => <Cell key={i} fill={PALETTE[i % PALETTE.length]} />)}
           </Pie>
-          <Tooltip formatter={(v: number) => `€${(v ?? 0).toFixed(2)}`} contentStyle={TOOLTIP_STYLE} />
+          <Tooltip formatter={(v: unknown) => `€${((v as number) ?? 0).toFixed(2)}`} contentStyle={TOOLTIP_STYLE} />
           <Legend iconType="circle" iconSize={10} wrapperStyle={LEGEND_STYLE} />
         </PieChart>
       </ResponsiveContainer>
@@ -628,12 +665,15 @@ function TopMerchantsChart({ data }: { data: TopMerchantsData }) {
   }
   return (
     <ChartCard title="Dove spendi di piu">
-      <ResponsiveContainer width="100%" height="100%">
+      <ResponsiveContainer width="100%" height="100%" minWidth={0}>
         <BarChart data={data.merchants} layout="vertical" barCategoryGap="15%" maxBarSize={40}>
           <XAxis type="number" tick={TICK_STYLE} tickFormatter={(v) => `€${v}`} />
           <YAxis type="category" dataKey="name" tick={TICK_STYLE} width={120} />
           <Tooltip
-            formatter={(v: number, _name: string, props: { payload: { count: number; category: string } }) => [`€${(v ?? 0).toFixed(2)} (x${props.payload.count})`, props.payload.category]}
+            formatter={(v: unknown, _name: unknown, item: unknown) => {
+              const p = (item as { payload?: { count: number; category: string } }).payload;
+              return [`€${((v as number) ?? 0).toFixed(2)} (x${p?.count ?? 0})`, p?.category ?? ""] as [string, string];
+            }}
             contentStyle={TOOLTIP_STYLE}
           />
           <Bar dataKey="total" name="Spesa" radius={[0, 4, 4, 0]}>
@@ -760,8 +800,9 @@ function SavingsRateChart({ data }: { data: SavingsRateData }) {
         }
         sx={{ pb: 1 }}
       />
-      <CardContent sx={{ height: { xs: 200, sm: 260 }, pt: 0, minWidth: 0, minHeight: 0 }}>
-        <ResponsiveContainer width="100%" height="100%">
+      <CardContent sx={{ pt: 0, pb: "8px !important" }}>
+        <Box sx={{ width: "100%", height: { xs: 200, sm: 260 }, minWidth: 0 }}>
+        <ResponsiveContainer width="100%" height="100%" minWidth={0}>
           <ComposedChart data={data.savings_rate}>
             <CartesianGrid strokeDasharray="3 3" stroke="#E5E2DC" />
             <XAxis dataKey="month" tick={TICK_STYLE} />
@@ -779,6 +820,7 @@ function SavingsRateChart({ data }: { data: SavingsRateData }) {
             )}
           </ComposedChart>
         </ResponsiveContainer>
+        </Box>
       </CardContent>
     </Card>
   );
@@ -796,11 +838,11 @@ function MonthComparisonChart({ data }: { data: MonthComparisonData }) {
   }
   return (
     <ChartCard title="Confronto Spese per Categoria">
-      <ResponsiveContainer width="100%" height="100%">
+      <ResponsiveContainer width="100%" height="100%" minWidth={0}>
         <BarChart data={data.comparisons} barCategoryGap="15%" maxBarSize={60}>
           <XAxis dataKey="category" tick={TICK_STYLE} />
           <YAxis tick={TICK_STYLE} tickFormatter={(v) => `€${v}`} />
-          <Tooltip formatter={(v: number) => `€${(v ?? 0).toFixed(2)}`} contentStyle={TOOLTIP_STYLE} />
+          <Tooltip formatter={(v: unknown) => `€${((v as number) ?? 0).toFixed(2)}`} contentStyle={TOOLTIP_STYLE} />
           <Legend wrapperStyle={LEGEND_STYLE} />
           <Bar dataKey="avg_3m" name="Media 3m" fill="#4B6CB7" radius={[3, 3, 0, 0]}  />
           <Bar dataKey="last_month" name="Mese scorso" fill="#C5A059" radius={[3, 3, 0, 0]}  />
@@ -837,6 +879,7 @@ export default function AnalyticsPage() {
   const [savingsRate, setSavingsRate] = useState<SavingsRateData | null>(null);
   const [monthComparison, setMonthComparison] = useState<MonthComparisonData | null>(null);
   const [planType, setPlanType] = useState<string>("free");
+  const [actualMonths, setActualMonths] = useState<number | undefined>(undefined);
   const isPro = planType === "pro";
 
   // Max months slider
@@ -876,6 +919,13 @@ export default function AnalyticsPage() {
       setWealth(wea);
       setCapitalTrend(cap);
       setTopMerchants(mer);
+
+      // Mesi effettivi = mesi distinti presenti nei dati overview
+      const distinctMonths = new Set([
+        ...ov.savings.map((s) => s.month),
+        ...ov.totals_by_account.map((a) => a.month),
+      ]);
+      setActualMonths(distinctMonths.size > 0 ? distinctMonths.size : undefined);
 
       // Determina plan_type dalla prima risposta che lo contiene
       const pt = ov.plan_type || cat.plan_type || inc.plan_type || wea.plan_type || "free";
@@ -944,7 +994,7 @@ export default function AnalyticsPage() {
         </>
       )}
 
-      <PeriodSlider value={months} onChange={handleMonthsChange} maxMonths={maxMonths} />
+      <PeriodSlider value={months} onChange={handleMonthsChange} maxMonths={maxMonths} actualMonths={actualMonths} />
 
       <Tabs
         value={tab}

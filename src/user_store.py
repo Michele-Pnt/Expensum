@@ -3,13 +3,17 @@ user_store.py — Gestione persistenza utenti tramite SQLAlchemy.
 Supporta SQLite (locale) e predisposto per PostgreSQL/Oracle.
 """
 
+import base64
+import hashlib
 import logging
+import os
 from datetime import datetime, date, timedelta
 import secrets
 import string
 from decimal import Decimal, ROUND_HALF_UP
 from typing import Optional
 import json
+from cryptography.fernet import Fernet
 from sqlalchemy import (
     Column,
     String,
@@ -19,14 +23,43 @@ from sqlalchemy import (
     BigInteger,
     Date,
     ForeignKey,
-    Float,
+    Numeric,
     Text,
     UniqueConstraint,
     func,
     create_engine,
     text,
+    types,
 )
 from sqlalchemy.orm import declarative_base, sessionmaker
+
+
+def _get_fernet() -> Fernet:
+    """Ritorna un'istanza Fernet derivata da FLASK_SECRET_KEY."""
+    secret = os.environ.get("FLASK_SECRET_KEY", "")
+    key = base64.urlsafe_b64encode(hashlib.sha256(secret.encode()).digest())
+    return Fernet(key)
+
+
+class EncryptedString(types.TypeDecorator):
+    """Colonna String che cifra/decifra i valori con Fernet (AES-128-CBC + HMAC)."""
+
+    impl = types.String
+    cache_ok = True
+
+    def process_bind_param(self, value: str | None, dialect) -> str | None:
+        if value is None:
+            return None
+        return _get_fernet().encrypt(value.encode()).decode()
+
+    def process_result_value(self, value: str | None, dialect) -> str | None:
+        if value is None:
+            return None
+        try:
+            return _get_fernet().decrypt(value.encode()).decode()
+        except Exception:
+            # Valore non ancora cifrato (migrazione in corso) — restituisce as-is
+            return value
 
 logger = logging.getLogger("financial_agent.user_store")
 
@@ -60,7 +93,7 @@ class User(Base):
     subscriptions_schema_json = Column(String, nullable=True)
     
     # OAuth Notion
-    notion_access_token = Column(String, nullable=True)
+    notion_access_token = Column(EncryptedString, nullable=True)
     notion_workspace_id = Column(String, nullable=True)
     
     # Metadati per sapere quando si sono registrati
@@ -86,7 +119,7 @@ class User(Base):
     currency = Column(String, default='EUR', nullable=False)
     timezone = Column(String, default='Europe/Rome', nullable=False)
     lifestyle_json = Column(Text, nullable=True)
-    monthly_budget = Column(Float, nullable=True)
+    monthly_budget = Column(Numeric(12, 2), nullable=True)
     notification_time = Column(String, default='08:00')
     notifications_enabled = Column(Boolean, default=True)
 
@@ -135,6 +168,8 @@ class OAuthSession(Base):
     state = Column(String, primary_key=True)
     chat_id = Column(String, nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow)
+    expires_at = Column(DateTime, nullable=False,
+                        default=lambda: datetime.utcnow() + timedelta(minutes=15))
 
 # 7. TABELLA PIANI E TOKEN (Fase 2.2)
 class UserPlan(Base):
@@ -146,6 +181,19 @@ class UserPlan(Base):
     tokens_reset_at = Column(DateTime, nullable=False)
 
 
+class PlanChange(Base):
+    """Storico cambi piano utente. Usato per metriche upgrade/churn."""
+    __tablename__ = "plan_changes"
+
+    change_id = Column(Integer, primary_key=True, autoincrement=True)
+    chat_id = Column(String, ForeignKey("users.chat_id"), nullable=False)
+    from_plan = Column(String, nullable=True)
+    to_plan = Column(String, nullable=False)
+    change_type = Column(String, nullable=False)  # 'upgrade', 'downgrade', 'trial_expired', ecc.
+    changed_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    reason = Column(String, nullable=True)  # payment_reference o motivo testuale
+
+
 class LlmPricing(Base):
     __tablename__ = "llm_pricing"
 
@@ -154,10 +202,10 @@ class LlmPricing(Base):
     model = Column(String, nullable=False)
     valid_from = Column(DateTime, nullable=False)
     valid_to = Column(DateTime, nullable=True)
-    input_cost_per_1k = Column(Float, nullable=False, default=0.0)
-    output_cost_per_1k = Column(Float, nullable=False, default=0.0)
-    cached_input_cost_per_1k = Column(Float, nullable=True)
-    thinking_cost_per_1k = Column(Float, nullable=True)
+    input_cost_per_1k = Column(Numeric(12, 8), nullable=False, default=0.0)
+    output_cost_per_1k = Column(Numeric(12, 8), nullable=False, default=0.0)
+    cached_input_cost_per_1k = Column(Numeric(12, 8), nullable=True)
+    thinking_cost_per_1k = Column(Numeric(12, 8), nullable=True)
     currency = Column(String, nullable=False, default="USD")
 
 
@@ -191,7 +239,7 @@ class LlmUsageEvent(Base):
     total_tokens = Column(Integer, nullable=False, default=0)
     thinking_tokens = Column(Integer, nullable=True)
     cached_tokens = Column(Integer, nullable=True)
-    estimated_cost_amount = Column(Float, nullable=True)
+    estimated_cost_amount = Column(Numeric(12, 8), nullable=True)
     estimated_cost_currency = Column(String, nullable=False, default="USD")
     request_key = Column(String, nullable=False, unique=True)
     reservation_id = Column(Integer, ForeignKey("llm_token_reservations.id"), nullable=True)
@@ -761,15 +809,31 @@ class UserStore:
             return state
 
     def get_and_delete_oauth_session(self, state: str) -> str | None:
-        """Controlla se lo state è valido, ritorna il chat_id e cancella la sessione."""
+        """Controlla se lo state è valido e non scaduto, ritorna il chat_id e cancella la sessione."""
         with self.Session() as session:
             oauth_sess = session.query(OAuthSession).filter_by(state=state).first()
-            if oauth_sess:
-                chat_id = oauth_sess.chat_id
+            if not oauth_sess:
+                return None
+            if oauth_sess.expires_at < datetime.utcnow():
                 session.delete(oauth_sess)
                 session.commit()
-                return chat_id
-        return None
+                logger.warning("[Auth] Token OAuth scaduto per state=%s", state)
+                return None
+            chat_id = oauth_sess.chat_id
+            session.delete(oauth_sess)
+            session.commit()
+            return chat_id
+
+    def cleanup_expired_oauth_sessions(self) -> int:
+        """Rimuove le sessioni OAuth scadute. Chiamata dal job APScheduler notturno."""
+        with self.Session() as session:
+            deleted = session.query(OAuthSession).filter(
+                OAuthSession.expires_at < datetime.utcnow()
+            ).delete(synchronize_session=False)
+            session.commit()
+        if deleted:
+            logger.info("[Auth] Cleanup OAuth: rimossi %d token scaduti.", deleted)
+        return deleted
 
     def save_database_schema(self, chat_id: str, db_key: str, notion_db_id: str, properties_json: str, mapped_properties_json: str = None) -> None:
         """Salva o aggiorna lo schema di un database per un utente."""
@@ -1044,6 +1108,7 @@ class UserStore:
             session.query(LlmUsageEvent).filter(LlmUsageEvent.chat_id == chat_id).delete()
             session.query(LlmTokenReservation).filter(LlmTokenReservation.chat_id == chat_id).delete()
             session.query(UserPlan).filter(UserPlan.chat_id == chat_id).delete()
+            session.query(PlanChange).filter(PlanChange.chat_id == chat_id).delete()
             session.query(Feedback).filter(Feedback.chat_id == chat_id).delete()
             session.query(DatabaseSchema).filter(DatabaseSchema.chat_id == chat_id).delete()
             session.query(OAuthSession).filter(OAuthSession.chat_id == chat_id).delete()
@@ -1163,8 +1228,18 @@ class UserStore:
             "alert": plan_info.get("alert"),
         }
 
-    def set_user_plan(self, chat_id: str, plan_type: str) -> None:
-        """Aggiorna il piano dell'utente (es. 'pro'). Ricalcola subito il totale token."""
+    def set_user_plan(
+        self,
+        chat_id: str,
+        plan_type: str,
+        payment_reference: str | None = None,
+    ) -> None:
+        """Aggiorna il piano dell'utente (es. 'pro'). Ricalcola subito il totale token.
+
+        Args:
+            payment_reference: Riferimento pagamento (Stripe event ID, ecc.).
+                La validazione del pagamento è responsabilità del caller.
+        """
         chat_id = str(chat_id)
         if plan_type not in ("free", "pro"):
             raise ValueError("Il piano deve essere 'free' o 'pro'")
@@ -1175,10 +1250,25 @@ class UserStore:
                 self.get_user_plan(chat_id)
                 plan = session.query(UserPlan).filter_by(chat_id=chat_id).first()
 
+            old_plan = plan.plan_type
             plan.plan_type = plan_type
             plan.tokens_total = 3000000 if plan_type == "pro" else 150000
+
+            change_type = "upgrade" if plan_type == "pro" else "downgrade"
+            session.add(PlanChange(
+                chat_id=chat_id,
+                from_plan=old_plan,
+                to_plan=plan_type,
+                change_type=change_type,
+                changed_at=datetime.utcnow(),
+                reason=payment_reference,
+            ))
+
             session.commit()
-            logger.info("[User %s] Piano aggiornato a: %s", chat_id, plan_type.upper())
+            logger.info(
+                "[User %s] Piano aggiornato: %s → %s | payment_ref=%s",
+                chat_id, old_plan.upper(), plan_type.upper(), payment_reference or "N/A",
+            )
 
     # --- METODI LEDGER TOKEN (Fase 2.2 — Token System Reale) ---
 
@@ -1290,9 +1380,11 @@ class UserStore:
 
             estimated_cost = None
             if pricing:
-                input_cost = (prompt_tokens / 1000.0) * pricing.input_cost_per_1k
-                output_cost = (completion_tokens / 1000.0) * pricing.output_cost_per_1k
-                estimated_cost = round(input_cost + output_cost, 8)
+                input_cost = (Decimal(prompt_tokens) / 1000) * pricing.input_cost_per_1k
+                output_cost = (Decimal(completion_tokens) / 1000) * pricing.output_cost_per_1k
+                estimated_cost = (input_cost + output_cost).quantize(
+                    Decimal("0.00000001"), rounding="ROUND_HALF_UP"
+                )
 
             # Trova la reservation associata (se esiste)
             reservation = session.query(LlmTokenReservation).filter_by(
@@ -1384,6 +1476,18 @@ class UserStore:
             session.add(msg)
             session.commit()
             return msg.id
+
+    def cleanup_old_chat_messages(self, days: int = 90) -> int:
+        """Rimuove i messaggi più vecchi di `days` giorni. Chiamata dal job APScheduler notturno."""
+        cutoff = datetime.utcnow() - timedelta(days=days)
+        with self.Session() as session:
+            deleted = session.query(ChatMessage).filter(
+                ChatMessage.created_at < cutoff
+            ).delete(synchronize_session=False)
+            session.commit()
+        if deleted:
+            logger.info("[Cleanup] Rimossi %d chat_messages più vecchi di %d giorni.", deleted, days)
+        return deleted
 
     def get_chat_history(self, chat_id: str, limit: int = 60) -> list[dict]:
         """Ritorna gli ultimi `limit` messaggi della cronologia, in ordine cronologico asc."""

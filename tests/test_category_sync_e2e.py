@@ -20,7 +20,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from src.user_store import Base, User, UserStore
-from src.storage.models import Expense, SystemCategory, UserCategory
+from src.storage.models import Expense, SystemCategory, UserCategory, UserCategoryNotionLink
 from src.category_sync import (
     compute_category_averages,
     sync_categories_to_local,
@@ -123,10 +123,21 @@ class TestComputeCategoryAverages:
         session.commit()
 
     def _seed_user_categories(self, session, user_id, names):
-        """Pre-inserisce righe in user_categories (average=0): simula il setup iniziale."""
+        """Pre-inserisce righe in user_categories + notion_links: simula il setup iniziale."""
         for name in names:
-            session.add(UserCategory(user_id=user_id, name=name, average=0.0))
+            cat = UserCategory(user_id=user_id, name=name)
+            session.add(cat)
+            session.flush()
+            session.add(UserCategoryNotionLink(category_id=cat.id, average=0.0))
         session.commit()
+
+    def _get_average(self, session, user_id, name) -> float:
+        """Legge average da UserCategoryNotionLink per la categoria specificata."""
+        cat = session.query(UserCategory).filter_by(user_id=user_id, name=name).first()
+        if not cat:
+            return 0.0
+        link = session.query(UserCategoryNotionLink).filter_by(category_id=cat.id).first()
+        return float(link.average) if link and link.average is not None else 0.0
 
     def test_single_category_single_month(self, db_session, store):
         self._seed_user_categories(db_session, "user_pg", ["Alimentari"])
@@ -138,11 +149,9 @@ class TestComputeCategoryAverages:
         compute_category_averages("user_pg", db_session, store)
 
         # 1 mese unico → media = totale / 1
-        row = db_session.query(UserCategory).filter_by(
-            user_id="user_pg", name="Alimentari"
-        ).first()
+        row = db_session.query(UserCategory).filter_by(user_id="user_pg", name="Alimentari").first()
         assert row is not None
-        assert row.average == pytest.approx(100.0)
+        assert self._get_average(db_session, "user_pg", "Alimentari") == pytest.approx(100.0)
 
     def test_single_category_multiple_months(self, db_session, store):
         self._seed_user_categories(db_session, "user_pg", ["Trasporti"])
@@ -154,10 +163,9 @@ class TestComputeCategoryAverages:
 
         compute_category_averages("user_pg", db_session, store)
 
-        row = db_session.query(UserCategory).filter_by(
-            user_id="user_pg", name="Trasporti"
-        ).first()
-        assert row.average == pytest.approx(90.0)  # 270 / 3 mesi
+        row = db_session.query(UserCategory).filter_by(user_id="user_pg", name="Trasporti").first()
+        assert row is not None
+        assert self._get_average(db_session, "user_pg", "Trasporti") == pytest.approx(90.0)  # 270 / 3 mesi
 
     def test_multiple_categories(self, db_session, store):
         self._seed_user_categories(db_session, "user_pg", ["Alimentari", "Cinema"])
@@ -168,10 +176,8 @@ class TestComputeCategoryAverages:
 
         compute_category_averages("user_pg", db_session, store)
 
-        alimentari = db_session.query(UserCategory).filter_by(user_id="user_pg", name="Alimentari").first()
-        cinema = db_session.query(UserCategory).filter_by(user_id="user_pg", name="Cinema").first()
-        assert alimentari.average == pytest.approx(200.0)
-        assert cinema.average == pytest.approx(50.0)
+        assert self._get_average(db_session, "user_pg", "Alimentari") == pytest.approx(200.0)
+        assert self._get_average(db_session, "user_pg", "Cinema") == pytest.approx(50.0)
 
     def test_category_filter_updates_only_target(self, db_session, store):
         self._seed_user_categories(db_session, "user_pg", ["Salute", "Farmacia"])
@@ -188,11 +194,8 @@ class TestComputeCategoryAverages:
         compute_category_averages("user_pg", db_session, store, category_filter="Salute")
 
         db_session.expire_all()
-        salute = db_session.query(UserCategory).filter_by(user_id="user_pg", name="Salute").first()
-        farmacia = db_session.query(UserCategory).filter_by(user_id="user_pg", name="Farmacia").first()
-
-        assert salute.average == pytest.approx(200.0)   # 100+100 / 1 mese
-        assert farmacia.average == pytest.approx(80.0)  # invariata
+        assert self._get_average(db_session, "user_pg", "Salute") == pytest.approx(200.0)    # 100+100 / 1 mese
+        assert self._get_average(db_session, "user_pg", "Farmacia") == pytest.approx(80.0)  # invariata
 
     def test_does_not_touch_other_users(self, db_session, store):
         db_session.add(User(chat_id="user_other", is_active=True, storage_backend="postgres"))
@@ -264,7 +267,10 @@ class TestSyncCategoriesToLocal:
         sync_categories_to_local(client, "user_nt", store)
 
         row = db_session.query(UserCategory).filter_by(user_id="user_nt", name="Cinema").first()
-        assert row.average == pytest.approx(42.75)
+        assert row is not None
+        link = db_session.query(UserCategoryNotionLink).filter_by(category_id=row.id).first()
+        assert link is not None
+        assert float(link.average) == pytest.approx(42.75)
 
     def test_formula_type_average(self, db_session, store):
         """Verifica che anche il tipo 'formula' per average venga letto."""
@@ -280,7 +286,10 @@ class TestSyncCategoriesToLocal:
         sync_categories_to_local(client, "user_nt", store)
 
         row = db_session.query(UserCategory).filter_by(user_id="user_nt", name="Gaming").first()
-        assert row.average == pytest.approx(88.0)
+        assert row is not None
+        link = db_session.query(UserCategoryNotionLink).filter_by(category_id=row.id).first()
+        assert link is not None
+        assert float(link.average) == pytest.approx(88.0)
 
     def test_skips_sconosciuta_entries(self, db_session, store):
         """Pagine senza titolo non devono essere inserite."""
@@ -397,7 +406,8 @@ class TestUpsertIdempotenza:
 
         rows = db_session.query(UserCategory).filter_by(user_id="user_nt").all()
         assert len(rows) == 1
-        assert rows[0].average == 100.0
+        link = db_session.query(UserCategoryNotionLink).filter_by(category_id=rows[0].id).first()
+        assert link is not None and float(link.average) == pytest.approx(100.0)
 
         # Secondo upsert con average aggiornato
         cats[0]["average"] = 150.0
@@ -406,7 +416,8 @@ class TestUpsertIdempotenza:
         db_session.expire_all()
         rows = db_session.query(UserCategory).filter_by(user_id="user_nt").all()
         assert len(rows) == 1, "upsert non deve creare duplicati"
-        assert rows[0].average == pytest.approx(150.0)
+        link = db_session.query(UserCategoryNotionLink).filter_by(category_id=rows[0].id).first()
+        assert link is not None and float(link.average) == pytest.approx(150.0)
 
     def test_upsert_multiple_categories_no_duplicates(self, db_session, store):
         cats = [

@@ -1,0 +1,81 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Expensum — Informativa sulla Privacy</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+            background: #F7F6F2;
+            color: #1a1a1a;
+            padding: 40px 24px;
+            line-height: 1.7;
+        }
+        .wrapper { max-width: 680px; margin: 0 auto; }
+        h1 { font-size: 28px; font-weight: 800; color: #1A3673; margin-bottom: 8px; }
+        .subtitle { color: #6b7280; font-size: 14px; margin-bottom: 40px; }
+        h2 { font-size: 18px; font-weight: 700; color: #1A3673; margin: 32px 0 12px; }
+        p { margin-bottom: 12px; color: #374151; }
+        ul { margin: 8px 0 12px 20px; color: #374151; }
+        li { margin-bottom: 6px; }
+        .highlight {
+            background: #EEF2FF;
+            border-left: 4px solid #1A3673;
+            padding: 16px 20px;
+            border-radius: 0 8px 8px 0;
+            margin: 20px 0;
+        }
+        a { color: #1A3673; }
+        .back { display: inline-block; margin-top: 40px; color: #6b7280; font-size: 14px; text-decoration: none; }
+        .back:hover { color: #1A3673; }
+    </style>
+</head>
+<body>
+    <div class="wrapper">
+        <h1>Informativa sulla Privacy</h1>
+        <p class="subtitle">Expensum — Aggiornata il 24 maggio 2026</p>
+
+        <h2>Titolare del trattamento</h2>
+        <p>Expensum gestisce i tuoi dati personali ai sensi del Regolamento (UE) 2016/679 (GDPR).</p>
+
+        <h2>Dati raccolti</h2>
+        <ul>
+            <li>Identificativo Telegram (chat_id), username, email e password (Argon2id)</li>
+            <li>Messaggi inviati al bot (testo, audio trascritto, testo da scontrini OCR)</li>
+            <li>Dati finanziari: spese, entrate, abbonamenti, conti</li>
+            <li>Metadati d'uso: provider AI, token consumati, timestamp operazioni</li>
+        </ul>
+
+        <h2>Finalità e base giuridica</h2>
+        <p>I dati sono trattati per erogare il servizio di gestione finanziaria personale (Art. 6.1.b GDPR — esecuzione del contratto).</p>
+
+        <h2>Conservazione dei dati (Retention Policy)</h2>
+        <div class="highlight">
+            <p><strong>Messaggi chat:</strong> conservati per <strong>90 giorni</strong>, poi eliminati automaticamente ogni notte.</p>
+            <p><strong>Dati finanziari e account:</strong> conservati per tutta la durata del contratto. Puoi richiedere la cancellazione completa in qualsiasi momento tramite il comando <code>/elimina-account</code> su Telegram.</p>
+            <p><strong>Log di utilizzo AI:</strong> conservati per <strong>13 mesi</strong> per finalità di fatturazione e antifrode.</p>
+        </div>
+
+        <h2>Diritti dell'interessato (Art. 15–22 GDPR)</h2>
+        <ul>
+            <li><strong>Accesso:</strong> puoi richiedere una copia dei tuoi dati</li>
+            <li><strong>Rettifica:</strong> puoi correggere i tuoi dati</li>
+            <li><strong>Cancellazione (diritto all'oblio):</strong> usa <code>/elimina-account</code> sul bot</li>
+            <li><strong>Portabilità:</strong> puoi esportare i tuoi dati in formato JSON</li>
+            <li><strong>Opposizione:</strong> puoi opporti al trattamento per motivi legittimi</li>
+        </ul>
+
+        <h2>Trasferimenti internazionali</h2>
+        <p>I modelli AI di Google Gemini vengono eseguiti in region EU (Vertex AI EU). I dati non vengono trasferiti fuori dall'EEE senza adeguate garanzie.</p>
+
+        <h2>Contatti</h2>
+        <p>Per esercitare i tuoi diritti o per qualsiasi domanda: <a href="mailto:miky03.pinotti@gmail.com">miky03.pinotti@gmail.com</a></p>
+
+        <a href="javascript:history.back()" class="back">← Torna indietro</a>
+    </div>
+</body>
+</html>

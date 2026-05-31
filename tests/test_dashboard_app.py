@@ -294,3 +294,19 @@ def test_oauth_callback_success(mock_get_sess, mock_post, mock_thread, client):
     # Verifica che il thread background sia stato avviato
     mock_thread.assert_called_once()
     mock_thread_instance.start.assert_called_once()
+
+
+def test_login_brute_force_returns_429_after_threshold(client):
+    """Verifica che dopo 5 tentativi falliti /login risponda 429 (brute-force protection)."""
+    from src.dashboard.app import store, limiter
+
+    _create_dashboard_user(store, chat_id="chat_bf", email="bf@example.com")
+
+    # Svuota il storage del limiter tra i test
+    limiter.reset()
+
+    for _ in range(5):
+        client.post("/login", data={"email": "bf@example.com", "password": "wrong"})
+
+    response = client.post("/login", data={"email": "bf@example.com", "password": "wrong"})
+    assert response.status_code == 429

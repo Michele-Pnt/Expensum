@@ -3,6 +3,7 @@
 import { useState, useRef, useEffect, useCallback } from "react";
 import Image from "next/image";
 import styles from "./page.module.css";
+import MoneoWidget, { type MoneoState } from "@/components/MoneoWidget";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -91,6 +92,7 @@ export default function ChatPage() {
   const [isRecording, setIsRecording] = useState(false);
   const [showTypingIndicator, setShowTypingIndicator] = useState(false);
   const [historyLoaded, setHistoryLoaded] = useState(false);
+  const [moneoState, setMoneoState] = useState<MoneoState>("idle");
 
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
@@ -127,6 +129,18 @@ export default function ChatPage() {
         setHistoryLoaded(true);
       });
   }, []);
+
+  // ── Moneo state derivation ────────────────────────────────────────────────
+
+  useEffect(() => {
+    if (isRecording) {
+      setMoneoState("recording");
+    } else if (showTypingIndicator) {
+      setMoneoState("thinking");
+    } else {
+      setMoneoState((prev) => (prev === "happy" || prev === "error" ? prev : "idle"));
+    }
+  }, [isRecording, showTypingIndicator]);
 
   // ── Auto-scroll ───────────────────────────────────────────────────────────
 
@@ -207,6 +221,8 @@ export default function ChatPage() {
         parsed: data.saved ? parsed : undefined,
       };
       setMessages((prev) => [...prev, confirmMsg]);
+      setMoneoState("happy");
+      setTimeout(() => setMoneoState((prev) => prev === "happy" ? "idle" : prev), 3000);
     } catch {
       setShowTypingIndicator(false);
       setMessages((prev) => [
@@ -480,7 +496,6 @@ export default function ChatPage() {
                   key={msg.id}
                   className={`${styles.messageRow} ${msg.role === "user" ? styles.messageRowUser : styles.messageRowBot}`}
                 >
-
                   <div className={`${styles.bubble} ${msg.role === "user" ? styles.bubbleUser : styles.bubbleBot}`}>
                     <p
                       className={styles.bubbleText}
@@ -548,6 +563,11 @@ export default function ChatPage() {
           </div>
         </>
       )}
+
+      {/* ── Moneo Widget ───────────────────────────────────────────────── */}
+
+      {/* ── Moneo Widget ───────────────────────────────────────────────── */}
+      <MoneoWidget state={moneoState} />
 
       {/* ── Input Bar ──────────────────────────────────────────────────── */}
       <div className={styles.inputBar}>

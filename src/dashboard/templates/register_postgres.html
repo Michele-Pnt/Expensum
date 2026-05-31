@@ -57,7 +57,7 @@
 <body>
     <div class="card">
         <div class="logo">
-            <h2 style="font-size: 1.5rem; font-weight: 800; letter-spacing: 1px; color: #008080;">Traky / Moneo</h2>
+            <h2 style="font-size: 1.5rem; font-weight: 800; letter-spacing: 1px; color: #008080;">Expensum / Moneo</h2>
         </div>
         <h1>Crea il tuo account</h1>
         <p class="sub">Scegli email e password per accedere a Moneo</p>
@@ -67,6 +67,7 @@
         {% endif %}
 
         <form method="POST" action="/auth/postgres">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
             <input type="hidden" name="reg_token" value="{{ reg_token }}">
 
             <div class="field">

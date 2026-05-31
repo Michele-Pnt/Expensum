@@ -166,7 +166,7 @@ class NotionFinanceClient:
                         title_low = title.lower().strip() if title else ""
                         logger.debug("[Discovery] Visto in '%s...': '%s' [child_page]", block_id[:5], title)
                         # Entriamo se è una cartella nota o se siamo ai primi livelli
-                        is_container = any(k in title_low for k in ["database", "db", "finance", "dashboard", "tracky"])
+                        is_container = any(k in title_low for k in ["database", "db", "finance", "dashboard", "expensum"])
                         if is_container or depth < 2:
                             _scan_recursive(b_id, depth + 1)
 
@@ -181,7 +181,7 @@ class NotionFinanceClient:
         # ---------------------------------------------------------------------------
         # Costanti del template
         # ---------------------------------------------------------------------------
-        _ROOT_PAGE_NAME = "Dashboard Tracky Finance"
+        _ROOT_PAGE_NAME = "Dashboard Expensum Finance"
         _DATABASES_SUBPAGE_NAME = "databases"
 
         # Pagine di contenuto (leaf) del template: non entrarci durante la ricerca

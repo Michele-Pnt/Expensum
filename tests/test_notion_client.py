@@ -54,9 +54,9 @@ def test_discover_databases_strategy_0(mock_notion_client):
     """Strategy 0: trova tutti i DB reali dentro la sub-page 'Databases' della root."""
     mock_instance = mock_notion_client.return_value
 
-    # 1. search trova la pagina root "Dashboard Tracky Finance"
+    # 1. search trova la pagina root "Dashboard Expensum Finance"
     mock_instance.search.return_value = {
-        "results": [_make_page_result("root_id", "Dashboard Tracky Finance")]
+        "results": [_make_page_result("root_id", "Dashboard Expensum Finance")]
     }
 
     # 2. blocks.children.list: due chiamate distinte per root e per sub-page Databases
@@ -89,7 +89,7 @@ def test_discover_databases_strategy_0_skips_linked_views(mock_notion_client):
     mock_instance = mock_notion_client.return_value
 
     mock_instance.search.return_value = {
-        "results": [_make_page_result("root_id", "Dashboard Tracky Finance")]
+        "results": [_make_page_result("root_id", "Dashboard Expensum Finance")]
     }
 
     def children_side_effect(block_id, **kwargs):
@@ -161,7 +161,7 @@ def test_discover_databases_strategy_2_global_search(mock_notion_client):
 
     def search_side_effect(query=None, **kwargs):
         # Strategy 0: root non trovata
-        if query == "Dashboard Tracky Finance":
+        if query == "Dashboard Expensum Finance":
             return {"results": []}
         # Strategy 2: search globale → restituisce una pagina finance che contiene i DB
         return {

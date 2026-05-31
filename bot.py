@@ -203,7 +203,7 @@ async def _check_and_consume_tokens(update: Update, chat_id: str, action_type: s
             await update.message.reply_text(
                 f"🛑 *Token mensili esauriti*\n"
                 f"Hai consumato tutti i tuoi {plan['tokens_total']:,} token mensili.\n\n"
-                f"Usa /piano per fare l'upgrade e continuare a usare Traky, o attendi il reset mensile.", 
+                f"Usa /piano per fare l'upgrade e continuare a usare Expensum, o attendi il reset mensile.", 
                 parse_mode=ParseMode.MARKDOWN
             )
         else:
@@ -880,11 +880,11 @@ def _build_dashboard_for_user(chat_id: str) -> str:
         spending_by_cat: dict[str, float] = {}
         for tx in transactions:
             cat = tx.get("category") or "Senza categoria"
-            spending_by_cat[cat] = spending_by_cat.get(cat, 0.0) + tx.get("amount", 0.0)
+            spending_by_cat[cat] = spending_by_cat.get(cat, 0.0) + float(tx.get("amount") or 0)
 
         # Recupera le medie storiche dal DB locale
         cat_averages = _user_store.get_user_categories_with_averages(chat_id)
-        avg_map = {c["name"]: c["average"] for c in cat_averages}
+        avg_map = {c["name"]: float(c["average"] or 0) for c in cat_averages}
 
         # Unisci spese attuali + medie
         all_cat_names = set(spending_by_cat.keys()) | set(avg_map.keys())
@@ -968,7 +968,7 @@ async def cmd_piano(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         )
         # TODO: aggiungere pulsante inline per l'upgrade (Stripe/Stars) quando integrati
     else:
-        testo += "Grazie per essere un utente PRO! Hai accesso a tutte le funzionalità premium di Traky 🚀"
+        testo += "Grazie per essere un utente PRO! Hai accesso a tutte le funzionalità premium di Expensum 🚀"
         
     await update.message.reply_text(testo, parse_mode=ParseMode.MARKDOWN)
 
@@ -2081,7 +2081,7 @@ def _nightly_subscription_job(app: Application, loop: asyncio.AbstractEventLoop)
                 
                 for sub in subs:
                     sub_name = sub.get("name", "Abbonamento")
-                    amount = sub.get("amount", 0.0)
+                    amount = float(sub.get("amount") or 0)
                     last_billed = sub.get("last_billed")
                     sub_type = sub.get("sub_type")
                     account_id = sub.get("account_id")

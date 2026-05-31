@@ -63,7 +63,7 @@ def build_dashboard_text(
         for acc in accounts:
             name = acc.get("name", "Sconosciuto")
             # Supporta sia 'current_balance' (Notion) che 'balance' (Postgres)
-            balance = acc.get("current_balance") or acc.get("balance") or 0.0
+            balance = float(acc.get("current_balance") or acc.get("balance") or 0)
             total_balance += balance
             emoji = "💳" if balance >= 0 else "🔴"
             lines.append(f"  {emoji} {name}: *€{balance:,.2f}*")
@@ -91,6 +91,7 @@ def build_dashboard_text(
             next_billing = _estimate_next_billing_str(last_billed, sub_type)
 
             if amount is not None:
+                amount = float(amount)
                 total_subs += amount
                 lines.append(f"  📌 {name}: *€{amount:,.2f}*")
             else:
@@ -115,8 +116,8 @@ def build_dashboard_text(
         total_spent = 0.0
         for cat in categories_spending:
             cat_name = cat.get("name", "Sconosciuta")
-            spent = cat.get("spent_this_month", 0.0)
-            average = cat.get("average", 0.0)
+            spent = float(cat.get("spent_this_month") or 0)
+            average = float(cat.get("average") or 0)
             total_spent += spent
 
             # Indicatore trend: ↗️ sopra media, ↘️ sotto media, ➡️ in media

@@ -3,6 +3,7 @@
 
 import React, { useEffect, useState } from "react";
 import Link from "next/link";
+import Script from "next/script";
 import { MessageCircle, BarChart2, CreditCard, FileText, Check, Send, Sparkles, TrendingUp, BellRing, ChevronDown } from "lucide-react";
 import styles from "./page.module.css";
 
@@ -180,13 +181,14 @@ export default function LandingPage() {
             <div className={styles.heroLeft}>
               <p className={styles.heroPill}>Powered by AI</p>
               <h1 className={styles.heroHeadline}>
-                Il tuo compagno<br />del risparmio.
+                Non chiederti dove sono finiti i tuoi soldi.<br />Inizia a dirgli dove andare.
               </h1>
               <p className={styles.heroSub}>
                 Traccia le spese via Telegram. L’AI le analizza.<br />
                 Tu capisci i tuoi soldi.
               </p>
               <div className={styles.heroActions}>
+                {/* --- BOTTONI ORIGINALI (Nascosti) ---
                 <a
                   href="https://t.me/ExspensumBot"
                   target="_blank"
@@ -201,6 +203,18 @@ export default function LandingPage() {
                 >
                   Come funziona
                 </button>
+                ---------------------------------------- */}
+
+                <div style={{ width: "100%", maxWidth: "450px", marginTop: "0.5rem" }}>
+                  <iframe
+                    data-tally-src="https://tally.so/embed/44pAAr?alignLeft=1&hideTitle=1&transparentBackground=1&dynamicHeight=1"
+                    width="100%"
+                    height="200"
+                    title="Expensum Early Access"
+                    style={{ border: "none", margin: 0, padding: 0 }}
+                  ></iframe>
+                  <Script src="https://tally.so/widgets/embed.js" strategy="lazyOnload" />
+                </div>
               </div>
             </div>
 
@@ -390,8 +404,7 @@ export default function LandingPage() {
               </div>
 
               {/* Premium */}
-              <div className={`${styles.pricingCard} ${styles.pricingCardPremium}`} data-reveal>
-                <div className={styles.pricingBadge}>Più popolare</div>
+              <div className={styles.pricingCard} data-reveal>
                 <p className={styles.pricingLabel}>Premium</p>
                 <div className={styles.pricingPrice}>
                   <span className={styles.pricingAmount}>€4.99</span>
@@ -401,7 +414,7 @@ export default function LandingPage() {
                   href="https://t.me/ExspensumBot"
                   target="_blank"
                   rel="noopener noreferrer"
-                  className={styles.btnPrimary}
+                  className={styles.btnOutline}
                 >
                   Passa a Premium
                 </a>
@@ -415,6 +428,37 @@ export default function LandingPage() {
                 </ul>
                 <p className={styles.pricingNote}>
                   Per chi vuole il massimo: grafici, budget, previsioni e storico completo.
+                </p>
+              </div>
+
+              {/* Lifetime Founder */}
+              <div className={`${styles.pricingCard} ${styles.pricingCardPremium}`} data-reveal>
+                <div className={styles.pricingBadge}>Compila il form, Solo 90 posti!</div>
+                <p className={styles.pricingLabel}>Lifetime Founder</p>
+                <div className={styles.pricingPrice}>
+                  <span className={styles.pricingAmount}>€89</span>
+                  <span className={styles.pricingPeriod}>/una tantum</span>
+                </div>
+                <button
+                  onClick={() => window.scrollTo({ top: 0, behavior: 'smooth' })}
+                  className={styles.btnPrimary}
+                >
+                  Prenota il tuo posto
+                </button>
+                <ul className={styles.featureList}>
+                  {PREMIUM_FEATURES.map((feat) => (
+                    <li key={feat} className={styles.featureListItem}>
+                      <Check size={14} className={styles.checkIcon} />
+                      {feat}
+                    </li>
+                  ))}
+                  <li className={styles.featureListItem}>
+                    <Check size={14} className={styles.checkIcon} />
+                    <strong>Accesso a vita, zero abbonamenti</strong>
+                  </li>
+                </ul>
+                <p className={styles.pricingNote}>
+                  Lancio a settembre. Entra nella lista d'attesa per bloccare l'offerta.
                 </p>
               </div>
             </div>
@@ -439,16 +483,16 @@ export default function LandingPage() {
           </div>
           <div className={styles.footerSocials}>
             <a href="https://instagram.com/expensum.finance" target="_blank" rel="noopener noreferrer" className={styles.footerSocialIcon} aria-label="Instagram">
-              <svg width="18" height="18" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.8}><rect x="2" y="2" width="20" height="20" rx="5"/><circle cx="12" cy="12" r="5"/><circle cx="17.5" cy="6.5" r="1" fill="currentColor" stroke="none"/></svg>
+              <svg width="18" height="18" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.8}><rect x="2" y="2" width="20" height="20" rx="5" /><circle cx="12" cy="12" r="5" /><circle cx="17.5" cy="6.5" r="1" fill="currentColor" stroke="none" /></svg>
             </a>
             <a href="https://t.me/ExspensumBot" target="_blank" rel="noopener noreferrer" className={styles.footerSocialIcon} aria-label="Telegram">
-              <svg width="18" height="18" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.8}><path d="M21 5L2 12.5l7 1M21 5l-3 15-9-5.5M21 5L9 13.5m0 0V19l3-3"/></svg>
+              <svg width="18" height="18" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.8}><path d="M21 5L2 12.5l7 1M21 5l-3 15-9-5.5M21 5L9 13.5m0 0V19l3-3" /></svg>
             </a>
             <a href="https://acesse.one/ite4lxk" target="_blank" rel="noopener noreferrer" className={styles.footerSocialIcon} aria-label="Facebook">
-              <svg width="18" height="18" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.8}><path d="M18 2h-3a5 5 0 0 0-5 5v3H7v4h3v8h4v-8h3l1-4h-4V7a1 1 0 0 1 1-1h3z"/></svg>
+              <svg width="18" height="18" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.8}><path d="M18 2h-3a5 5 0 0 0-5 5v3H7v4h3v8h4v-8h3l1-4h-4V7a1 1 0 0 1 1-1h3z" /></svg>
             </a>
             <a href="mailto:expensum.finance@gmail.com" className={styles.footerSocialIcon} aria-label="Email">
-              <svg width="18" height="18" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.8}><rect x="2" y="4" width="20" height="16" rx="2"/><path d="m2 7 10 7 10-7"/></svg>
+              <svg width="18" height="18" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.8}><rect x="2" y="4" width="20" height="16" rx="2" /><path d="m2 7 10 7 10-7" /></svg>
             </a>
           </div>
         </div>

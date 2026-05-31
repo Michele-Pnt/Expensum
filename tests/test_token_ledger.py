@@ -166,7 +166,7 @@ class TestFinalizeLlmUsage:
         with store.Session() as sess:
             event = sess.query(LlmUsageEvent).filter_by(request_key=key).first()
             assert event.estimated_cost_amount is not None
-            assert abs(event.estimated_cost_amount - 0.4) < 1e-6
+            assert abs(float(event.estimated_cost_amount) - 0.4) < 1e-6
 
     def test_idempotent_same_key(self, store):
         key = "finalize-idem-001"
