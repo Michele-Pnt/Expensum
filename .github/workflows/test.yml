@@ -31,6 +31,7 @@ jobs:
       NOTION_CLIENT_SECRET: mock_secret
       NOTION_REDIRECT_URI: http://localhost/callback
       SECRET_KEY: mock_secret_key
+      FLASK_SECRET_KEY: mock_flask_secret_key_for_testing
       DATABASE_URL: "sqlite:///:memory:"
       FLASK_ENV: testing
 
