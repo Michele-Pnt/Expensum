@@ -3751,11 +3751,24 @@ def space_expenses_list():
         end_d = _dt.strptime(end, "%Y-%m-%d").date()
     except ValueError:
         return jsonify({"error": "Formato data non valido (YYYY-MM-DD)"}), 400
+    search = request.args.get("search") or None
+    category_id = int(request.args.get("category_id")) if request.args.get("category_id") else None
+    account_id_f = int(request.args.get("account_id")) if request.args.get("account_id") else None
+    sort_by = request.args.get("sort_by", "date")
+    if sort_by not in ("date", "amount", "name"):
+        sort_by = "date"
+    sort_dir = request.args.get("sort_dir", "desc")
+    if sort_dir not in ("asc", "desc"):
+        sort_dir = "desc"
     with store.Session() as s:
         pg, err = _pg_or_401(s, g.chat_id)
         if err:
             return err
-        items, total = pg.fetch_expenses_paginated(start_d, end_d, limit=limit, offset=offset)
+        items, total = pg.fetch_expenses_paginated(
+            start_d, end_d, limit=limit, offset=offset,
+            search=search, category_id=category_id, account_id=account_id_f,
+            sort_by=sort_by, sort_dir=sort_dir,
+        )
         return jsonify({"expenses": items, "total": total})
 
 
@@ -3847,11 +3860,24 @@ def space_incomes_list():
         end_d = _dt.strptime(end, "%Y-%m-%d").date()
     except ValueError:
         return jsonify({"error": "Formato data non valido (YYYY-MM-DD)"}), 400
+    search = request.args.get("search") or None
+    income_type_f = request.args.get("income_type") or None
+    account_id_f = int(request.args.get("account_id")) if request.args.get("account_id") else None
+    sort_by = request.args.get("sort_by", "date")
+    if sort_by not in ("date", "amount", "name"):
+        sort_by = "date"
+    sort_dir = request.args.get("sort_dir", "desc")
+    if sort_dir not in ("asc", "desc"):
+        sort_dir = "desc"
     with store.Session() as s:
         pg, err = _pg_or_401(s, g.chat_id)
         if err:
             return err
-        items, total = pg.fetch_incomes_paginated(start_d, end_d, limit=limit, offset=offset)
+        items, total = pg.fetch_incomes_paginated(
+            start_d, end_d, limit=limit, offset=offset,
+            search=search, income_type=income_type_f, account_id=account_id_f,
+            sort_by=sort_by, sort_dir=sort_dir,
+        )
         return jsonify({"incomes": items, "total": total})
 
 

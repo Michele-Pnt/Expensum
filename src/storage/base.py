@@ -3,7 +3,7 @@ from datetime import date
 
 
 class FinancialStorage(ABC):
-    """Interfaccia astratta per il layer di storage information.
+    """Interfaccia astratta per il layer di storage.
    
       Ogni backend (Notion, PostgreSQL, ecc.) deve implementare questi metodi.
       Il resto del codice (bot.py, main.py) usa solo questa interfaccia,

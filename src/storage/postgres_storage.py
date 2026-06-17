@@ -510,18 +510,39 @@ class PostgresStorage(FinancialStorage):
         end_date: date,
         limit: int = 25,
         offset: int = 0,
+        search: str | None = None,
+        category_id: int | None = None,
+        account_id: int | None = None,
+        sort_by: str = "date",
+        sort_dir: str = "desc",
     ) -> tuple[list[dict], int]:
         """Restituisce spese paginate nell'intervallo con totale righe."""
-        base_q = self._session.query(Expense, UserCategory).outerjoin(
-            UserCategory, UserCategory.id == Expense.category_id
-        ).filter(
-            Expense.user_id == self._user_id,
-            Expense.expense_date >= start_date,
-            Expense.expense_date <= end_date,
+        base_q = (
+            self._session.query(Expense, UserCategory, Account)
+            .outerjoin(UserCategory, UserCategory.id == Expense.category_id)
+            .outerjoin(Account, Account.id == Expense.account_id)
+            .filter(
+                Expense.user_id == self._user_id,
+                Expense.expense_date >= start_date,
+                Expense.expense_date <= end_date,
+            )
         )
+        if search:
+            base_q = base_q.filter(Expense.name.ilike(f"%{search}%"))
+        if category_id is not None:
+            base_q = base_q.filter(Expense.category_id == category_id)
+        if account_id is not None:
+            base_q = base_q.filter(Expense.account_id == account_id)
+        _sort_cols = {
+            "date": Expense.expense_date,
+            "amount": Expense.amount,
+            "name": Expense.name,
+        }
+        sort_col = _sort_cols.get(sort_by, Expense.expense_date)
+        order = sort_col.asc() if sort_dir == "asc" else sort_col.desc()
         total = base_q.count()
-        rows = base_q.order_by(Expense.expense_date.desc()).limit(limit).offset(offset).all()
-        items = [
+        rows = base_q.order_by(order).limit(limit).offset(offset).all()
+        return [
             {
                 "id": exp.id,
                 "date": exp.expense_date.isoformat(),
@@ -529,16 +550,11 @@ class PostgresStorage(FinancialStorage):
                 "amount": float(exp.amount),
                 "category": cat.name if cat else (exp.category_name or ""),
                 "category_id": exp.category_id,
-                "account": None,
+                "account": acc.name if acc else "",
                 "account_id": exp.account_id,
             }
-            for exp, cat in rows
-        ]
-        # arricchisci con nome conto
-        acc_map = {a["id"]: a["name"] for a in self.fetch_accounts()}
-        for item in items:
-            item["account"] = acc_map.get(item["account_id"], "")
-        return items, total
+            for exp, cat, acc in rows
+        ], total
 
     def update_expense(self, expense_id: int, **kwargs) -> dict | None:
         """Aggiorna una spesa (name, amount, date, category_id, account_id)."""
@@ -581,6 +597,11 @@ class PostgresStorage(FinancialStorage):
         end_date: date,
         limit: int = 25,
         offset: int = 0,
+        search: str | None = None,
+        income_type: str | None = None,
+        account_id: int | None = None,
+        sort_by: str = "date",
+        sort_dir: str = "desc",
     ) -> tuple[list[dict], int]:
         """Restituisce entrate paginate nell'intervallo con totale righe."""
         base_q = self._session.query(Income).filter(
@@ -588,8 +609,21 @@ class PostgresStorage(FinancialStorage):
             Income.income_date >= start_date,
             Income.income_date <= end_date,
         )
+        if search:
+            base_q = base_q.filter(Income.name.ilike(f"%{search}%"))
+        if income_type:
+            base_q = base_q.filter(Income.income_type == income_type)
+        if account_id is not None:
+            base_q = base_q.filter(Income.account_id == account_id)
+        _sort_cols = {
+            "date": Income.income_date,
+            "amount": Income.amount,
+            "name": Income.name,
+        }
+        sort_col = _sort_cols.get(sort_by, Income.income_date)
+        order = sort_col.asc() if sort_dir == "asc" else sort_col.desc()
         total = base_q.count()
-        rows = base_q.order_by(Income.income_date.desc()).limit(limit).offset(offset).all()
+        rows = base_q.order_by(order).limit(limit).offset(offset).all()
         acc_map = {a["id"]: a["name"] for a in self.fetch_accounts()}
         return [
             {

@@ -18,6 +18,8 @@ from sqlalchemy import (
 from src.user_store import Base
 
 
+# Modelli ORM (le tabelle)
+
 class Expense(Base):
     """Tabella delle spese per utenti con backend PostgreSQL/SQLite.
 

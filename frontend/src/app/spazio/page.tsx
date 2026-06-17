@@ -1,12 +1,12 @@
 "use client";
 
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState, useCallback, useMemo } from "react";
 import {
   Box, Card, CardContent, Tab, Tabs, Typography, Table, TableBody,
   TableCell, TableContainer, TableHead, TableRow, TablePagination,
   IconButton, Button, Dialog, DialogTitle, DialogContent, DialogActions,
   TextField, Select, MenuItem, FormControl, InputLabel, Chip,
-  CircularProgress, Snackbar, Alert, Tooltip,
+  CircularProgress, Snackbar, Alert, Tooltip, TableSortLabel,
 } from "@mui/material";
 import { Plus, Pencil, Trash2, Check, X } from "lucide-react";
 
@@ -118,6 +118,31 @@ export default function SpazioPage() {
   const [incStart, setIncStart] = useState(monthStartIso());
   const [incEnd, setIncEnd] = useState(todayIso());
 
+  // Spese: filtri extra + sort (server-side)
+  const [expSearch, setExpSearch] = useState("");
+  const [expCatId, setExpCatId] = useState("");
+  const [expAccId, setExpAccId] = useState("");
+  const [expSortBy, setExpSortBy] = useState("date");
+  const [expSortDir, setExpSortDir] = useState<"asc" | "desc">("desc");
+
+  // Entrate: filtri extra + sort (server-side)
+  const [incSearch, setIncSearch] = useState("");
+  const [incType, setIncType] = useState("");
+  const [incAccId, setIncAccId] = useState("");
+  const [incSortBy, setIncSortBy] = useState("date");
+  const [incSortDir, setIncSortDir] = useState<"asc" | "desc">("desc");
+
+  // Abbonamenti: filtri client-side
+  const [subSearch, setSubSearch] = useState("");
+  const [subType, setSubType] = useState("");
+  const [subSortBy, setSubSortBy] = useState<"name" | "amount">("name");
+  const [subSortDir, setSubSortDir] = useState<"asc" | "desc">("asc");
+
+  // Categorie: filtri client-side
+  const [catSearch, setCatSearch] = useState("");
+  const [catSortBy, setCatSortBy] = useState<"name" | "budget">("name");
+  const [catSortDir, setCatSortDir] = useState<"asc" | "desc">("asc");
+
   // Loading
   const [loading, setLoading] = useState<Record<string, boolean>>({});
 
@@ -192,12 +217,19 @@ export default function SpazioPage() {
     }
   }, []);
 
-  const fetchExpenses = useCallback(async (page = expPage, rpp = expRowsPP, start = expStart, end = expEnd) => {
+  const fetchExpenses = useCallback(async (
+    page = expPage, rpp = expRowsPP, start = expStart, end = expEnd,
+    search = expSearch, catId = expCatId, accId = expAccId,
+    sortBy = expSortBy, sortDir = expSortDir,
+  ) => {
     setLoading(l => ({ ...l, expenses: true }));
     try {
-      const params = new URLSearchParams({
-        limit: String(rpp), offset: String(page * rpp), start, end,
-      });
+      const params = new URLSearchParams({ limit: String(rpp), offset: String(page * rpp), start, end });
+      if (search) params.set("search", search);
+      if (catId) params.set("category_id", catId);
+      if (accId) params.set("account_id", accId);
+      params.set("sort_by", sortBy);
+      params.set("sort_dir", sortDir);
       const res = await fetch(`/api/space/expenses?${params}`, { headers: buildHeaders() });
       const json = await res.json();
       setExpenses(json.expenses ?? []);
@@ -205,14 +237,21 @@ export default function SpazioPage() {
     } finally {
       setLoading(l => ({ ...l, expenses: false }));
     }
-  }, [expPage, expRowsPP, expStart, expEnd]);
+  }, [expPage, expRowsPP, expStart, expEnd, expSearch, expCatId, expAccId, expSortBy, expSortDir]);
 
-  const fetchIncomes = useCallback(async (page = incPage, rpp = incRowsPP, start = incStart, end = incEnd) => {
+  const fetchIncomes = useCallback(async (
+    page = incPage, rpp = incRowsPP, start = incStart, end = incEnd,
+    search = incSearch, type = incType, accId = incAccId,
+    sortBy = incSortBy, sortDir = incSortDir,
+  ) => {
     setLoading(l => ({ ...l, incomes: true }));
     try {
-      const params = new URLSearchParams({
-        limit: String(rpp), offset: String(page * rpp), start, end,
-      });
+      const params = new URLSearchParams({ limit: String(rpp), offset: String(page * rpp), start, end });
+      if (search) params.set("search", search);
+      if (type) params.set("income_type", type);
+      if (accId) params.set("account_id", accId);
+      params.set("sort_by", sortBy);
+      params.set("sort_dir", sortDir);
       const res = await fetch(`/api/space/incomes?${params}`, { headers: buildHeaders() });
       const json = await res.json();
       setIncomes(json.incomes ?? []);
@@ -220,7 +259,7 @@ export default function SpazioPage() {
     } finally {
       setLoading(l => ({ ...l, incomes: false }));
     }
-  }, [incPage, incRowsPP, incStart, incEnd]);
+  }, [incPage, incRowsPP, incStart, incEnd, incSearch, incType, incAccId, incSortBy, incSortDir]);
 
   // Carica tutto al mount e poi su cambio tab
   useEffect(() => { fetchAccounts(); fetchCategories(); fetchSubscriptions(); fetchSuggestions(); }, [fetchAccounts, fetchCategories, fetchSubscriptions, fetchSuggestions]);
@@ -357,6 +396,36 @@ export default function SpazioPage() {
   }
 
   // ---------------------------------------------------------------------------
+  // Liste derivate (client-side filter + sort)
+  // ---------------------------------------------------------------------------
+
+  const filteredSubs = useMemo(() => {
+    const q = subSearch.toLowerCase();
+    let r = subscriptions
+      .filter(s => s.name.toLowerCase().includes(q))
+      .filter(s => !subType || s.sub_type === subType);
+    r = [...r].sort((a, b) => {
+      const v = subSortBy === "amount"
+        ? (a.amount ?? 0) - (b.amount ?? 0)
+        : a.name.localeCompare(b.name, "it");
+      return subSortDir === "asc" ? v : -v;
+    });
+    return r;
+  }, [subscriptions, subSearch, subType, subSortBy, subSortDir]);
+
+  const filteredCats = useMemo(() => {
+    const q = catSearch.toLowerCase();
+    let r = categories.filter(c => c.name.toLowerCase().includes(q));
+    r = [...r].sort((a, b) => {
+      const v = catSortBy === "budget"
+        ? (a.monthly_budget ?? 0) - (b.monthly_budget ?? 0)
+        : a.name.localeCompare(b.name, "it");
+      return catSortDir === "asc" ? v : -v;
+    });
+    return r;
+  }, [categories, catSearch, catSortBy, catSortDir]);
+
+  // ---------------------------------------------------------------------------
   // Render tabelle
   // ---------------------------------------------------------------------------
 
@@ -411,9 +480,17 @@ export default function SpazioPage() {
     const activeSuggestions = Object.entries(suggestions).filter(([name]) => !dismissed.has(name));
     const hasSuggestions = activeSuggestions.length > 0;
 
+    function handleCatSort(field: string) {
+      const newDir = catSortBy === field ? (catSortDir === "asc" ? "desc" : "asc") : "asc";
+      setCatSortBy(field as "name" | "budget");
+      setCatSortDir(newDir as "asc" | "desc");
+    }
+
     return (
       <Box data-tour="spazio-categorie">
-        <TabToolbar label="Categorie" onAdd={() => openAdd("category")} loading={loading.categories || loadingSuggestions} />
+        <TabToolbar label="Categorie" onAdd={() => openAdd("category")} loading={loading.categories || loadingSuggestions}>
+          <SearchInput value={catSearch} onChange={setCatSearch} placeholder="Cerca categoria..." />
+        </TabToolbar>
 
         {hasSuggestions && (
           <Alert
@@ -440,14 +517,14 @@ export default function SpazioPage() {
           <Table size="small" sx={{ minWidth: hasSuggestions ? 620 : 400 }}>
             <TableHead>
               <TableRow>
-                <TableCell sx={HEAD_SX}>Nome</TableCell>
-                <TableCell sx={{ ...HEAD_SX, textAlign: "right" }}>Budget mensile</TableCell>
+                <SortableHead label="Nome" field="name" sortBy={catSortBy} sortDir={catSortDir} onSort={handleCatSort} />
+                <SortableHead label="Budget mensile" field="budget" sortBy={catSortBy} sortDir={catSortDir} onSort={handleCatSort} sx={{ textAlign: "right" }} />
                 {hasSuggestions && <TableCell sx={{ ...HEAD_SX, textAlign: "right" }}>Consiglio</TableCell>}
                 <TableCell sx={{ ...HEAD_SX, width: 80 }} />
               </TableRow>
             </TableHead>
             <TableBody>
-              {categories.map(row => {
+              {filteredCats.map(row => {
                 const suggested = suggestions[row.name];
                 const showSuggestion = suggested != null && !dismissed.has(row.name);
                 const delta = suggested != null && row.monthly_budget != null
@@ -490,7 +567,7 @@ export default function SpazioPage() {
                   </TableRow>
                 );
               })}
-              {!loading.categories && categories.length === 0 && <EmptyRow colSpan={hasSuggestions ? 4 : 3} />}
+              {!loading.categories && filteredCats.length === 0 && <EmptyRow colSpan={hasSuggestions ? 4 : 3} />}
             </TableBody>
           </Table>
         </TableContainer>
@@ -499,15 +576,29 @@ export default function SpazioPage() {
   }
 
   function renderSubscriptions() {
+    function handleSubSort(field: string) {
+      const newDir = subSortBy === field ? (subSortDir === "asc" ? "desc" : "asc") : "asc";
+      setSubSortBy(field as "name" | "amount");
+      setSubSortDir(newDir as "asc" | "desc");
+    }
+
     return (
       <>
-        <TabToolbar label="Abbonamenti" onAdd={() => openAdd("subscription")} loading={loading.subscriptions} />
+        <TabToolbar label="Abbonamenti" onAdd={() => openAdd("subscription")} loading={loading.subscriptions}>
+          <SearchInput value={subSearch} onChange={setSubSearch} placeholder="Cerca abbonamento..." />
+          <FilterSelect
+            label="Tipo"
+            value={subType}
+            onChange={setSubType}
+            options={SUB_TYPES.map(t => ({ value: t, label: t }))}
+          />
+        </TabToolbar>
         <TableContainer sx={{ overflowX: "auto" }}>
           <Table size="small" sx={{ minWidth: 700 }}>
             <TableHead>
               <TableRow>
-                <TableCell sx={HEAD_SX}>Nome</TableCell>
-                <TableCell sx={{ ...HEAD_SX, textAlign: "right" }}>Importo</TableCell>
+                <SortableHead label="Nome" field="name" sortBy={subSortBy} sortDir={subSortDir} onSort={handleSubSort} />
+                <SortableHead label="Importo" field="amount" sortBy={subSortBy} sortDir={subSortDir} onSort={handleSubSort} sx={{ textAlign: "right" }} />
                 <TableCell sx={HEAD_SX}>Tipo</TableCell>
                 <TableCell sx={HEAD_SX}>Ultima fattura</TableCell>
                 <TableCell sx={HEAD_SX}>Conto</TableCell>
@@ -515,7 +606,7 @@ export default function SpazioPage() {
               </TableRow>
             </TableHead>
             <TableBody>
-              {subscriptions.map(row => (
+              {filteredSubs.map(row => (
                 <TableRow key={row.id} hover>
                   <TableCell sx={CELL_SX}>{row.name}</TableCell>
                   <TableCell sx={{ ...CELL_SX, textAlign: "right", color: ACCENT, fontWeight: 600 }}>
@@ -541,7 +632,7 @@ export default function SpazioPage() {
                   </TableCell>
                 </TableRow>
               ))}
-              {!loading.subscriptions && subscriptions.length === 0 && <EmptyRow colSpan={6} />}
+              {!loading.subscriptions && filteredSubs.length === 0 && <EmptyRow colSpan={6} />}
             </TableBody>
           </Table>
         </TableContainer>
@@ -550,22 +641,44 @@ export default function SpazioPage() {
   }
 
   function renderExpenses() {
+    function onExpSearch(v: string) { setExpSearch(v); setExpPage(0); fetchExpenses(0, expRowsPP, expStart, expEnd, v, expCatId, expAccId, expSortBy, expSortDir); }
+    function onExpCat(v: string) { setExpCatId(v); setExpPage(0); fetchExpenses(0, expRowsPP, expStart, expEnd, expSearch, v, expAccId, expSortBy, expSortDir); }
+    function onExpAcc(v: string) { setExpAccId(v); setExpPage(0); fetchExpenses(0, expRowsPP, expStart, expEnd, expSearch, expCatId, v, expSortBy, expSortDir); }
+    function handleExpSort(field: string) {
+      const newDir: "asc" | "desc" = expSortBy === field ? (expSortDir === "asc" ? "desc" : "asc") : "asc";
+      setExpSortBy(field); setExpSortDir(newDir); setExpPage(0);
+      fetchExpenses(0, expRowsPP, expStart, expEnd, expSearch, expCatId, expAccId, field, newDir);
+    }
+
     return (
       <>
         <TabToolbar label="Spese" onAdd={() => openAdd("expense")} loading={loading.expenses}>
+          <SearchInput value={expSearch} onChange={onExpSearch} placeholder="Cerca spesa..." />
+          <FilterSelect
+            label="Categoria"
+            value={expCatId}
+            onChange={onExpCat}
+            options={categories.map(c => ({ value: String(c.id), label: c.name }))}
+          />
+          <FilterSelect
+            label="Conto"
+            value={expAccId}
+            onChange={onExpAcc}
+            options={accounts.map(a => ({ value: String(a.id), label: a.name }))}
+          />
           <DateRangeFilter
             start={expStart} end={expEnd}
-            onStart={v => { setExpStart(v); setExpPage(0); fetchExpenses(0, expRowsPP, v, expEnd); }}
-            onEnd={v => { setExpEnd(v); setExpPage(0); fetchExpenses(0, expRowsPP, expStart, v); }}
+            onStart={v => { setExpStart(v); setExpPage(0); fetchExpenses(0, expRowsPP, v, expEnd, expSearch, expCatId, expAccId, expSortBy, expSortDir); }}
+            onEnd={v => { setExpEnd(v); setExpPage(0); fetchExpenses(0, expRowsPP, expStart, v, expSearch, expCatId, expAccId, expSortBy, expSortDir); }}
           />
         </TabToolbar>
         <TableContainer sx={{ overflowX: "auto" }}>
           <Table size="small" sx={{ minWidth: 700 }}>
             <TableHead>
               <TableRow>
-                <TableCell sx={HEAD_SX}>Data</TableCell>
-                <TableCell sx={HEAD_SX}>Descrizione</TableCell>
-                <TableCell sx={{ ...HEAD_SX, textAlign: "right" }}>Importo</TableCell>
+                <SortableHead label="Data" field="date" sortBy={expSortBy} sortDir={expSortDir} onSort={handleExpSort} />
+                <SortableHead label="Descrizione" field="name" sortBy={expSortBy} sortDir={expSortDir} onSort={handleExpSort} />
+                <SortableHead label="Importo" field="amount" sortBy={expSortBy} sortDir={expSortDir} onSort={handleExpSort} sx={{ textAlign: "right" }} />
                 <TableCell sx={HEAD_SX}>Categoria</TableCell>
                 <TableCell sx={HEAD_SX}>Conto</TableCell>
                 <TableCell sx={{ ...HEAD_SX, width: 80 }} />
@@ -607,8 +720,8 @@ export default function SpazioPage() {
           page={expPage}
           rowsPerPage={expRowsPP}
           rowsPerPageOptions={[10, 25, 50]}
-          onPageChange={(_, p) => { setExpPage(p); fetchExpenses(p, expRowsPP); }}
-          onRowsPerPageChange={e => { const rpp = parseInt(e.target.value); setExpRowsPP(rpp); setExpPage(0); fetchExpenses(0, rpp); }}
+          onPageChange={(_, p) => { setExpPage(p); fetchExpenses(p, expRowsPP, expStart, expEnd, expSearch, expCatId, expAccId, expSortBy, expSortDir); }}
+          onRowsPerPageChange={e => { const rpp = parseInt(e.target.value); setExpRowsPP(rpp); setExpPage(0); fetchExpenses(0, rpp, expStart, expEnd, expSearch, expCatId, expAccId, expSortBy, expSortDir); }}
           labelRowsPerPage="Righe:"
           sx={{ fontSize: "0.75rem" }}
         />
@@ -617,22 +730,44 @@ export default function SpazioPage() {
   }
 
   function renderIncomes() {
+    function onIncSearch(v: string) { setIncSearch(v); setIncPage(0); fetchIncomes(0, incRowsPP, incStart, incEnd, v, incType, incAccId, incSortBy, incSortDir); }
+    function onIncType(v: string) { setIncType(v); setIncPage(0); fetchIncomes(0, incRowsPP, incStart, incEnd, incSearch, v, incAccId, incSortBy, incSortDir); }
+    function onIncAcc(v: string) { setIncAccId(v); setIncPage(0); fetchIncomes(0, incRowsPP, incStart, incEnd, incSearch, incType, v, incSortBy, incSortDir); }
+    function handleIncSort(field: string) {
+      const newDir: "asc" | "desc" = incSortBy === field ? (incSortDir === "asc" ? "desc" : "asc") : "asc";
+      setIncSortBy(field); setIncSortDir(newDir); setIncPage(0);
+      fetchIncomes(0, incRowsPP, incStart, incEnd, incSearch, incType, incAccId, field, newDir);
+    }
+
     return (
       <>
         <TabToolbar label="Entrate" onAdd={() => openAdd("income")} loading={loading.incomes}>
+          <SearchInput value={incSearch} onChange={onIncSearch} placeholder="Cerca entrata..." />
+          <FilterSelect
+            label="Tipo"
+            value={incType}
+            onChange={onIncType}
+            options={INCOME_TYPES.map(t => ({ value: t, label: t }))}
+          />
+          <FilterSelect
+            label="Conto"
+            value={incAccId}
+            onChange={onIncAcc}
+            options={accounts.map(a => ({ value: String(a.id), label: a.name }))}
+          />
           <DateRangeFilter
             start={incStart} end={incEnd}
-            onStart={v => { setIncStart(v); setIncPage(0); fetchIncomes(0, incRowsPP, v, incEnd); }}
-            onEnd={v => { setIncEnd(v); setIncPage(0); fetchIncomes(0, incRowsPP, incStart, v); }}
+            onStart={v => { setIncStart(v); setIncPage(0); fetchIncomes(0, incRowsPP, v, incEnd, incSearch, incType, incAccId, incSortBy, incSortDir); }}
+            onEnd={v => { setIncEnd(v); setIncPage(0); fetchIncomes(0, incRowsPP, incStart, v, incSearch, incType, incAccId, incSortBy, incSortDir); }}
           />
         </TabToolbar>
         <TableContainer sx={{ overflowX: "auto" }}>
           <Table size="small" sx={{ minWidth: 700 }}>
             <TableHead>
               <TableRow>
-                <TableCell sx={HEAD_SX}>Data</TableCell>
-                <TableCell sx={HEAD_SX}>Descrizione</TableCell>
-                <TableCell sx={{ ...HEAD_SX, textAlign: "right" }}>Importo</TableCell>
+                <SortableHead label="Data" field="date" sortBy={incSortBy} sortDir={incSortDir} onSort={handleIncSort} />
+                <SortableHead label="Descrizione" field="name" sortBy={incSortBy} sortDir={incSortDir} onSort={handleIncSort} />
+                <SortableHead label="Importo" field="amount" sortBy={incSortBy} sortDir={incSortDir} onSort={handleIncSort} sx={{ textAlign: "right" }} />
                 <TableCell sx={HEAD_SX}>Tipo</TableCell>
                 <TableCell sx={HEAD_SX}>Conto</TableCell>
                 <TableCell sx={{ ...HEAD_SX, width: 80 }} />
@@ -674,8 +809,8 @@ export default function SpazioPage() {
           page={incPage}
           rowsPerPage={incRowsPP}
           rowsPerPageOptions={[10, 25, 50]}
-          onPageChange={(_, p) => { setIncPage(p); fetchIncomes(p, incRowsPP); }}
-          onRowsPerPageChange={e => { const rpp = parseInt(e.target.value); setIncRowsPP(rpp); setIncPage(0); fetchIncomes(0, rpp); }}
+          onPageChange={(_, p) => { setIncPage(p); fetchIncomes(p, incRowsPP, incStart, incEnd, incSearch, incType, incAccId, incSortBy, incSortDir); }}
+          onRowsPerPageChange={e => { const rpp = parseInt(e.target.value); setIncRowsPP(rpp); setIncPage(0); fetchIncomes(0, rpp, incStart, incEnd, incSearch, incType, incAccId, incSortBy, incSortDir); }}
           labelRowsPerPage="Righe:"
           sx={{ fontSize: "0.75rem" }}
         />
@@ -1002,5 +1137,60 @@ function DateRangeFilter({
         sx={{ "& .MuiInputBase-input": { fontSize: "0.75rem" }, width: 140 }}
       />
     </Box>
+  );
+}
+
+function SearchInput({ value, onChange, placeholder = "Cerca..." }: {
+  value: string; onChange: (v: string) => void; placeholder?: string;
+}) {
+  return (
+    <TextField
+      size="small" value={value} placeholder={placeholder}
+      onChange={e => onChange(e.target.value)}
+      sx={{ "& .MuiInputBase-input": { fontSize: "0.75rem" }, width: { xs: "100%", sm: 180 } }}
+    />
+  );
+}
+
+function FilterSelect({ label, value, onChange, options }: {
+  label: string; value: string; onChange: (v: string) => void;
+  options: { value: string; label: string }[];
+}) {
+  return (
+    <FormControl size="small" sx={{ minWidth: { xs: "100%", sm: 130 } }}>
+      <InputLabel sx={{ fontSize: "0.75rem" }}>{label}</InputLabel>
+      <Select
+        label={label} value={value}
+        onChange={e => onChange(e.target.value as string)}
+        sx={{ fontSize: "0.75rem" }}
+      >
+        <MenuItem value=""><em>Tutti</em></MenuItem>
+        {options.map(o => (
+          <MenuItem key={o.value} value={o.value} sx={{ fontSize: "0.8rem", textTransform: "capitalize" }}>
+            {o.label}
+          </MenuItem>
+        ))}
+      </Select>
+    </FormControl>
+  );
+}
+
+function SortableHead({ label, field, sortBy, sortDir, onSort, sx: sxProp }: {
+  label: string; field: string;
+  sortBy: string; sortDir: "asc" | "desc";
+  onSort: (field: string) => void;
+  sx?: object;
+}) {
+  return (
+    <TableCell sx={{ ...HEAD_SX, ...sxProp }}>
+      <TableSortLabel
+        active={sortBy === field}
+        direction={sortBy === field ? sortDir : "asc"}
+        onClick={() => onSort(field)}
+        sx={{ fontSize: "inherit", fontWeight: "inherit", color: "inherit", "&.Mui-active": { color: PRIMARY } }}
+      >
+        {label}
+      </TableSortLabel>
+    </TableCell>
   );
 }

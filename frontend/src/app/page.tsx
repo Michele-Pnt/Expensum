@@ -1,9 +1,9 @@
 "use client";
-/* eslint-disable @next/next/no-img-element */
 
 import React, { useEffect, useState } from "react";
 import Link from "next/link";
 import Script from "next/script";
+import Image from "next/image";
 import { MessageCircle, BarChart2, CreditCard, FileText, Check, Send, Sparkles, TrendingUp, BellRing, ChevronDown } from "lucide-react";
 import styles from "./page.module.css";
 
@@ -220,10 +220,15 @@ export default function LandingPage() {
 
             <div className={styles.heroRight} id="hero-right">
               <div className={styles.heroMascotWrap} id="hero-mascot">
-                <img
+                <Image
                   src="/moneo/Moneo-base.png"
                   alt="Moneo, il tuo assistente finanziario"
                   className={styles.heroMascotImg}
+                  width={800}
+                  height={800}
+                  priority
+                  sizes="(max-width: 768px) 100vw, 50vw"
+                  style={{ width: "100%", height: "auto" }}
                 />
               </div>
             </div>
@@ -275,10 +280,14 @@ export default function LandingPage() {
               <span className={styles.h2Muted}>niente di superfluo.</span>
             </h2>
             <div className={styles.featureIllustration} data-reveal-scale="">
-              <img
+              <Image
                 src="/moneo/Moneo-AI-powered.png"
                 alt="Moneo categorizza e analizza le tue spese con AI"
                 className={styles.featureIllustrationImg}
+                width={1200}
+                height={800}
+                sizes="(max-width: 768px) 100vw, 80vw"
+                style={{ width: "100%", height: "auto" }}
               />
             </div>
             <div className={styles.featureGrid} data-reveal>
@@ -303,10 +312,14 @@ export default function LandingPage() {
             </h2>
 
             <div className={styles.useCaseVisual} data-reveal-scale="">
-              <img
+              <Image
                 src="/moneo/Expensum-use-case.png"
                 alt="Fotografa lo scontrino, Expensum lo registra in automatico"
                 className={styles.useCaseImg}
+                width={460}
+                height={600}
+                sizes="(max-width: 768px) 100vw, 460px"
+                style={{ width: "100%", height: "auto" }}
               />
             </div>
 
@@ -339,10 +352,14 @@ export default function LandingPage() {
             <div className={styles.trustGrid}>
               <div className={styles.trustCard} data-reveal-left="">
                 <div className={styles.trustCardImgWrap}>
-                  <img
+                  <Image
                     src="/moneo/Moneo-money-helper.png"
                     alt="Analytics e portfolio growth"
                     className={styles.trustCardImg}
+                    width={600}
+                    height={500}
+                    sizes="(max-width: 768px) 100vw, 50vw"
+                    style={{ width: "100%", height: "auto" }}
                   />
                 </div>
                 <div className={styles.trustCardText}>
@@ -352,10 +369,14 @@ export default function LandingPage() {
               </div>
               <div className={styles.trustCard} data-reveal-right="">
                 <div className={styles.trustCardImgWrap}>
-                  <img
+                  <Image
                     src="/moneo/Moneo-secure.png"
                     alt="I tuoi dati sono al sicuro"
                     className={styles.trustCardImg}
+                    width={600}
+                    height={500}
+                    sizes="(max-width: 768px) 100vw, 50vw"
+                    style={{ width: "100%", height: "auto" }}
                   />
                 </div>
                 <div className={styles.trustCardText}>
