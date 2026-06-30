@@ -191,6 +191,7 @@ def test_reassign_user_chat_id_respects_foreign_keys(mock_db_session):
 
     old_chat_id, new_chat_id = "old_chat_fk", "new_chat_fk"
     store.add_user(chat_id=old_chat_id, username="t", storage_backend="postgres")
+    store.set_credentials(old_chat_id, "reassign-fk@example.com", "Password123")
     store.get_user_plan(old_chat_id)  # crea la riga in user_plans per old_chat_id
 
     result = store.reassign_user_chat_id(old_chat_id, new_chat_id)
@@ -200,3 +201,6 @@ def test_reassign_user_chat_id_respects_foreign_keys(mock_db_session):
         plan = s.query(UserPlan).filter_by(chat_id=new_chat_id).first()
         assert plan is not None
         assert s.query(UserPlan).filter_by(chat_id=old_chat_id).first() is None
+        new_user = s.query(User).filter_by(chat_id=new_chat_id).first()
+        assert new_user.email == "reassign-fk@example.com"
+        assert s.query(User).filter_by(chat_id=old_chat_id).first() is None

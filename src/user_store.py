@@ -796,8 +796,19 @@ class UserStore:
             # riga users (quando nessuna FK la referenzia piu').
             from sqlalchemy.orm import make_transient
 
+            # email ha un vincolo UNIQUE: finche' la vecchia riga non e' cancellata,
+            # la nuova riga non puo' avere la stessa email. La "libera" temporaneamente
+            # sulla vecchia riga (verra' comunque cancellata a fine funzione).
+            old_email = user.email
+            if old_email:
+                session.query(User).filter(User.chat_id == old_chat_id).update(
+                    {"email": f"_reassigning_{old_chat_id}"}
+                )
+                session.flush()
+
             session.expunge(user)
             make_transient(user)
+            user.email = old_email
             user.chat_id = new_chat_id
             session.add(user)
             session.flush()
