@@ -171,3 +171,32 @@ def test_delete_user_completely_removes_all_tables(mock_db_session):
         assert session.query(Feedback).filter_by(chat_id=chat_id).count() == 0
         assert session.query(OAuthSession).filter_by(chat_id=chat_id).count() == 0
         assert session.query(User).filter_by(chat_id=chat_id).first() is None
+
+
+def test_reassign_user_chat_id_respects_foreign_keys(mock_db_session):
+    """reassign_user_chat_id deve aggiornare users.chat_id PRIMA delle tabelle figlie.
+
+    Regressione: in produzione (PostgreSQL, FK enforcement rigido per statement)
+    l'ordine sbagliato causava ForeignKeyViolation su user_plans.chat_id durante
+    il login Telegram con riassegnazione account. SQLite di default non applica i
+    vincoli FK, quindi va abilitato esplicitamente qui per riprodurre il bug.
+    """
+    from sqlalchemy import event
+
+    store = mock_db_session
+
+    @event.listens_for(store.engine, "connect")
+    def _enable_fk(dbapi_conn, _):
+        dbapi_conn.execute("PRAGMA foreign_keys=ON")
+
+    old_chat_id, new_chat_id = "old_chat_fk", "new_chat_fk"
+    store.add_user(chat_id=old_chat_id, username="t", storage_backend="postgres")
+    store.get_user_plan(old_chat_id)  # crea la riga in user_plans per old_chat_id
+
+    result = store.reassign_user_chat_id(old_chat_id, new_chat_id)
+
+    assert result is True
+    with store.Session() as s:
+        plan = s.query(UserPlan).filter_by(chat_id=new_chat_id).first()
+        assert plan is not None
+        assert s.query(UserPlan).filter_by(chat_id=old_chat_id).first() is None

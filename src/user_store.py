@@ -787,6 +787,14 @@ class UserStore:
                 session.delete(target_user)
                 session.flush()
 
+            # users.chat_id va aggiornato per primo: le tabelle figlie sotto hanno
+            # una foreign key su users.chat_id, quindi new_chat_id deve gia' esistere
+            # nella tabella padre prima che le query UPDATE successive lo referenzino
+            # (altrimenti PostgreSQL solleva ForeignKeyViolation, a differenza di
+            # SQLite che di default non applica i vincoli FK con la stessa rigidita').
+            user.chat_id = new_chat_id
+            session.flush()
+
             # Tabelle di supporto
             session.query(Feedback).filter(Feedback.chat_id == old_chat_id).update({"chat_id": new_chat_id})
             session.query(DatabaseSchema).filter(DatabaseSchema.chat_id == old_chat_id).update({"chat_id": new_chat_id})
@@ -802,7 +810,6 @@ class UserStore:
             session.query(Subscription).filter(Subscription.user_id == old_chat_id).update({"user_id": new_chat_id})
             session.query(UserCategory).filter(UserCategory.user_id == old_chat_id).update({"user_id": new_chat_id})
 
-            user.chat_id = new_chat_id
             session.commit()
             return True
 
