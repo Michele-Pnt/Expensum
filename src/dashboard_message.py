@@ -47,7 +47,7 @@ def build_dashboard_text(
     lines = []
 
     # Intestazione
-    lines.append(f"🐷 *Moneo Dashboard*")
+    lines.append(f"🐷 *Expensum Dashboard*")
     lines.append(f"📅 {today.strftime('%d/%m/%Y')}")
     lines.append("")
 

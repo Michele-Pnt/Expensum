@@ -4,6 +4,7 @@ import { useState, useRef, useEffect, useCallback } from "react";
 import Image from "next/image";
 import styles from "./page.module.css";
 import MoneoWidget, { type MoneoState } from "@/components/MoneoWidget";
+import { getCsrfToken } from "@/lib/csrf";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -41,9 +42,12 @@ function getTelegramInitData(): string {
   return (window as any).Telegram?.WebApp?.initData ?? "";
 }
 
-function buildHeaders(): HeadersInit {
+async function buildHeaders(): Promise<HeadersInit> {
   const init = getTelegramInitData();
-  return init ? { "X-Telegram-Init-Data": init } : {};
+  const csrfToken = await getCsrfToken();
+  const headers: Record<string, string> = { "X-CSRFToken": csrfToken };
+  if (init) headers["X-Telegram-Init-Data"] = init;
+  return headers;
 }
 
 function formatTime(date: Date): string {
@@ -112,12 +116,13 @@ export default function ChatPage() {
     const greeting: Message = {
       id: "welcome",
       role: "bot",
-      text: "Ciao! Sono **Moneo**, il tuo assistente finanziario personale 💼\n\nDimmi una spesa o un'entrata e la registro subito. Prova con:\n• _«Ho speso 24€ per il sushi»_\n• _«Ho ricevuto lo stipendio 1500€»_\n• _«Netflix 12,99»_",
+      text: "Ciao! Le mie risposte sono generate automaticamente con Mistral AI europea: posso sbagliare, verifica sempre i dati finanziari importanti.\n\nDimmi una spesa o un'entrata e la registro subito. Prova con:\n• _«Ho speso 24€ per il sushi»_\n• _«Ho ricevuto lo stipendio 1500€»_\n• _«Netflix 12,99»_",
       timestamp: new Date(),
       status: "sent",
     };
 
-    fetch("/api/chat/history", { credentials: "same-origin", headers: buildHeaders() })
+    buildHeaders()
+      .then((headers) => fetch("/api/chat/history", { credentials: "same-origin", headers }))
       .then((r) => r.json())
       .then((data) => {
         const histMsgs: Message[] = (data.messages || []).map(historyMsgToMessage);
@@ -205,7 +210,7 @@ export default function ChatPage() {
     try {
       const res = await fetch("/api/chat/confirm", {
         method: "POST",
-        headers: { "Content-Type": "application/json", ...buildHeaders() },
+        headers: { "Content-Type": "application/json", ...(await buildHeaders()) },
         credentials: "same-origin",
         body: JSON.stringify({ parsed }),
       });
@@ -270,7 +275,7 @@ export default function ChatPage() {
     try {
       const res = await fetch("/api/chat/message", {
         method: "POST",
-        headers: { "Content-Type": "application/json", ...buildHeaders() },
+        headers: { "Content-Type": "application/json", ...(await buildHeaders()) },
         credentials: "same-origin",
         body: JSON.stringify({ text: trimmed }),
       });
@@ -342,7 +347,7 @@ export default function ChatPage() {
           formData.append("audio", blob, "voice.webm");
           const res = await fetch("/api/chat/voice", {
             method: "POST",
-            headers: buildHeaders(),
+            headers: await buildHeaders(),
             credentials: "same-origin",
             body: formData,
           });
@@ -419,7 +424,7 @@ export default function ChatPage() {
       formData.append("image", file);
       const res = await fetch("/api/chat/photo", {
         method: "POST",
-        headers: buildHeaders(),
+        headers: await buildHeaders(),
         credentials: "same-origin",
         body: formData,
       });
@@ -499,7 +504,11 @@ export default function ChatPage() {
                   <div className={`${styles.bubble} ${msg.role === "user" ? styles.bubbleUser : styles.bubbleBot}`}>
                     <p
                       className={styles.bubbleText}
-                      dangerouslySetInnerHTML={{ __html: parseMarkdown(msg.text).replace(/\n/g, "<br/>") }}
+                      dangerouslySetInnerHTML={{
+                        __html:
+                          (msg.role === "bot" ? "🤖 Moneo (AI): " : "") +
+                          parseMarkdown(msg.text).replace(/\n/g, "<br/>"),
+                      }}
                     />
 
                     {/* Parsed transaction pill */}

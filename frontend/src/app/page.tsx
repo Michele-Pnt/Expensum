@@ -539,6 +539,7 @@ export default function LandingPage() {
             <p className={styles.footerColTitle}>Azienda</p>
             <a href="mailto:expensum.finance@gmail.com" className={styles.footerGridLink}>Chi siamo</a>
             <a href="mailto:expensum.finance@gmail.com" className={styles.footerGridLink}>Contatti</a>
+            <a href="/come-funziona-moneo" className={styles.footerGridLink}>Come funziona l&apos;AI</a>
             <a href="#" className={styles.footerGridLink}>Privacy Policy</a>
             <a href="#" className={styles.footerGridLink}>Termini di servizio</a>
           </div>

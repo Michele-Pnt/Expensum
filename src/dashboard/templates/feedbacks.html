@@ -42,8 +42,13 @@
 </div>
 
 <script>
+    const CSRF_TOKEN = "{{ csrf_token() }}";
+
     async function resolveFeedback(id) {
-        const res = await fetch(`/api/resolve-feedback/${id}`, { method: 'POST' });
+        const res = await fetch(`/api/resolve-feedback/${id}`, {
+            method: 'POST',
+            headers: { 'X-CSRFToken': CSRF_TOKEN },
+        });
         const data = await res.json();
         if(data.status === 'ok') {
             const td = document.getElementById(`fb-status-${id}`);

@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
+import { getCsrfToken } from "@/lib/csrf";
 import {
   Alert,
   Box,
@@ -12,7 +13,6 @@ import {
   Chip,
   CircularProgress,
   Stack,
-  TextField,
   Typography,
 } from "@mui/material";
 
@@ -51,8 +51,7 @@ export default function ImpostazioniPage() {
   const router = useRouter();
   const [data, setData] = useState<SettingsResponse | null>(null);
   const [loading, setLoading] = useState(true);
-  const [busy, setBusy] = useState<"logout" | "delete" | null>(null);
-  const [deleteConfirm, setDeleteConfirm] = useState("");
+  const [busy, setBusy] = useState<"logout" | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const loadSettings = useCallback(async () => {
@@ -78,36 +77,17 @@ export default function ImpostazioniPage() {
     setBusy("logout");
     setError(null);
     try {
+      const csrfToken = await getCsrfToken();
       const res = await fetch("/api/settings/logout", {
         method: "POST",
         credentials: "same-origin",
+        headers: { "X-CSRFToken": csrfToken },
       });
       const json = await res.json();
       if (!res.ok || !json.ok) throw new Error("logout_failed");
       window.location.assign(json.redirect_url || "/login");
     } catch {
       setError("Non sono riuscito a sospendere l'account. Riprova.");
-      setBusy(null);
-    }
-  }
-
-  async function handleDeleteAccount() {
-    setBusy("delete");
-    setError(null);
-    try {
-      const res = await fetch("/api/settings/delete-account", {
-        method: "POST",
-        credentials: "same-origin",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ confirm: deleteConfirm }),
-      });
-      const json = await res.json();
-      if (!res.ok || !json.ok) {
-        throw new Error(json.error || "delete_failed");
-      }
-      window.location.assign(json.redirect_url || "/login");
-    } catch {
-      setError("Eliminazione account non riuscita. Controlla la conferma e riprova.");
       setBusy(null);
     }
   }
@@ -208,29 +188,18 @@ export default function ImpostazioniPage() {
             </CardActions>
           </Card>
 
-          <Card sx={{ borderRadius: 4, border: "1px solid rgba(211, 47, 47, 0.24)" }}>
+          <Card sx={{ borderRadius: 4 }}>
             <CardContent>
-              <Typography variant="h6" fontWeight={700} color="error.main" gutterBottom>
-                Zona pericolosa
+              <Typography variant="h6" fontWeight={700} gutterBottom>
+                Privacy e dati
               </Typography>
-              <Typography color="text.secondary" sx={{ mb: 2 }}>
-                Questa azione elimina definitivamente account, impostazioni e dati locali. I dati presenti nel tuo workspace Notion non vengono toccati.
+              <Typography color="text.secondary">
+                Esporta i tuoi dati personali, gestisci le preferenze e, se vuoi, elimina il tuo account.
               </Typography>
-              <TextField
-                label='Scrivi "DELETE" per confermare'
-                value={deleteConfirm}
-                onChange={(e) => setDeleteConfirm(e.target.value)}
-                fullWidth
-              />
             </CardContent>
             <CardActions sx={{ px: 2, pb: 2, pt: 0 }}>
-              <Button
-                color="error"
-                variant="contained"
-                onClick={handleDeleteAccount}
-                disabled={busy !== null || deleteConfirm.trim().toUpperCase() !== "DELETE"}
-              >
-                {busy === "delete" ? "Eliminazione..." : "Elimina account"}
+              <Button variant="contained" onClick={() => router.push("/impostazioni/privacy")}>
+                Vai a Privacy e dati
               </Button>
             </CardActions>
           </Card>

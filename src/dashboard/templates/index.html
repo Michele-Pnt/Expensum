@@ -255,7 +255,7 @@
 
 <script>
 // Parse analytics data from backend
-const analyticsData = JSON.parse('{{ analytics_json_str | safe }}');
+const analyticsData = {{ analytics_data | tojson }};
 
 function showTab(tabName) {
     // Hide all tabs

@@ -9,8 +9,9 @@ from pathlib import Path
 from functools import wraps
 
 logger = logging.getLogger(__name__)
-from flask import Flask, render_template, request, redirect, url_for, session, flash, jsonify
-from flask_wtf.csrf import CSRFProtect
+from flask import Flask, render_template, request, redirect, url_for, session, flash, jsonify, Response
+from markupsafe import escape
+from flask_wtf.csrf import CSRFProtect, generate_csrf
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
 import psutil
@@ -23,7 +24,8 @@ if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
 from config import Config
-from src.user_store import UserStore, User, LlmUsageEvent, LlmPricing, DailyMetrics, Feedback
+from src.user_store import UserStore, User, LlmUsageEvent, LlmPricing, DailyMetrics, Feedback, ChatMessage
+from src.privacy_export import build_export_json, build_csv_rows, CSV_HEADER, NOTION_CSV_UNAVAILABLE_MESSAGE
 from src.notion_client import NotionFinanceClient
 from src.storage.notion_storage import NotionStorage
 from src.storage.postgres_storage import PostgresStorage
@@ -49,19 +51,39 @@ app.config['SESSION_COOKIE_SECURE'] = os.getenv('FLASK_ENV') == 'production'  # 
 csrf = CSRFProtect(app)
 limiter = Limiter(app=app, key_func=get_remote_address, default_limits=[])
 
+# Timeout condiviso per le chiamate verso Telegram/Notion: con solo 2 worker
+# gunicorn, una richiesta senza timeout che si blocca satura il servizio per
+# tutti gli utenti (vedi bandit B113).
+TELEGRAM_REQUEST_TIMEOUT = 10
+
 
 @app.before_request
 def enforce_csrf_on_forms():
-    """Applica CSRF solo alle route con form HTML, non alle API JSON."""
+    """Applica CSRF ai form HTML e alle API autenticate via cookie di sessione browser.
+
+    Le richieste /api/* che portano l'header X-Telegram-Init-Data sono esenti:
+    un sito malevolo non può impostare header custom su richieste cross-origin,
+    quindi quel canale di autenticazione non è sfruttabile da CSRF. Quando invece
+    la stessa pagina viene aperta in un browser normale (fuori dalla WebView
+    Telegram), l'header manca e l'autenticazione ricade sul cookie di sessione,
+    che torna vulnerabile esattamente come le rotte protette dai form HTML.
+    """
     if request.method in ("GET", "HEAD", "OPTIONS", "TRACE"):
         return
-    if request.path.startswith("/api/"):
-        return
-    # Esentata perché usa già il proprio token monouso (OAuthSession.state)
-    # e il WebView di Telegram non invia cookie cross-origin (SameSite=Lax)
     if request.path == "/auth/telegram-login":
         return
+    if request.path.startswith("/api/") and request.headers.get("X-Telegram-Init-Data"):
+        return
     csrf.protect()
+
+
+@app.route("/api/csrf-token", methods=["GET"])
+def api_csrf_token():
+    """Restituisce un token CSRF per la sessione browser corrente.
+
+    Usato dalle pagine Next.js che non possono leggere {{ csrf_token() }} via Jinja.
+    """
+    return jsonify({"csrf_token": generate_csrf()})
 
 @app.after_request
 def skip_ngrok_interstitial(response):
@@ -232,6 +254,8 @@ def web_login():
 
     error = None
     if request.method == "POST":
+        from src.rate_limiter import track_failed_login, reset_failed_logins
+
         email = (request.form.get("email") or "").strip()
         password = request.form.get("password") or ""
         user = store.verify_password(email, password)
@@ -240,10 +264,19 @@ def web_login():
             if user:
                 store.reactivate_user(user.chat_id)
         if user:
+            reset_failed_logins(email)
             session["user_logged_in"] = True
             session["chat_id"] = user.chat_id
             return redirect(_resolve_authenticated_redirect(user.chat_id))
+
         error = "Email o password errati."
+        failed_count = track_failed_login(email)
+        if failed_count >= 5:
+            store.write_audit_log(
+                email or "unknown", actor="system", action="breach_detection",
+                metadata={"reason": "repeated_failed_login", "failed_attempts": failed_count},
+                ip_address=request.remote_addr, user_agent=request.headers.get("User-Agent"),
+            )
 
     return render_template("login.html", error=error)
 
@@ -291,6 +324,12 @@ def web_register():
             is_active=True,
         )
         store.set_credentials(web_chat_id, email, password)
+        store.accept_privacy_policy(web_chat_id, Config.CURRENT_PRIVACY_POLICY_VERSION)
+        store.write_audit_log(
+            web_chat_id, actor="user", action="consent_change",
+            metadata={"consent_type": "privacy_policy", "version": Config.CURRENT_PRIVACY_POLICY_VERSION},
+            ip_address=request.remote_addr, user_agent=request.headers.get("User-Agent"),
+        )
     except Exception:
         logger.exception("Errore registrazione web per email=%s", email)
         return _err("Errore durante la registrazione. Riprova.")
@@ -346,10 +385,20 @@ def admin_login():
         password = request.form.get("password")
         if password == Config.DASHBOARD_PASSWORD:
             session["admin_logged_in"] = True
+            store.write_audit_log(
+                user_id="admin", actor="admin", action="admin_login",
+                metadata={"result": "success"},
+                ip_address=request.remote_addr, user_agent=request.headers.get("User-Agent"),
+            )
             return redirect(url_for("index"))
         else:
             error = "Password amministratore errata!"
-            
+            store.write_audit_log(
+                user_id="admin", actor="admin", action="admin_login",
+                metadata={"result": "failure"},
+                ip_address=request.remote_addr, user_agent=request.headers.get("User-Agent"),
+            )
+
     return render_template("login.html", admin_mode=True, error=error)
 
 @app.route("/admin/logout")
@@ -559,13 +608,12 @@ def index():
             
             conversion_display[op]["total"] = round(100 * grand_success / grand_total, 1) if grand_total > 0 else 0
         
-        # Prepara JSON per template
-        import json
-        analytics_json_str = json.dumps({
+        # Prepara dati per template (serializzati in modo sicuro da Jinja con |tojson)
+        analytics_data = {
             "requests_by_operation": {k: {str(date): v for date, v in dates.items()} for k, dates in requests_by_op_date.items()},
             "token_stats": token_stats_display,
             "conversion_rates": conversion_display,
-        })
+        }
 
     return render_template(
         "index.html",
@@ -587,7 +635,7 @@ def index():
         goal_completion_rate=goal_completion_rate,
         fallback_rate=fallback_rate,
         # Token Analytics (90 giorni)
-        analytics_json_str=analytics_json_str,
+        analytics_data=analytics_data,
     )
 
 @app.route("/api/users/token-usage")
@@ -713,9 +761,13 @@ def _process_oauth_background(
 
     def _tg(text: str) -> None:
         try:
-            requests.post(telegram_url, json={"chat_id": chat_id, "text": text, "parse_mode": "HTML"})
+            requests.post(
+                telegram_url,
+                json={"chat_id": chat_id, "text": text, "parse_mode": "HTML"},
+                timeout=TELEGRAM_REQUEST_TIMEOUT,
+            )
         except Exception as tg_err:
-            print(f"[OAuth-bg] Errore invio Telegram: {tg_err}")
+            logger.exception("[OAuth-bg] Errore invio Telegram: %s", tg_err)
 
     try:
         import time as _time
@@ -773,7 +825,7 @@ def _process_oauth_background(
                     mapped_properties_json=json.dumps(schema_data.get("mapped") or {}),
                 )
             except Exception as schema_err:
-                print(f"[OAuth-bg] Errore salvataggio schema {db_key}: {schema_err}")
+                logger.exception("[OAuth-bg] Errore salvataggio schema %s: %s", db_key, schema_err)
 
         # 5. Bootstrap workspace (best-effort)
         bootstrap_db_ids = {
@@ -806,7 +858,7 @@ def _process_oauth_background(
                     chat_id, store, notion_client=notion_client_for_bootstrap
                 )
             except Exception as bootstrap_err:
-                print(f"[OAuth-bg] Errore bootstrap workspace: {bootstrap_err}")
+                logger.exception("[OAuth-bg] Errore bootstrap workspace: %s", bootstrap_err)
 
         # 6. Notifica finale
         if len(valid_discovered) != 7:
@@ -816,7 +868,7 @@ def _process_oauth_background(
                 # Nessun DB trovato: l'integrazione non ha accesso al template
                 report_msg = (
                     "⚠️ <b>Nessun database trovato</b>\n\n"
-                    "L'integrazione non riesce a vedere i database del template Moneo.\n\n"
+                    "L'integrazione non riesce a vedere i database del template Expensum.\n\n"
                     "👉 <b>Cosa fare:</b>\n"
                     "1. Apri Notion → cerca la pagina <b>Dashboard Expensum Finance</b>\n"
                     "2. Clicca su <b>...</b> in alto a destra → <b>Connect to</b> → seleziona <b>Expensum Finance Agent</b>\n"
@@ -852,7 +904,7 @@ def _process_oauth_background(
             _tg(report_msg)
             return
 
-        report_msg = "🎊 <b>MONEO È PRONTO!</b>\n\nHo scansionato il tuo Notion e collegato i database:\n"
+        report_msg = "🎊 <b>EXPENSUM È PRONTO!</b>\n\nHo scansionato il tuo Notion e collegato i database:\n"
         if not discovered:
             report_msg += (
                 "⚠️ <b>Attenzione</b>: Non ho trovato i database standard (Spese, Entrate, ecc.). "
@@ -869,7 +921,7 @@ def _process_oauth_background(
             store.mark_setup_completed(chat_id)
 
             report_msg += (
-                "\n\n🎉 Ora completa il tuo profilo per personalizzare Moneo!\n"
+                "\n\n🎉 Ora completa il tuo profilo per personalizzare Expensum!\n"
                 "Apri la webapp e segui il wizard di configurazione, oppure scrivi "
                 "<b>/impostazioni</b> qui in chat."
             )
@@ -878,9 +930,9 @@ def _process_oauth_background(
                     "chat_id": chat_id,
                     "text": report_msg,
                     "parse_mode": "HTML",
-                })
+                }, timeout=TELEGRAM_REQUEST_TIMEOUT)
             except Exception as tg_err:
-                print(f"[OAuth-bg] Errore invio messaggio finale: {tg_err}")
+                logger.exception("[OAuth-bg] Errore invio messaggio finale: %s", tg_err)
 
     except Exception as e:
         import logging as _logging
@@ -895,6 +947,7 @@ def _process_oauth_background(
                     "text": "⚠️ Si è verificato un errore durante la configurazione. Riprova con /registrati.",
                     "parse_mode": "HTML",
                 },
+                timeout=TELEGRAM_REQUEST_TIMEOUT,
             )
         except Exception:
             pass
@@ -911,9 +964,13 @@ def _process_postgres_background(chat_id: str) -> None:
 
     def _tg(text: str) -> None:
         try:
-            requests.post(telegram_url, json={"chat_id": chat_id, "text": text, "parse_mode": "HTML"})
+            requests.post(
+                telegram_url,
+                json={"chat_id": chat_id, "text": text, "parse_mode": "HTML"},
+                timeout=TELEGRAM_REQUEST_TIMEOUT,
+            )
         except Exception as tg_err:
-            print(f"[Postgres-bg] Errore invio Telegram: {tg_err}")
+            logger.exception("[Postgres-bg] Errore invio Telegram: %s", tg_err)
 
     session = None
     try:
@@ -928,7 +985,7 @@ def _process_postgres_background(chat_id: str) -> None:
         miniapp_url = f"{Config.WEBAPP_BASE_URL}/setup?reg_token={reg_token}"
 
         report_msg = (
-            "🎊 <b>MONEO È PRONTO!</b>\n\n"
+            "🎊 <b>EXPENSUM È PRONTO!</b>\n\n"
             "Ho creato il tuo spazio personale nel database interno PostgreSQL.\n"
         )
         bootstrap_msg = bootstrap_result.to_telegram_message()
@@ -936,7 +993,7 @@ def _process_postgres_background(chat_id: str) -> None:
             report_msg += "\n" + bootstrap_msg
 
         report_msg += (
-            "\n\n👇 <b>Inizia a usare Moneo configurando il tuo spazio:</b>\n"
+            "\n\n👇 <b>Inizia a usare Expensum configurando il tuo spazio:</b>\n"
             "1️⃣ Clicca sul pulsante qui sotto.\n"
             "2️⃣ Aggiungi i tuoi <b>Conti</b> (es. Conto Corrente, Contanti) e imposta il saldo iniziale.\n"
             "3️⃣ Personalizza le tue <b>Categorie</b> di spesa ed eventuali budget.\n"
@@ -954,9 +1011,9 @@ def _process_postgres_background(chat_id: str) -> None:
                         "web_app": {"url": miniapp_url}
                     }]]
                 }
-            })
+            }, timeout=TELEGRAM_REQUEST_TIMEOUT)
         except Exception as tg_err:
-            print(f"[Postgres-bg] Errore invio messaggio finale: {tg_err}")
+            logger.exception("[Postgres-bg] Errore invio messaggio finale: %s", tg_err)
 
     except Exception as e:
         import logging as _logging
@@ -1003,6 +1060,12 @@ def auth_postgres_start():
     try:
         store.add_user(chat_id=chat_id, storage_backend="postgres", setup_status="WAIT_ACCOUNTS")
         store.set_credentials(chat_id, email, password)
+        store.accept_privacy_policy(chat_id, Config.CURRENT_PRIVACY_POLICY_VERSION)
+        store.write_audit_log(
+            chat_id, actor="user", action="consent_change",
+            metadata={"consent_type": "privacy_policy", "version": Config.CURRENT_PRIVACY_POLICY_VERSION},
+            ip_address=request.remote_addr, user_agent=request.headers.get("User-Agent"),
+        )
     except Exception as e:
         import logging as _logging
         _logging.getLogger("financial_agent.auth_postgres").error(
@@ -1022,6 +1085,7 @@ def auth_postgres_start():
                 ),
                 "parse_mode": "HTML",
             },
+            timeout=TELEGRAM_REQUEST_TIMEOUT,
         )
     except Exception:
         pass
@@ -1038,7 +1102,7 @@ def auth_notion_callback():
     error = request.args.get("error")
 
     if error:
-        return f"<h1>Errore di autorizzazione Notion</h1><p>{error}</p>"
+        return f"<h1>Errore di autorizzazione Notion</h1><p>{escape(error)}</p>"
 
     if not code or not state:
         return "<h1>Parametri mancanti</h1>", 400
@@ -1058,9 +1122,10 @@ def auth_notion_callback():
                 "code": code,
                 "redirect_uri": Config.NOTION_REDIRECT_URI,
             },
+            timeout=TELEGRAM_REQUEST_TIMEOUT,
         )
         if not response.ok:
-            return f"<h1>Errore scambio token</h1><p>{response.text}</p>", 500
+            return f"<h1>Errore scambio token</h1><p>{escape(response.text)}</p>", 500
 
         auth_data = response.json()
         access_token = auth_data.get("access_token")
@@ -1084,6 +1149,7 @@ def auth_notion_callback():
                 ),
                 "parse_mode": "HTML",
             },
+            timeout=TELEGRAM_REQUEST_TIMEOUT,
         )
     except Exception:
         pass  # Non bloccare se Telegram è irraggiungibile
@@ -1154,6 +1220,7 @@ def telegram_login_miniapp():
         requests.post(
             f"https://api.telegram.org/bot{Config.TELEGRAM_BOT_TOKEN}/sendMessage",
             json={"chat_id": final_chat_id, "text": msg, "parse_mode": "Markdown"},
+            timeout=TELEGRAM_REQUEST_TIMEOUT,
         )
     except Exception:
         pass
@@ -1232,7 +1299,7 @@ def setup_form():
                         mapped_properties_json=json.dumps(schema_data.get("mapped", {}))
                     )
             except Exception as e:
-                print(f"[Setup] Errore recupero schemi live da Notion: {e}")
+                logger.exception("[Setup] Errore recupero schemi live da Notion: %s", e)
 
         # Se il fetch live è fallito, proviamo con la cache
         if not live_schemas_raw:
@@ -1262,7 +1329,7 @@ def setup_form():
                     "mapped": json.loads(mapped) if mapped and isinstance(mapped, str) else {}
                 }
             except Exception as e:
-                print(f"[Setup] Errore parsing schema {db_key}: {e}")
+                logger.exception("[Setup] Errore parsing schema %s: %s", db_key, e)
 
         # Recupera accounts e categories esistenti su Notion per i dropdown relation
         available_accounts = []
@@ -1276,7 +1343,7 @@ def setup_form():
             )
             available_accounts = nc.fetch_accounts()
         except Exception as e:
-            print(f"[Setup] fetch_accounts fallito: {e}")
+            logger.exception("[Setup] fetch_accounts fallito: %s", e)
         try:
             nc_cat = NotionFinanceClient(
                 api_key=user.notion_access_token,
@@ -1285,7 +1352,7 @@ def setup_form():
             )
             available_categories = nc_cat.fetch_categories()
         except Exception as e:
-            print(f"[Setup] fetch_categories da Notion fallito: {e}")
+            logger.exception("[Setup] fetch_categories da Notion fallito: %s", e)
             try:
                 from src.storage.models import UserCategory
                 cat_rows = s.query(UserCategory).filter_by(user_id=user.chat_id).all()
@@ -1294,7 +1361,7 @@ def setup_form():
                     for r in cat_rows
                 ]
             except Exception as e2:
-                print(f"[Setup] fetch_categories da DB fallito: {e2}")
+                logger.exception("[Setup] fetch_categories da DB fallito: %s", e2)
 
         available_subscriptions = []
         try:
@@ -1306,7 +1373,7 @@ def setup_form():
             )
             available_subscriptions = nc_sub.fetch_subscriptions()
         except Exception as e:
-            print(f"[Setup] fetch_subscriptions da Notion fallito: {e}")
+            logger.exception("[Setup] fetch_subscriptions da Notion fallito: %s", e)
 
         return render_template("setup_miniapp.html",
                                backend="notion",
@@ -1421,7 +1488,7 @@ def api_setup_complete():
                                 f"Ora puoi iniziare a scrivermi le tue spese!"
                             ),
                             "parse_mode": "HTML"
-                        })
+                        }, timeout=TELEGRAM_REQUEST_TIMEOUT)
                     except Exception:
                         pass
 
@@ -1445,7 +1512,10 @@ def api_setup_complete():
 
         # DEBUG TEMPORANEO
         for k, v in db_schemas.items():
-            print(f"[DEBUG] schema {k} → properties keys: {list(v.get('properties', {}).keys())}, mapped: {v.get('mapped')}")
+            logger.debug(
+                "[DEBUG] schema %s -> properties keys: %s, mapped: %s",
+                k, list(v.get('properties', {}).keys()), v.get('mapped'),
+            )
 
         notion = NotionFinanceClient(
             api_key=user.notion_access_token,
@@ -1532,11 +1602,14 @@ def api_setup_complete():
         for prop_data in items_data.get("accounts_db_id", []):
             name = ''
             try:
-                print(f"[DEBUG] account prop_data keys: {list(prop_data.keys())}")
-                print(f"[DEBUG] account prop_data: {prop_data}")
+                logger.debug("[DEBUG] account prop_data keys: %s", list(prop_data.keys()))
+                logger.debug("[DEBUG] account prop_data: %s", prop_data)
                 name = _extract_name(prop_data)
                 acc_type = _extract_select(prop_data, Config.NOTION_ACCOUNTS_COL_TYPE)
-                print(f"[DEBUG] account name='{name}', type='{acc_type}' (cercato con chiave '{Config.NOTION_ACCOUNTS_COL_TYPE}')")
+                logger.debug(
+                    "[DEBUG] account name='%s', type='%s' (cercato con chiave '%s')",
+                    name, acc_type, Config.NOTION_ACCOUNTS_COL_TYPE,
+                )
                 if not name:
                     errors.append("Nome vuoto in accounts_db_id, elemento saltato")
                     continue
@@ -1587,7 +1660,7 @@ def api_setup_complete():
                             f"Ora puoi iniziare a scrivermi le tue spese!"
                         ),
                         "parse_mode": "HTML"
-                    })
+                    }, timeout=TELEGRAM_REQUEST_TIMEOUT)
                 except Exception:
                     pass
 
@@ -2271,6 +2344,14 @@ def api_chat_voice():
     if not audio_file:
         return jsonify({"error": "File audio mancante"}), 400
 
+    max_bytes = Config.MAX_FILE_SIZE_MB * 1024 * 1024
+    if request.content_length and request.content_length > max_bytes:
+        return jsonify({
+            "ok": False,
+            "reply": f"⚠️ Audio troppo grande! Limite: {Config.MAX_FILE_SIZE_MB}MB.",
+            "saved": False,
+        }), 413
+
     # Trascrizione Gemini Vertex AI
     transcribed = ""
     try:
@@ -2278,6 +2359,12 @@ def api_chat_voice():
         from google.genai import types as genai_types
 
         audio_bytes = audio_file.read()
+        if len(audio_bytes) > max_bytes:
+            return jsonify({
+                "ok": False,
+                "reply": f"⚠️ Audio troppo grande! Limite: {Config.MAX_FILE_SIZE_MB}MB.",
+                "saved": False,
+            }), 413
         if len(audio_bytes) < 100:
             return jsonify({"ok": False, "reply": "⚠️ Audio troppo corto o vuoto.", "saved": False})
 
@@ -2352,6 +2439,14 @@ def api_chat_photo():
     if not image_file:
         return jsonify({"error": "Immagine mancante"}), 400
 
+    max_bytes = Config.MAX_FILE_SIZE_MB * 1024 * 1024
+    if request.content_length and request.content_length > max_bytes:
+        return jsonify({
+            "ok": False,
+            "reply": f"⚠️ Immagine troppo grande! Limite: {Config.MAX_FILE_SIZE_MB}MB.",
+            "saved": False,
+        }), 413
+
     ocr_text = ""
     try:
         from src.ocr_client import OcrClient, OCRError
@@ -2360,13 +2455,20 @@ def api_chat_photo():
             image_file.save(tmp.name)
             tmp_path = tmp.name
 
+        if os.path.getsize(tmp_path) > max_bytes:
+            os.unlink(tmp_path)
+            return jsonify({
+                "ok": False,
+                "reply": f"⚠️ Immagine troppo grande! Limite: {Config.MAX_FILE_SIZE_MB}MB.",
+                "saved": False,
+            }), 413
+
         try:
             ocr_text = OcrClient().extract_text_from_image(tmp_path)
         except OCRError:
             return jsonify({"ok": False, "reply": "⚠️ Non riesco a leggere lo scontrino. Riprova con una foto più nitida e ben illuminata.", "saved": False})
         finally:
             try:
-                import os
                 os.unlink(tmp_path)
             except Exception:
                 pass
@@ -2592,6 +2694,8 @@ def api_settings_get():
             "telegram_chat_id": chat_id if telegram_connected else None,
             "storage_backend": user.storage_backend,
             "is_active": user.is_active,
+            "privacy_policy_version_accepted": user.privacy_policy_version_accepted,
+            "privacy_policy_current_version": Config.CURRENT_PRIVACY_POLICY_VERSION,
         },
         "plan": {
             "plan_type": plan.get("plan_type", "free"),
@@ -2613,14 +2717,87 @@ def api_settings_logout():
     if not chat_id:
         return jsonify({"error": "Unauthorized"}), 401
 
-    store.deactivate_user(chat_id)
+    store.logout_user(chat_id)
     session.clear()
     return jsonify({"ok": True, "redirect_url": "/login"})
 
 
+@app.route("/api/settings/change-email", methods=["POST"])
+@limiter.limit("5 per minute")
+def api_settings_change_email():
+    """Cambia l'email dell'account. Richiede la password corrente per re-autenticazione."""
+    chat_id, _ = _resolve_request_chat_id()
+    if not chat_id:
+        return jsonify({"error": "Unauthorized"}), 401
+
+    body = request.get_json(silent=True) or {}
+    new_email = (body.get("new_email") or "").strip().lower()
+    current_password = body.get("current_password") or ""
+
+    if not re.match(r"^[^@\s]+@[^@\s]+\.[^@\s]+$", new_email):
+        return jsonify({"error": "Email non valida."}), 400
+
+    with store.Session() as s:
+        user = s.query(User).filter_by(chat_id=chat_id).first()
+        if not user:
+            return jsonify({"error": "User not found"}), 404
+        old_email = user.email
+
+    if not old_email or not store.verify_password(old_email, current_password):
+        return jsonify({"error": "Password corrente errata."}), 401
+
+    if store.get_user_by_email_any_status(new_email):
+        return jsonify({"error": "Email già in uso."}), 409
+
+    store.update_email(chat_id, new_email)
+    store.write_audit_log(
+        chat_id, actor="user", action="change_email",
+        metadata={"old_email": old_email, "new_email": new_email},
+        ip_address=request.remote_addr, user_agent=request.headers.get("User-Agent"),
+    )
+    return jsonify({"ok": True})
+
+
+@app.route("/api/settings/change-password", methods=["POST"])
+@limiter.limit("5 per minute")
+def api_settings_change_password():
+    """Cambia la password dell'account. Richiede la password corrente per re-autenticazione."""
+    chat_id, _ = _resolve_request_chat_id()
+    if not chat_id:
+        return jsonify({"error": "Unauthorized"}), 401
+
+    body = request.get_json(silent=True) or {}
+    current_password = body.get("current_password") or ""
+    new_password = body.get("new_password") or ""
+
+    if len(new_password) < 8:
+        return jsonify({"error": "La nuova password deve essere di almeno 8 caratteri."}), 400
+
+    with store.Session() as s:
+        user = s.query(User).filter_by(chat_id=chat_id).first()
+        if not user:
+            return jsonify({"error": "User not found"}), 404
+        email = user.email
+
+    if not email or not store.verify_password(email, current_password):
+        return jsonify({"error": "Password corrente errata."}), 401
+
+    store.update_password(chat_id, new_password)
+    store.write_audit_log(
+        chat_id, actor="user", action="change_password",
+        ip_address=request.remote_addr, user_agent=request.headers.get("User-Agent"),
+    )
+    return jsonify({"ok": True})
+
+
 @app.route("/api/settings/delete-account", methods=["POST"])
+@app.route("/api/privacy/delete-account", methods=["POST"])
 def api_settings_delete_account():
-    """Elimina definitivamente account e dati locali. Richiede confirm='DELETE'."""
+    """Elimina definitivamente account e dati locali. Richiede confirm='DELETE'.
+
+    Esposto anche sotto /api/privacy/delete-account (Art. 17 GDPR) per coerenza
+    col namespace degli altri endpoint diritti interessato.
+    """
     chat_id, _ = _resolve_request_chat_id()
     if not chat_id:
         return jsonify({"error": "Unauthorized"}), 401
@@ -2629,12 +2806,100 @@ def api_settings_delete_account():
     if (body.get("confirm") or "").strip().upper() != "DELETE":
         return jsonify({"error": "Conferma non valida. Scrivi DELETE per procedere."}), 400
 
+    # Audit log PRIMA della cancellazione: dopo, la riga users non esiste più.
+    store.write_audit_log(
+        chat_id, actor="user", action="delete_account",
+        ip_address=request.remote_addr, user_agent=request.headers.get("User-Agent"),
+    )
+
     result = store.delete_user_completely(chat_id)
     if result == "not_found":
         return jsonify({"error": "Utente non trovato."}), 404
 
     session.clear()
     return jsonify({"ok": True, "redirect_url": "/login"})
+
+
+# ---------------------------------------------------------------------------
+# Privacy API — diritti dell'interessato (GDPR Art. 15, 17, 20)
+# ---------------------------------------------------------------------------
+
+@app.route("/api/privacy/accept-policy", methods=["POST"])
+def api_privacy_accept_policy():
+    """Art. 7 GDPR — registra l'accettazione esplicita della versione corrente della privacy policy."""
+    chat_id, _ = _resolve_request_chat_id()
+    if not chat_id:
+        return jsonify({"error": "Unauthorized"}), 401
+
+    version = Config.CURRENT_PRIVACY_POLICY_VERSION
+    store.accept_privacy_policy(chat_id, version)
+    store.write_audit_log(
+        chat_id, actor="user", action="consent_change",
+        metadata={"consent_type": "privacy_policy", "version": version},
+        ip_address=request.remote_addr, user_agent=request.headers.get("User-Agent"),
+    )
+    return jsonify({"ok": True, "privacy_policy_version_accepted": version})
+
+
+@app.route("/api/privacy/export-json", methods=["GET"])
+@limiter.limit("5 per minute")
+def api_privacy_export_json():
+    """Art. 15 GDPR — copia completa dei dati personali dell'utente."""
+    chat_id, _ = _resolve_request_chat_id()
+    if not chat_id:
+        return jsonify({"error": "Unauthorized"}), 401
+
+    with store.Session() as s:
+        user = s.query(User).filter_by(chat_id=chat_id).first()
+        if not user:
+            return jsonify({"error": "User not found"}), 404
+        export_data = build_export_json(s, user)
+
+    store.write_audit_log(
+        chat_id, actor="user", action="export_json",
+        ip_address=request.remote_addr, user_agent=request.headers.get("User-Agent"),
+    )
+    return jsonify(export_data)
+
+
+@app.route("/api/privacy/export-csv", methods=["GET"])
+@limiter.limit("5 per minute")
+def api_privacy_export_csv():
+    """Art. 20 GDPR — transazioni dell'utente in formato CSV portabile."""
+    import csv
+    import io
+    from datetime import date
+
+    chat_id, _ = _resolve_request_chat_id()
+    if not chat_id:
+        return jsonify({"error": "Unauthorized"}), 401
+
+    with store.Session() as s:
+        user = s.query(User).filter_by(chat_id=chat_id).first()
+        if not user:
+            return jsonify({"error": "User not found"}), 404
+        rows = build_csv_rows(s, user)
+
+    if rows is None:
+        return jsonify({"error": NOTION_CSV_UNAVAILABLE_MESSAGE}), 404
+
+    store.write_audit_log(
+        chat_id, actor="user", action="export_csv",
+        ip_address=request.remote_addr, user_agent=request.headers.get("User-Agent"),
+    )
+
+    buffer = io.StringIO()
+    writer = csv.writer(buffer)
+    writer.writerow(CSV_HEADER)
+    for row in rows:
+        writer.writerow(row)
+
+    filename = f"expensum_export_{date.today().isoformat()}.csv"
+    return Response(
+        buffer.getvalue(),
+        mimetype="text/csv",
+        headers={"Content-Disposition": f"attachment; filename={filename}"},
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -3952,4 +4217,4 @@ def space_incomes_delete(income_id: int):
 
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000, debug=True)
+    app.run(host="127.0.0.1", port=5000, debug=False)

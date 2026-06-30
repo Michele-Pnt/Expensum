@@ -2,6 +2,7 @@
 
 import { useState, useEffect, useCallback } from "react";
 import { useRouter } from "next/navigation";
+import { getCsrfToken } from "@/lib/csrf";
 import {
   Box,
   Typography,
@@ -43,9 +44,12 @@ function getTelegramInitData(): string {
   return (window as any).Telegram?.WebApp?.initData ?? "";
 }
 
-function buildHeaders(): HeadersInit {
+async function buildHeaders(): Promise<HeadersInit> {
   const init = getTelegramInitData();
-  return init ? { "X-Telegram-Init-Data": init } : {};
+  const csrfToken = await getCsrfToken();
+  const headers: Record<string, string> = { "X-CSRFToken": csrfToken };
+  if (init) headers["X-Telegram-Init-Data"] = init;
+  return headers;
 }
 
 // ─── Step components ──────────────────────────────────────────────────────────
@@ -371,12 +375,13 @@ function CategoryReviewStep({
   useEffect(() => {
     let cancelled = false;
     setLoading(true);
-    fetch("/api/onboarding/generate-categories", {
-      method: "POST",
-      headers: { ...buildHeaders(), "Content-Type": "application/json" },
-      credentials: "same-origin",
-      body: JSON.stringify({ lifestyle }),
-    })
+    buildHeaders()
+      .then((headers) => fetch("/api/onboarding/generate-categories", {
+        method: "POST",
+        headers: { ...headers, "Content-Type": "application/json" },
+        credentials: "same-origin",
+        body: JSON.stringify({ lifestyle }),
+      }))
       .then((r) => r.json())
       .then((data) => {
         if (cancelled) return;
@@ -606,7 +611,7 @@ export default function OnboardingPage() {
     try {
       await fetch("/api/onboarding/step", {
         method: "POST",
-        headers: { ...buildHeaders(), "Content-Type": "application/json" },
+        headers: { ...(await buildHeaders()), "Content-Type": "application/json" },
         credentials: "same-origin",
         body: JSON.stringify({ step: stepName, data }),
       });
@@ -642,7 +647,7 @@ export default function OnboardingPage() {
     try {
       await fetch("/api/onboarding/complete", {
         method: "POST",
-        headers: { ...buildHeaders(), "Content-Type": "application/json" },
+        headers: { ...(await buildHeaders()), "Content-Type": "application/json" },
         credentials: "same-origin",
         body: JSON.stringify({
           selected_categories: [...state.selectedCategories],
@@ -656,7 +661,8 @@ export default function OnboardingPage() {
 
   // Check if already completed
   useEffect(() => {
-    fetch("/api/onboarding/status", { headers: buildHeaders(), credentials: "same-origin" })
+    buildHeaders()
+      .then((headers) => fetch("/api/onboarding/status", { headers, credentials: "same-origin" }))
       .then((r) => r.json())
       .then((data) => {
         if (data.onboarding_completed_at) router.replace("/chat");

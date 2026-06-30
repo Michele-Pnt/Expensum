@@ -18,6 +18,8 @@ Avvio:
 
 import argparse
 import asyncio
+import csv
+import io
 import logging
 import sys
 import json
@@ -29,7 +31,8 @@ from cachetools import TTLCache
 from apscheduler.schedulers.background import BackgroundScheduler
 
 from src.billing_utils import get_next_billing_date
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update, WebAppInfo
+from src.privacy_export import build_export_json, build_csv_rows, CSV_HEADER
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, InputFile, Update, WebAppInfo
 from telegram.constants import ParseMode
 from telegram.request import HTTPXRequest
 from google import genai
@@ -53,7 +56,7 @@ from src.storage.base import FinancialStorage
 from src.storage.notion_storage import NotionStorage                                                                                                         
 from src.storage.postgres_storage import PostgresStorage
 from src.rate_limiter import is_rate_limited
-from src.user_store import UserStore
+from src.user_store import UserStore, User
 from src.ocr_client import OcrClient, OCRError
 from src.category_sync import refresh_category_averages
 from src.dashboard_message import build_dashboard_text
@@ -71,6 +74,17 @@ WAITING_INVITE_CODE, WAITING_API_KEY, WAITING_EXPENSE_DB, WAITING_INCOME_DB, WAI
 LOGOUT_CONFIRM_CB = "logout_confirm"
 LOGOUT_CANCEL_CB = "logout_cancel"
 REACTIVATE_CB = "reactivate_account"
+
+# Menu /impostazioni — Privacy e dati / Preferenze
+IMP_MENU_PRIVACY_CB = "imp_menu_privacy"
+IMP_MENU_PREFS_CB = "imp_menu_prefs"
+IMP_MENU_BACK_CB = "imp_menu_back"
+PRIVACY_EXPORT_CB = "privacy_export"
+PRIVACY_DELETE_START_CB = "privacy_delete_start"
+PRIVACY_NOTIF_TOGGLE_CB = "privacy_notif_toggle"
+PRIVACY_POLICY_CB = "privacy_policy_link"
+PRIVACY_TERMS_CB = "privacy_terms_placeholder"
+PREFS_EDIT_START_CB = "prefs_edit_start"
 
 # ---------------------------------------------------------------------------
 # Stati wizard onboarding /impostazioni
@@ -977,7 +991,8 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not _is_authorized(update):
         await update.message.reply_text(
             "👋 *Benvenuto!*\n\n"
-            "Sono **Moneo** 🐷, la tua mascotte e assistente finanziario.\n"
+            "Sono **Moneo** 🐷, l'assistente AI di Expensum.\n"
+            "Le mie risposte sono generate automaticamente con Mistral AI europea. Posso sbagliare: verifica sempre i dati finanziari importanti.\n\n"
             "Visto che sono molto geloso dei miei file, questo sistema è privato. Per poterti aiutare, devi prima configurare le tue credenziali Notion.\n\n"
             "Digita /registrati per creare un account, o /login se ne hai già uno! 🚀",
             parse_mode=ParseMode.MARKDOWN
@@ -985,7 +1000,8 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     await update.message.reply_text(
-        "👋 *Bentornato!* Sono **Moneo** 🐷, il tuo amichevole assistente finanziario.\n\n"
+        "👋 *Bentornato!* Sono **Moneo** 🐷, assistente AI di Expensum.\n"
+        "Le mie risposte sono generate automaticamente con Mistral AI europea. Posso sbagliare: verifica sempre i dati finanziari importanti.\n\n"
         "Dimmi, cosa hai comprato di bello?\n"
         "Scrivimi una spesa in modo naturale:\n"
         "• _\"ieri ho sganciato 25€ per la pizza\"_\n"
@@ -1010,7 +1026,7 @@ async def cmd_feedback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         return
         
     _user_store.save_feedback(chat_id, text)
-    await update.message.reply_text("✅ *Grazie per il tuo feedback!*\n\nIl tuo commento è stato salvato e lo terremo in considerazione per le prossime versioni di Moneo ✨", parse_mode=ParseMode.MARKDOWN)
+    await update.message.reply_text("✅ *Grazie per il tuo feedback!*\n\nIl tuo commento è stato salvato e lo terremo in considerazione per le prossime versioni di Expensum ✨", parse_mode=ParseMode.MARKDOWN)
 
 async def cmd_registra(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Fornisce due opzioni di registrazione: OAuth Notion oppure backend PostgreSQL interno."""
@@ -1039,7 +1055,7 @@ async def cmd_registra(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             f"Attualmente stai utilizzando *{current_backend}* come fonte dati.\n\n"
             "Scegli un'opzione:\n"
             "• Fai login per continuare\n"
-            "• Cambia fonte dati (⚠️ *ATTENZIONE*: eliminerà in modo irreversibile tutti i tuoi dati da Moneo e ti farà ricominciare da zero)",
+            "• Cambia fonte dati (⚠️ *ATTENZIONE*: eliminerà in modo irreversibile tutti i tuoi dati da Expensum e ti farà ricominciare da zero)",
             parse_mode=ParseMode.MARKDOWN,
             reply_markup=InlineKeyboardMarkup(keyboard_buttons)
         )
@@ -1061,11 +1077,28 @@ async def cmd_registra(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     await update.message.reply_text(
         "🚀 *Scegli come registrarti*\n\n"
         "🔗 *Notion* — sincronizza le spese nel tuo workspace Notion (autorizzazione OAuth).\n"
-        "🐘 *PostgreSQL* — salva i dati nel database interno di Moneo, più veloce e senza rate limit.\n\n"
+        "🐘 *PostgreSQL* — salva i dati nel database interno di Expensum, più veloce e senza rate limit.\n\n"
         "Puoi cambiare idea più avanti scrivendo al supporto. 🛡️",
         parse_mode=ParseMode.MARKDOWN,
         reply_markup=keyboard
     )
+
+def _delete_account_confirmation_text_and_keyboard() -> tuple[str, InlineKeyboardMarkup]:
+    """Testo e keyboard di conferma cancellazione, condivisi tra /elimina_account e il menu /impostazioni."""
+    text = (
+        "⚠️ *Sei sicuro di voler eliminare il tuo account?*\n\n"
+        "Questa operazione è *irreversibile* e cancellerà:\n"
+        "• Tutti i tuoi dati finanziari (spese, entrate, conti, abbonamenti)\n"
+        "• Le tue categorie e impostazioni\n"
+        "• Il tuo account Expensum\n\n"
+        "I dati sul tuo workspace Notion *non* vengono toccati."
+    )
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("💀 Sì, elimina tutto", callback_data="delete_account_confirm")],
+        [InlineKeyboardButton("❌ Annulla", callback_data="delete_account_cancel")],
+    ])
+    return text, keyboard
+
 
 async def cmd_elimina_account(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handler per /elimina_account — chiede conferma prima di cancellare tutti i dati."""
@@ -1073,20 +1106,8 @@ async def cmd_elimina_account(update: Update, context: ContextTypes.DEFAULT_TYPE
         await _reply_not_authorized(update)
         return
 
-    keyboard = InlineKeyboardMarkup([
-        [InlineKeyboardButton("💀 Sì, elimina tutto", callback_data="delete_account_confirm")],
-        [InlineKeyboardButton("❌ Annulla", callback_data="delete_account_cancel")],
-    ])
-    await update.message.reply_text(
-        "⚠️ *Sei sicuro di voler eliminare il tuo account?*\n\n"
-        "Questa operazione è *irreversibile* e cancellerà:\n"
-        "• Tutti i tuoi dati finanziari (spese, entrate, conti, abbonamenti)\n"
-        "• Le tue categorie e impostazioni\n"
-        "• Il tuo account Moneo\n\n"
-        "I dati sul tuo workspace Notion *non* vengono toccati.",
-        parse_mode=ParseMode.MARKDOWN,
-        reply_markup=keyboard
-    )
+    text, keyboard = _delete_account_confirmation_text_and_keyboard()
+    await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=keyboard)
 
 
 async def cmd_login(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1744,7 +1765,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         await query.edit_message_text(
             "✅ *Account riattivato!* Bentornato.\n\nAccedi alla tua area personale:",
             parse_mode=ParseMode.MARKDOWN,
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("📂 Apri Moneo", url=setup_url)]]),
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("📂 Apri Expensum", url=setup_url)]]),
         )
         return
 
@@ -1765,6 +1786,11 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         return
 
     if query.data == "delete_account_confirm":
+        # Audit log PRIMA della cancellazione (Art. 17 GDPR, accountability Art. 30)
+        _user_store.write_audit_log(
+            chat_id, actor="user", action="delete_account",
+            user_agent="telegram-bot",
+        )
         backend = _user_store.delete_user_completely(chat_id)
         logger.info(f"[User {chat_id}] Account eliminato (backend: {backend})")
         await query.edit_message_text(
@@ -1943,10 +1969,11 @@ def _daily_dashboard_job(app: Application, loop: asyncio.AbstractEventLoop) -> N
 
     async def _send_dashboards():
         bot = app.bot
-        # Recupera tutti gli utenti attivi (sia Notion che Postgres)
+        # Recupera tutti gli utenti attivi (sia Notion che Postgres), escludendo
+        # chi ha disattivato le notifiche (Art. 21 GDPR, opposizione al trattamento)
         notion_users = _user_store.get_active_notion_users()
         pg_users = _user_store.get_active_postgres_users()
-        all_users = list(notion_users) + list(pg_users)
+        all_users = [u for u in list(notion_users) + list(pg_users) if u.notifications_enabled]
 
         sent = 0
         for user in all_users:
@@ -2007,9 +2034,10 @@ def _weekly_plan_job(app: Application, loop: asyncio.AbstractEventLoop) -> None:
 
     async def _send_plans():
         bot = app.bot
+        # Esclude chi ha disattivato le notifiche (Art. 21 GDPR)
         notion_users = _user_store.get_active_notion_users()
         pg_users = _user_store.get_active_postgres_users()
-        all_users = list(notion_users) + list(pg_users)
+        all_users = [u for u in list(notion_users) + list(pg_users) if u.notifications_enabled]
 
         sent = 0
         for user in all_users:
@@ -2037,9 +2065,10 @@ def _monthly_plan_job(app: Application, loop: asyncio.AbstractEventLoop) -> None
 
     async def _send_plans():
         bot = app.bot
+        # Esclude chi ha disattivato le notifiche (Art. 21 GDPR)
         notion_users = _user_store.get_active_notion_users()
         pg_users = _user_store.get_active_postgres_users()
-        all_users = list(notion_users) + list(pg_users)
+        all_users = [u for u in list(notion_users) + list(pg_users) if u.notifications_enabled]
 
         sent = 0
         for user in all_users:
@@ -2141,17 +2170,38 @@ def _nightly_subscription_job(app: Application, loop: asyncio.AbstractEventLoop)
         logger.error(f"[NightlySubs] Errore job: {e}")
 
 
+def _nightly_retention_cleanup() -> None:
+    """Job APScheduler alle 03:10 — rimuove OAuth session scadute e chat_messages oltre 90gg.
+
+    Applica le retention policy dichiarate (Art. 5.1(e) GDPR) che altrimenti
+    restano solo teoriche: i due metodi esistevano già ma nessun job li invocava.
+    """
+    try:
+        deleted_oauth = _user_store.cleanup_expired_oauth_sessions()
+        deleted_chats = _user_store.cleanup_old_chat_messages(days=90)
+        logger.info(
+            "[NightlyRetention] OAuth sessions rimosse: %d, chat_messages rimossi: %d",
+            deleted_oauth, deleted_chats,
+        )
+    except Exception as e:
+        logger.error(f"[NightlyRetention] Errore job: {e}")
+
+
 async def _start_scheduler(app: Application) -> None:
     """Hook post_init PTB: cattura il loop PTB e avvia APScheduler con il loop corretto."""
     loop = asyncio.get_running_loop()
     scheduler = BackgroundScheduler(daemon=True)
     scheduler.add_job(_nightly_category_sync, 'cron', hour=3, minute=0)
     scheduler.add_job(_nightly_subscription_job, 'cron', hour=3, minute=5, args=[app, loop])
+    scheduler.add_job(_nightly_retention_cleanup, 'cron', hour=3, minute=10)
     scheduler.add_job(_daily_dashboard_job, 'cron', hour=8, minute=0, args=[app, loop])
     scheduler.add_job(_weekly_plan_job, 'cron', day_of_week='mon', hour=8, minute=5, args=[app, loop])
     scheduler.add_job(_monthly_plan_job, 'cron', day=1, hour=8, minute=0, args=[app, loop])
     scheduler.start()
-    logger.info("⏰ Scheduler avviato (sync 03:00, subs 03:05, daily 08:00, weekly plan lun 08:05, monthly plan 1° 08:00).")
+    logger.info(
+        "⏰ Scheduler avviato (sync 03:00, subs 03:05, retention cleanup 03:10, "
+        "daily 08:00, weekly plan lun 08:05, monthly plan 1° 08:00)."
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -2178,8 +2228,8 @@ def _ob_progress(step: int, total: int = 10) -> str:
 
 
 async def cmd_onboarding(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Avvia il wizard /impostazioni."""
-    chat_id = str(update.effective_chat.id)
+    """Avvia il wizard preferenze. Richiamabile da /impostazioni_wizard (legacy)
+    o dal bottone "✏️ Modifica preferenze" del menu /impostazioni (callback)."""
     if not _is_authorized(update):
         await _reply_not_authorized(update)
         return ConversationHandler.END
@@ -2187,13 +2237,16 @@ async def cmd_onboarding(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     context.user_data["lifestyle"] = {}
     context.user_data["categories"] = []
     msg = (
-        "👋 <b>Configurazione Moneo</b>\n\n"
+        "👋 <b>Configurazione Expensum</b>\n\n"
         "In pochi step personalizzerò il tuo spazio.\n\n"
         f"{_ob_progress(1)}"
         "🌍 <b>Che lingua preferisci?</b>"
     )
     keyboard = _ob_keyboard([("🇮🇹 Italiano", "ob_lang_it"), ("🇬🇧 English", "ob_lang_en")], back=False)
-    if update.message:
+    if update.callback_query:
+        await update.callback_query.answer()
+        await update.callback_query.edit_message_text(msg, parse_mode=ParseMode.HTML, reply_markup=keyboard)
+    elif update.message:
         await update.message.reply_text(msg, parse_mode=ParseMode.HTML, reply_markup=keyboard)
     return OB_LANGUAGE
 
@@ -2512,7 +2565,7 @@ async def ob_handle_categories_review(update: Update, context: ContextTypes.DEFA
             f"💱 Valuta: {prefs.get('currency', 'EUR')}\n"
             f"🕐 Timezone: {prefs.get('timezone', 'Europe/Rome')}\n"
             f"📂 Categorie ({len(selected)}): {cats_preview}\n\n"
-            "Confermi e inizia a usare Moneo?"
+            "Confermi e inizia a usare Expensum?"
         )
         await query.edit_message_text(
             summary,
@@ -2558,10 +2611,187 @@ async def ob_handle_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     return ConversationHandler.END
 
 
+# ---------------------------------------------------------------------------
+# Menu /impostazioni — Privacy e dati / Preferenze
+# ---------------------------------------------------------------------------
+
+def _impostazioni_menu_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🔒 Privacy e dati", callback_data=IMP_MENU_PRIVACY_CB)],
+        [InlineKeyboardButton("⚙️ Preferenze", callback_data=IMP_MENU_PREFS_CB)],
+    ])
+
+
+async def cmd_impostazioni_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handler per /impostazioni — menu principale: Privacy e dati / Preferenze."""
+    if not _is_authorized(update):
+        await _reply_not_authorized(update)
+        return
+    text = "⚙️ <b>Impostazioni</b>\n\nCosa vuoi gestire?"
+    if update.message:
+        await update.message.reply_text(
+            text, parse_mode=ParseMode.HTML, reply_markup=_impostazioni_menu_keyboard()
+        )
+
+
+async def _cancel_wizard_show_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Fallback del wizard preferenze: se /impostazioni viene digitato a metà wizard,
+    interrompe la conversazione e mostra il nuovo menu."""
+    await cmd_impostazioni_menu(update, context)
+    return ConversationHandler.END
+
+
+def _privacy_menu_keyboard(notifications_enabled: bool) -> InlineKeyboardMarkup:
+    notif_label = "🔕 Disattiva notifiche" if notifications_enabled else "🔔 Attiva notifiche"
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("📥 Export dati", callback_data=PRIVACY_EXPORT_CB)],
+        [InlineKeyboardButton("❌ Cancella account", callback_data=PRIVACY_DELETE_START_CB)],
+        [InlineKeyboardButton(notif_label, callback_data=PRIVACY_NOTIF_TOGGLE_CB)],
+        [InlineKeyboardButton("📄 Privacy Policy", callback_data=PRIVACY_POLICY_CB)],
+        [InlineKeyboardButton("📄 Termini", callback_data=PRIVACY_TERMS_CB)],
+        [InlineKeyboardButton("⬅️ Torna al menu", callback_data=IMP_MENU_BACK_CB)],
+    ])
+
+
+async def _show_privacy_menu(query, chat_id: str) -> None:
+    user = _user_store.get_user(chat_id)
+    notifications_enabled = bool(user.notifications_enabled) if user else True
+    await query.edit_message_text(
+        "🔒 <b>Privacy e dati</b>\n\n"
+        "Qui puoi esercitare i tuoi diritti GDPR: accedere ai tuoi dati (Art. 15), "
+        "ottenerli in formato portabile (Art. 20), opporti a un trattamento (Art. 21) "
+        "o cancellare il tuo account (Art. 17).\nTempo di risposta standard: 1 mese, target 24h.",
+        parse_mode=ParseMode.HTML,
+        reply_markup=_privacy_menu_keyboard(notifications_enabled),
+    )
+
+
+def _preferences_menu_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("✏️ Modifica preferenze", callback_data=PREFS_EDIT_START_CB)],
+        [InlineKeyboardButton("⬅️ Torna al menu", callback_data=IMP_MENU_BACK_CB)],
+    ])
+
+
+async def _show_preferences_menu(query, chat_id: str) -> None:
+    prefs = _user_store.get_user_preferences(chat_id)
+    notif = "attive" if prefs.get("notifications_enabled", True) else "disattivate"
+    text = (
+        "⚙️ <b>Preferenze</b>\n\n"
+        f"🌍 Lingua: {(prefs.get('preferred_language') or 'it').upper()}\n"
+        f"💱 Valuta: {prefs.get('currency') or 'EUR'}\n"
+        f"🕐 Timezone: {prefs.get('timezone') or 'Europe/Rome'}\n"
+        f"💰 Budget mensile: {prefs.get('monthly_budget') or 'non impostato'}\n"
+        f"🔔 Notifiche: {notif}\n\n"
+        "Per modificarle, riparti dal wizard guidato."
+    )
+    await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=_preferences_menu_keyboard())
+
+
+async def handle_impostazioni_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Dispatcher per i bottoni del menu /impostazioni (Privacy e dati / Preferenze)."""
+    query = update.callback_query
+    await query.answer()
+    chat_id = str(update.effective_chat.id)
+    if not _is_authorized(update):
+        return
+
+    if query.data == IMP_MENU_PRIVACY_CB:
+        await _show_privacy_menu(query, chat_id)
+        return
+
+    if query.data == IMP_MENU_PREFS_CB:
+        await _show_preferences_menu(query, chat_id)
+        return
+
+    if query.data == IMP_MENU_BACK_CB:
+        await query.edit_message_text(
+            "⚙️ <b>Impostazioni</b>\n\nCosa vuoi gestire?",
+            parse_mode=ParseMode.HTML,
+            reply_markup=_impostazioni_menu_keyboard(),
+        )
+        return
+
+    if query.data == PRIVACY_EXPORT_CB:
+        await query.edit_message_text("⏳ Generazione export in corso...")
+        with _user_store.Session() as s:
+            user = s.query(User).filter_by(chat_id=chat_id).first()
+            if not user:
+                await query.edit_message_text("❌ Utente non trovato.")
+                return
+            export_data = build_export_json(s, user)
+            csv_rows = build_csv_rows(s, user)
+
+        _user_store.write_audit_log(chat_id, actor="user", action="export_json", user_agent="telegram-bot")
+
+        json_bytes = json.dumps(export_data, ensure_ascii=False, indent=2, default=str).encode("utf-8")
+        today_str = date.today().isoformat()
+        await context.bot.send_document(
+            chat_id=int(chat_id),
+            document=InputFile(io.BytesIO(json_bytes), filename=f"expensum_dati_{today_str}.json"),
+            caption="📥 Copia completa dei tuoi dati personali (Art. 15 GDPR).",
+        )
+
+        if csv_rows is not None:
+            _user_store.write_audit_log(chat_id, actor="user", action="export_csv", user_agent="telegram-bot")
+            buffer = io.StringIO()
+            writer = csv.writer(buffer)
+            writer.writerow(CSV_HEADER)
+            for row in csv_rows:
+                writer.writerow(row)
+            csv_bytes = buffer.getvalue().encode("utf-8")
+            await context.bot.send_document(
+                chat_id=int(chat_id),
+                document=InputFile(io.BytesIO(csv_bytes), filename=f"expensum_transazioni_{today_str}.csv"),
+                caption="📥 Le tue transazioni in formato portabile (Art. 20 GDPR).",
+            )
+        else:
+            await context.bot.send_message(
+                chat_id=int(chat_id),
+                text=(
+                    "ℹ️ I tuoi dati finanziari sono nel tuo workspace Notion personale: "
+                    "esportali direttamente da notion.so."
+                ),
+            )
+        await _show_privacy_menu(query, chat_id)
+        return
+
+    if query.data == PRIVACY_DELETE_START_CB:
+        text, keyboard = _delete_account_confirmation_text_and_keyboard()
+        await query.edit_message_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=keyboard)
+        return
+
+    if query.data == PRIVACY_NOTIF_TOGGLE_CB:
+        prefs = _user_store.get_user_preferences(chat_id)
+        new_value = not prefs.get("notifications_enabled", True)
+        _user_store.save_onboarding_progress(chat_id, "notifications_toggle", {"notifications_enabled": new_value})
+        await _show_privacy_menu(query, chat_id)
+        return
+
+    if query.data == PRIVACY_POLICY_CB:
+        await context.bot.send_message(
+            chat_id=int(chat_id),
+            text=f"📄 Privacy Policy: {Config.WEBAPP_BASE_URL}/privacy",
+        )
+        return
+
+    if query.data == PRIVACY_TERMS_CB:
+        await context.bot.send_message(
+            chat_id=int(chat_id),
+            text="📄 Termini e Condizioni: pubblicazione in arrivo a breve.",
+        )
+        return
+
+
 def _build_onboarding_conversation_handler() -> ConversationHandler:
-    """Costruisce il ConversationHandler per il wizard /impostazioni."""
+    """Costruisce il ConversationHandler per il wizard preferenze.
+
+    Il comando /impostazioni ora apre il menu top-level (cmd_impostazioni_menu);
+    il wizard si avvia solo dal bottone "✏️ Modifica preferenze" del submenu
+    Preferenze (callback PREFS_EDIT_START_CB), non più come comando diretto.
+    """
     return ConversationHandler(
-        entry_points=[CommandHandler("impostazioni", cmd_onboarding)],
+        entry_points=[CallbackQueryHandler(cmd_onboarding, pattern=f"^{PREFS_EDIT_START_CB}$")],
         states={
             OB_LANGUAGE: [CallbackQueryHandler(ob_handle_language, pattern="^ob_lang_")],
             OB_CURRENCY: [CallbackQueryHandler(ob_handle_currency, pattern="^ob_(cur_|back)")],
@@ -2577,7 +2807,7 @@ def _build_onboarding_conversation_handler() -> ConversationHandler:
             OB_CATEGORIES_REVIEW: [CallbackQueryHandler(ob_handle_categories_review, pattern="^ob_(cat_|back)")],
             OB_CONFIRM: [CallbackQueryHandler(ob_handle_confirm, pattern="^ob_(confirm_|back)")],
         },
-        fallbacks=[CommandHandler("impostazioni", cmd_onboarding)],
+        fallbacks=[CommandHandler("impostazioni", _cancel_wizard_show_menu)],
         allow_reentry=True,
     )
 
@@ -2629,6 +2859,7 @@ def main():
     app.add_handler(CommandHandler("logout", cmd_logout))
     app.add_handler(CommandHandler("login", cmd_login))
     app.add_handler(CommandHandler("modify", cmd_modify))
+    app.add_handler(CommandHandler("impostazioni", cmd_impostazioni_menu))
     app.add_handler(CommandHandler("feedback", cmd_feedback))
     app.add_handler(CommandHandler("status", cmd_status))
     app.add_handler(CommandHandler("piano", cmd_piano))
@@ -2636,6 +2867,7 @@ def main():
     app.add_handler(CommandHandler("weekly_plan", cmd_weekly_plan))
     app.add_handler(CommandHandler("monthly_report", cmd_monthly_report))
     app.add_handler(CommandHandler("monthly_plan", cmd_monthly_plan))
+    app.add_handler(CallbackQueryHandler(handle_impostazioni_menu_callback, pattern="^(imp_menu_|privacy_)"))
     app.add_handler(CallbackQueryHandler(handle_callback))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     app.add_handler(MessageHandler(filters.VOICE & ~filters.COMMAND, handle_voice))

@@ -128,7 +128,7 @@ Basati ESCLUSIVAMENTE sulle anomalie e i trend nei dati:
 3️⃣ [Consiglio specifico con numero reale dai dati]
 
 ---
-_Report generato automaticamente dall'Agente Finanziario 🤖_
+✨ _Generato con AI — verifica sempre i numeri_
 """
 
 
@@ -444,7 +444,8 @@ Basati ESCLUSIVAMENTE sui pattern e anomalie nei dati:
 3️⃣ [Consiglio specifico]
 
 ---
-_Piano generato automaticamente 🤖 — scrivi in modo naturale per modificare un obiettivo_
+✨ _Generato con AI — verifica sempre i numeri_
+_Scrivi in modo naturale per modificare un obiettivo_
 """
 
 
@@ -504,6 +505,7 @@ Basati ESCLUSIVAMENTE sui trend e anomalie nei dati:
 3️⃣ [Consiglio specifico]
 
 ---
-_Piano generato automaticamente 🤖 — scrivi in modo naturale per modificare un obiettivo_
+✨ _Generato con AI — verifica sempre i numeri_
+_Scrivi in modo naturale per modificare un obiettivo_
 """
 

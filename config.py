@@ -15,6 +15,11 @@ load_dotenv(dotenv_path=Path(__file__).parent / ".env")
 
 class Config:
     """Configurazione centralizzata dell'agente finanziario."""
+    # --- PRIVACY POLICY ---
+    # Incrementare quando il testo di privacy.html cambia in modo sostanziale:
+    # forza un nuovo consenso esplicito (consent_change in audit_log).
+    CURRENT_PRIVACY_POLICY_VERSION: str = "2026-06-30"
+
     # --- NOTION ---
     NOTION_API_KEY: str = os.getenv("NOTION_API_KEY", "")
     # Database IDs

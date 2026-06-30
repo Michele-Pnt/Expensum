@@ -26,6 +26,8 @@ from sqlalchemy import (
     Numeric,
     Text,
     UniqueConstraint,
+    Index,
+    JSON,
     func,
     create_engine,
     text,
@@ -127,6 +129,10 @@ class User(Base):
     onboarding_step = Column(String, default='pending')
     onboarding_completed_at = Column(DateTime, nullable=True)
 
+    # Consenso privacy policy (GDPR Art. 7 — prova del consenso)
+    privacy_policy_version_accepted = Column(String, nullable=True)
+    privacy_accepted_at = Column(DateTime, nullable=True)
+
     def __repr__(self):
         return f"<User(chat_id={self.chat_id}, username='{self.username}')>"
 
@@ -192,6 +198,30 @@ class PlanChange(Base):
     change_type = Column(String, nullable=False)  # 'upgrade', 'downgrade', 'trial_expired', ecc.
     changed_at = Column(DateTime, nullable=False, default=datetime.utcnow)
     reason = Column(String, nullable=True)  # payment_reference o motivo testuale
+
+
+class AuditLog(Base):
+    """Audit trail per azioni GDPR-rilevanti (Art. 30 accountability).
+
+    `user_id` non ha FK verso `users.chat_id`: deve restare leggibile anche
+    dopo la cancellazione dell'utente, come prova che l'azione è avvenuta.
+    """
+    __tablename__ = "audit_log"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    timestamp = Column(DateTime, nullable=False, default=datetime.utcnow, index=True)
+    user_id = Column(String, nullable=False)
+    actor = Column(String(20), nullable=False)  # 'user' | 'admin' | 'system'
+    action = Column(String(50), nullable=False)  # 'export_json' | 'export_csv' | 'delete_account'
+    resource = Column(String(100), nullable=True)
+    ip_address = Column(String(45), nullable=True)
+    user_agent = Column(String(255), nullable=True)
+    metadata_json = Column(JSON, nullable=True)
+    expires_at = Column(DateTime, nullable=True)
+
+    __table_args__ = (
+        Index("ix_audit_log_user_timestamp", "user_id", "timestamp"),
+    )
 
 
 class LlmPricing(Base):
@@ -644,6 +674,30 @@ class UserStore:
                 user.password_hash = hashed
                 session.commit()
 
+    def update_email(self, chat_id: str, new_email: str) -> bool:
+        """Aggiorna solo l'email di un utente già registrato. Ritorna False se l'utente non esiste."""
+        chat_id = str(chat_id)
+        with self.Session() as session:
+            user = session.query(User).filter(User.chat_id == chat_id).first()
+            if not user:
+                return False
+            user.email = new_email.lower().strip()
+            session.commit()
+            return True
+
+    def update_password(self, chat_id: str, new_password: str) -> bool:
+        """Aggiorna solo l'hash della password di un utente già registrato. Ritorna False se l'utente non esiste."""
+        import bcrypt
+        chat_id = str(chat_id)
+        hashed = bcrypt.hashpw(new_password.encode(), bcrypt.gensalt()).decode()
+        with self.Session() as session:
+            user = session.query(User).filter(User.chat_id == chat_id).first()
+            if not user:
+                return False
+            user.password_hash = hashed
+            session.commit()
+            return True
+
     def get_user_by_email(self, email: str) -> User | None:
         """Cerca un utente attivo per email (case-insensitive)."""
         with self.Session() as session:
@@ -1067,6 +1121,49 @@ class UserStore:
                 {"uid": user_id},
             ).fetchall()
             return [{"name": r[0], "average": r[1] or 0.0} for r in rows]
+
+    def accept_privacy_policy(self, chat_id: str, version: str) -> bool:
+        """Registra l'accettazione di una versione della privacy policy. Ritorna False se l'utente non esiste."""
+        chat_id = str(chat_id)
+        with self.Session() as session:
+            user = session.query(User).filter(User.chat_id == chat_id).first()
+            if not user:
+                return False
+            user.privacy_policy_version_accepted = version
+            user.privacy_accepted_at = datetime.utcnow()
+            session.commit()
+            return True
+
+    def write_audit_log(
+        self,
+        user_id: str,
+        actor: str,
+        action: str,
+        resource: Optional[str] = None,
+        ip_address: Optional[str] = None,
+        user_agent: Optional[str] = None,
+        metadata: Optional[dict] = None,
+    ) -> None:
+        """Registra un'azione GDPR-rilevante (export, cancellazione) in audit_log.
+
+        Non propaga eccezioni: un fallimento di audit non deve mai bloccare
+        l'operazione che lo ha generato (export o cancellazione account).
+        """
+        try:
+            with self.Session() as session:
+                session.add(AuditLog(
+                    user_id=str(user_id),
+                    actor=actor,
+                    action=action,
+                    resource=resource,
+                    ip_address=ip_address,
+                    user_agent=user_agent,
+                    metadata_json=metadata,
+                    expires_at=datetime.utcnow() + timedelta(days=365),
+                ))
+                session.commit()
+        except Exception:
+            logger.exception("[AuditLog] Scrittura fallita per user_id=%s action=%s", user_id, action)
 
     def delete_user_completely(self, chat_id: str) -> str:
         """Elimina l'account e tutti i dati locali dell'utente in modo atomico.

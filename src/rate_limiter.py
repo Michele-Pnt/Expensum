@@ -57,3 +57,27 @@ def is_rate_limited(chat_id: str, max_messages: int, window_seconds: int = 60) -
 def reset_user(chat_id: str) -> None:
     """Resetta il contatore di un utente (utile per i test)."""
     _history.pop(str(chat_id), None)
+
+
+# Struttura: { "email": [timestamp1, timestamp2, ...] } — tentativi di login falliti
+_failed_logins: dict[str, list[float]] = defaultdict(list)
+
+
+def track_failed_login(key: str, window_seconds: int = 900) -> int:
+    """
+    Registra un tentativo di login fallito per `key` (es. email) e ritorna
+    quanti fallimenti ci sono stati nella finestra temporale (sliding window).
+
+    Usato per il rilevamento di breach (es. brute force): il chiamante decide
+    la soglia oltre la quale considerare l'attività anomala.
+    """
+    now = time()
+    key = str(key).lower()
+    _failed_logins[key] = [t for t in _failed_logins[key] if now - t < window_seconds]
+    _failed_logins[key].append(now)
+    return len(_failed_logins[key])
+
+
+def reset_failed_logins(key: str) -> None:
+    """Azzera il contatore di fallimenti di login per `key` (es. dopo un login riuscito)."""
+    _failed_logins.pop(str(key).lower(), None)

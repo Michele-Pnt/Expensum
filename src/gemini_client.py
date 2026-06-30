@@ -132,7 +132,7 @@ Basati ESCLUSIVAMENTE sulle anomalie e i trend nei dati:
 3️⃣ [Consiglio specifico con numero reale dai dati]
 
 ---
-_Report generato automaticamente dall'Agente Finanziario 🤖_
+✨ _Generato con AI — verifica sempre i numeri_
 """
 
 

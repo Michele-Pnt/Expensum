@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
-    <title>Moneo Setup</title>
+    <title>Expensum Setup</title>
     <script src="https://telegram.org/js/telegram-web-app.js"></script>
     <style>
         :root {
@@ -445,10 +445,12 @@
 
         // ---- CRUD helpers ----
 
+        const CSRF_TOKEN = "{{ csrf_token() }}";
+
         function apiCall(method, path, body, onSuccess, onError) {
             fetch(path, {
                 method: method,
-                headers: { 'Content-Type': 'application/json' },
+                headers: { 'Content-Type': 'application/json', 'X-CSRFToken': CSRF_TOKEN },
                 body: JSON.stringify(body)
             })
             .then(function(resp) { return resp.json().then(function(res) { return { ok: resp.ok, res: res }; }); })

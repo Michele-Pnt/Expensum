@@ -136,7 +136,7 @@ class ReportBuilder:
             lines.append(f"{i}️⃣ {tip}")
 
         lines.append(
-            "\n---\n_Report generato automaticamente dall'Agente Finanziario 🤖_"
+            "\n---\n✨ _Generato con AI — verifica sempre i numeri_"
         )
 
         return "\n".join(lines)
@@ -815,5 +815,5 @@ class MonthlyPlanBuilder:
             override_marker = " *(obiettivo tuo)*" if cat in data.category_overrides else ""
             lines.append(f"  • {cat}: *€{target:.2f}/mese* {trend_emoji}{override_marker}")
 
-        lines.append("\n---\n_Piano generato automaticamente 🤖 — scrivi per modificare un obiettivo_")
+        lines.append("\n---\n✨ _Generato con AI — verifica sempre i numeri_\n_Scrivi per modificare un obiettivo_")
         return "\n".join(lines)

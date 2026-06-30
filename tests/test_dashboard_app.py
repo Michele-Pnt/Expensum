@@ -310,3 +310,302 @@ def test_login_brute_force_returns_429_after_threshold(client):
 
     response = client.post("/login", data={"email": "bf@example.com", "password": "wrong"})
     assert response.status_code == 429
+
+
+def _login_completed(client, store, chat_id, email, storage_backend="postgres"):
+    """Crea un utente con setup completato e ne simula la sessione browser.
+
+    Usa session_transaction invece di POST /login: il flusso /login reale
+    richiede un token CSRF che esula dallo scope dei test sugli endpoint
+    privacy (l'autenticazione è già coperta da test_web_login_*).
+    """
+    store.add_user(chat_id=chat_id, username="test-user", storage_backend=storage_backend)
+    store.set_credentials(chat_id, email, "Password123")
+    store.mark_setup_completed(chat_id)
+    with client.session_transaction() as sess:
+        sess["user_logged_in"] = True
+        sess["chat_id"] = chat_id
+
+
+def test_privacy_export_json_requires_auth(client):
+    response = client.get("/api/privacy/export-json")
+    assert response.status_code == 401
+
+
+def test_privacy_export_json_excludes_secrets_and_includes_financial_data(client):
+    from src.storage.models import Account, Expense
+    from datetime import date
+
+    from src.dashboard.app import store
+
+    chat_id, email = "chat_privacy_json", "privacy-json@example.com"
+    _login_completed(client, store, chat_id, email)
+
+    with store.Session() as s:
+        account = Account(user_id=chat_id, name="Conto Test", opening_balance=100)
+        s.add(account)
+        s.commit()
+        s.add(Expense(
+            user_id=chat_id, expense_date=date.today(), amount=10, name="Caffè",
+            account_id=account.id,
+        ))
+        s.commit()
+
+    response = client.get("/api/privacy/export-json")
+
+    assert response.status_code == 200
+    body = response.json
+    assert body["account"]["email"] == email
+    assert "password_hash" not in body["account"]
+    assert "notion_access_token" not in body["account"]
+    assert len(body["financial_data"]["expenses"]) == 1
+    assert body["financial_data"]["expenses"][0]["name"] == "Caffè"
+    assert "your_rights" in body
+
+    with store.Session() as s:
+        from src.user_store import AuditLog
+        log = s.query(AuditLog).filter_by(user_id=chat_id, action="export_json").first()
+        assert log is not None
+
+
+def test_privacy_export_json_notion_backend_does_not_call_notion_api(client):
+    from src.dashboard.app import store
+
+    chat_id, email = "chat_privacy_json_notion", "privacy-json-notion@example.com"
+    _login_completed(client, store, chat_id, email, storage_backend="notion")
+
+    response = client.get("/api/privacy/export-json")
+
+    assert response.status_code == 200
+    assert "note" in response.json["financial_data"]
+
+
+def test_privacy_export_csv_requires_auth(client):
+    response = client.get("/api/privacy/export-csv")
+    assert response.status_code == 401
+
+
+def test_privacy_export_csv_returns_csv_for_postgres_user(client):
+    from src.storage.models import Account, Expense
+    from datetime import date
+
+    from src.dashboard.app import store
+
+    chat_id, email = "chat_privacy_csv", "privacy-csv@example.com"
+    _login_completed(client, store, chat_id, email)
+
+    with store.Session() as s:
+        account = Account(user_id=chat_id, name="Conto Test", opening_balance=0)
+        s.add(account)
+        s.commit()
+        s.add(Expense(
+            user_id=chat_id, expense_date=date.today(), amount=5, name="Pranzo",
+            account_id=account.id,
+        ))
+        s.commit()
+
+    response = client.get("/api/privacy/export-csv")
+
+    assert response.status_code == 200
+    assert response.mimetype == "text/csv"
+    csv_text = response.get_data(as_text=True)
+    assert "Pranzo" in csv_text
+    assert "monthly_balance" not in csv_text.lower()
+
+
+def test_privacy_export_csv_notion_backend_returns_404(client):
+    from src.dashboard.app import store
+
+    chat_id, email = "chat_privacy_csv_notion", "privacy-csv-notion@example.com"
+    _login_completed(client, store, chat_id, email, storage_backend="notion")
+
+    response = client.get("/api/privacy/export-csv")
+
+    assert response.status_code == 404
+
+
+def test_privacy_delete_account_writes_audit_log_before_deletion(client):
+    from src.dashboard.app import store
+    from src.user_store import AuditLog
+
+    chat_id, email = "chat_privacy_delete", "privacy-delete@example.com"
+    _login_completed(client, store, chat_id, email)
+
+    csrf_token = client.get("/api/csrf-token").json["csrf_token"]
+    response = client.post(
+        "/api/privacy/delete-account",
+        json={"confirm": "DELETE"},
+        headers={"X-CSRFToken": csrf_token},
+    )
+
+    assert response.status_code == 200
+    assert response.json["ok"] is True
+    assert store.get_user(chat_id) is None
+
+    with store.Session() as s:
+        log = s.query(AuditLog).filter_by(user_id=chat_id, action="delete_account").first()
+        assert log is not None
+
+
+def test_change_email_writes_audit_log_and_updates_email(client):
+    from src.dashboard.app import store
+    from src.user_store import AuditLog
+
+    chat_id, email = "chat_change_email", "change-email@example.com"
+    _login_completed(client, store, chat_id, email)
+
+    csrf_token = client.get("/api/csrf-token").json["csrf_token"]
+    response = client.post(
+        "/api/settings/change-email",
+        json={"new_email": "new-email@example.com", "current_password": "Password123"},
+        headers={"X-CSRFToken": csrf_token},
+    )
+
+    assert response.status_code == 200
+    assert response.json["ok"] is True
+    assert store.get_user(chat_id).email == "new-email@example.com"
+
+    with store.Session() as s:
+        log = s.query(AuditLog).filter_by(user_id=chat_id, action="change_email").first()
+        assert log is not None
+
+
+def test_change_email_rejects_wrong_current_password(client):
+    from src.dashboard.app import store
+
+    chat_id, email = "chat_change_email_wrong", "change-email-wrong@example.com"
+    _login_completed(client, store, chat_id, email)
+
+    csrf_token = client.get("/api/csrf-token").json["csrf_token"]
+    response = client.post(
+        "/api/settings/change-email",
+        json={"new_email": "new-email-2@example.com", "current_password": "WrongPassword"},
+        headers={"X-CSRFToken": csrf_token},
+    )
+
+    assert response.status_code == 401
+    assert store.get_user(chat_id).email == email
+
+
+def test_change_password_writes_audit_log_and_updates_password(client):
+    from src.dashboard.app import store
+    from src.user_store import AuditLog
+
+    chat_id, email = "chat_change_password", "change-password@example.com"
+    _login_completed(client, store, chat_id, email)
+
+    csrf_token = client.get("/api/csrf-token").json["csrf_token"]
+    response = client.post(
+        "/api/settings/change-password",
+        json={"current_password": "Password123", "new_password": "NewPassword456"},
+        headers={"X-CSRFToken": csrf_token},
+    )
+
+    assert response.status_code == 200
+    assert response.json["ok"] is True
+    assert store.verify_password(email, "NewPassword456") is not None
+
+    with store.Session() as s:
+        log = s.query(AuditLog).filter_by(user_id=chat_id, action="change_password").first()
+        assert log is not None
+
+
+def test_accept_privacy_policy_writes_audit_log(client):
+    from src.dashboard.app import store
+    from src.user_store import AuditLog
+    from config import Config
+
+    chat_id, email = "chat_accept_policy", "accept-policy@example.com"
+    _login_completed(client, store, chat_id, email)
+
+    csrf_token = client.get("/api/csrf-token").json["csrf_token"]
+    response = client.post(
+        "/api/privacy/accept-policy",
+        headers={"X-CSRFToken": csrf_token},
+    )
+
+    assert response.status_code == 200
+    assert response.json["privacy_policy_version_accepted"] == Config.CURRENT_PRIVACY_POLICY_VERSION
+
+    with store.Session() as s:
+        log = s.query(AuditLog).filter_by(user_id=chat_id, action="consent_change").first()
+        assert log is not None
+
+
+def test_login_breach_detection_after_repeated_failures(client):
+    from src.dashboard.app import store
+    from src.user_store import AuditLog
+    from src.rate_limiter import reset_failed_logins
+
+    email = "breach-detect@example.com"
+    store.add_user(chat_id="chat_breach_detect", username="breach-user")
+    store.set_credentials("chat_breach_detect", email, "Password123")
+    reset_failed_logins(email)
+
+    csrf_token = client.get("/api/csrf-token").json["csrf_token"]
+    for _ in range(5):
+        client.post(
+            "/login",
+            data={"email": email, "password": "WrongPassword"},
+            headers={"X-CSRFToken": csrf_token},
+        )
+
+    with store.Session() as s:
+        log = s.query(AuditLog).filter_by(user_id=email, action="breach_detection").first()
+        assert log is not None
+
+
+def test_session_authenticated_api_requires_csrf_token(app, client):
+    """Verifica che le rotte /api/* autenticate via cookie di sessione siano protette da CSRF.
+
+    Il fixture 'app' disabilita WTF_CSRF_ENABLED di default (altrimenti tutti i test
+    POST esistenti dovrebbero allegare un token); qui lo riattiviamo apposta per
+    provare che enforce_csrf_on_forms() blocchi davvero le richieste senza token,
+    e le accetti con un token valido recuperato da /api/csrf-token.
+    """
+    from src.dashboard.app import store
+
+    chat_id, email = "chat_csrf_test", "csrf-test@example.com"
+    _login_completed(client, store, chat_id, email)
+
+    app.config["WTF_CSRF_ENABLED"] = True
+    try:
+        # Senza token CSRF: la richiesta deve essere rifiutata.
+        response = client.post("/api/settings/logout")
+        assert response.status_code == 400
+
+        # Con un token valido recuperato dall'endpoint dedicato: la richiesta passa.
+        token_response = client.get("/api/csrf-token")
+        assert token_response.status_code == 200
+        csrf_token = token_response.json["csrf_token"]
+
+        response = client.post(
+            "/api/settings/logout",
+            headers={"X-CSRFToken": csrf_token},
+        )
+        assert response.status_code == 200
+    finally:
+        app.config["WTF_CSRF_ENABLED"] = False
+
+
+def test_telegram_init_data_api_exempt_from_csrf(client):
+    """Le rotte /api/* con header X-Telegram-Init-Data restano esenti da CSRF.
+
+    Un sito malevolo non può impostare header custom su richieste cross-origin,
+    quindi questo canale di autenticazione non è sfruttabile da CSRF — non ha
+    senso richiedere anche un token in questo caso.
+    """
+    from src.dashboard.app import app as flask_app
+
+    flask_app.config["WTF_CSRF_ENABLED"] = True
+    try:
+        response = flask_app.test_client().post(
+            "/api/chat/message",
+            json={"text": "test"},
+            headers={"X-Telegram-Init-Data": "user=invalid"},
+        )
+        # L'header presente esenta dal controllo CSRF: il prossimo errore (401, dati
+        # non validi) è atteso, ma NON deve essere il 400 di CSRFProtect.
+        assert response.status_code != 400
+    finally:
+        flask_app.config["WTF_CSRF_ENABLED"] = False

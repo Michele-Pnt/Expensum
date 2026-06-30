@@ -9,6 +9,7 @@ import {
   CircularProgress, Snackbar, Alert, Tooltip, TableSortLabel,
 } from "@mui/material";
 import { Plus, Pencil, Trash2, Check, X } from "lucide-react";
+import { getCsrfToken } from "@/lib/csrf";
 
 // ---------------------------------------------------------------------------
 // Tipi
@@ -70,10 +71,15 @@ function getTelegramInitData(): string {
   return (window as any).Telegram?.WebApp?.initData ?? "";
 }
 
-function buildHeaders(): HeadersInit {
+async function buildHeaders(): Promise<HeadersInit> {
   const init = getTelegramInitData();
-  return init ? { "X-Telegram-Init-Data": init, "Content-Type": "application/json" }
-              : { "Content-Type": "application/json" };
+  const csrfToken = await getCsrfToken();
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+    "X-CSRFToken": csrfToken,
+  };
+  if (init) headers["X-Telegram-Init-Data"] = init;
+  return headers;
 }
 
 function fmtCurrency(n: number | null | undefined): string {
@@ -174,7 +180,7 @@ export default function SpazioPage() {
   const fetchAccounts = useCallback(async () => {
     setLoading(l => ({ ...l, accounts: true }));
     try {
-      const res = await fetch("/api/space/accounts", { headers: buildHeaders() });
+      const res = await fetch("/api/space/accounts", { headers: await buildHeaders() });
       const json = await res.json();
       setAccounts(json.accounts ?? []);
     } finally {
@@ -185,7 +191,7 @@ export default function SpazioPage() {
   const fetchCategories = useCallback(async () => {
     setLoading(l => ({ ...l, categories: true }));
     try {
-      const res = await fetch("/api/space/categories", { headers: buildHeaders() });
+      const res = await fetch("/api/space/categories", { headers: await buildHeaders() });
       const json = await res.json();
       setCategories(json.categories ?? []);
     } finally {
@@ -196,7 +202,7 @@ export default function SpazioPage() {
   const fetchSuggestions = useCallback(async () => {
     setLoadingSuggestions(true);
     try {
-      const res = await fetch("/api/space/categories/suggestions", { headers: buildHeaders() });
+      const res = await fetch("/api/space/categories/suggestions", { headers: await buildHeaders() });
       if (res.ok) {
         const json = await res.json();
         setSuggestions(json.suggestions ?? {});
@@ -209,7 +215,7 @@ export default function SpazioPage() {
   const fetchSubscriptions = useCallback(async () => {
     setLoading(l => ({ ...l, subscriptions: true }));
     try {
-      const res = await fetch("/api/space/subscriptions", { headers: buildHeaders() });
+      const res = await fetch("/api/space/subscriptions", { headers: await buildHeaders() });
       const json = await res.json();
       setSubscriptions(json.subscriptions ?? []);
     } finally {
@@ -230,7 +236,7 @@ export default function SpazioPage() {
       if (accId) params.set("account_id", accId);
       params.set("sort_by", sortBy);
       params.set("sort_dir", sortDir);
-      const res = await fetch(`/api/space/expenses?${params}`, { headers: buildHeaders() });
+      const res = await fetch(`/api/space/expenses?${params}`, { headers: await buildHeaders() });
       const json = await res.json();
       setExpenses(json.expenses ?? []);
       setExpTotal(json.total ?? 0);
@@ -252,7 +258,7 @@ export default function SpazioPage() {
       if (accId) params.set("account_id", accId);
       params.set("sort_by", sortBy);
       params.set("sort_dir", sortDir);
-      const res = await fetch(`/api/space/incomes?${params}`, { headers: buildHeaders() });
+      const res = await fetch(`/api/space/incomes?${params}`, { headers: await buildHeaders() });
       const json = await res.json();
       setIncomes(json.incomes ?? []);
       setIncTotal(json.total ?? 0);
@@ -312,7 +318,7 @@ export default function SpazioPage() {
     try {
       const res = await fetch(url, {
         method,
-        headers: buildHeaders(),
+        headers: await buildHeaders(),
         body: JSON.stringify(bodyData),
       });
       if (!res.ok) {
@@ -336,7 +342,7 @@ export default function SpazioPage() {
     try {
       const res = await fetch(`/api/space/${ENTITY_PATH[entity]}/${id}`, {
         method: "DELETE",
-        headers: buildHeaders(),
+        headers: await buildHeaders(),
       });
       if (!res.ok) {
         const err = await res.json().catch(() => ({}));
@@ -366,7 +372,7 @@ export default function SpazioPage() {
     try {
       const res = await fetch(`/api/space/categories/${cat.id}/accept-suggestion`, {
         method: "POST",
-        headers: buildHeaders(),
+        headers: await buildHeaders(),
         body: JSON.stringify({ suggested_budget: suggested }),
       });
       if (!res.ok) {
