@@ -754,7 +754,7 @@ class UserStore:
         Se il `new_chat_id` è già occupato da un altro account reale, solleva ValueError.
         """
         from src.storage.models import (
-            Expense, Income, Account, Subscription, UserCategory
+            Expense, Income, Account, Subscription, UserCategory, SavedReport
         )
 
         old_chat_id = str(old_chat_id)
@@ -818,8 +818,10 @@ class UserStore:
             session.query(DatabaseSchema).filter(DatabaseSchema.chat_id == old_chat_id).update({"chat_id": new_chat_id})
             session.query(OAuthSession).filter(OAuthSession.chat_id == old_chat_id).update({"chat_id": new_chat_id})
             session.query(UserPlan).filter(UserPlan.chat_id == old_chat_id).update({"chat_id": new_chat_id})
+            session.query(PlanChange).filter(PlanChange.chat_id == old_chat_id).update({"chat_id": new_chat_id})
             session.query(LlmTokenReservation).filter(LlmTokenReservation.chat_id == old_chat_id).update({"chat_id": new_chat_id})
             session.query(LlmUsageEvent).filter(LlmUsageEvent.chat_id == old_chat_id).update({"chat_id": new_chat_id})
+            session.query(ChatMessage).filter(ChatMessage.chat_id == old_chat_id).update({"chat_id": new_chat_id})
 
             # Tabelle finanziarie
             session.query(Expense).filter(Expense.user_id == old_chat_id).update({"user_id": new_chat_id})
@@ -827,6 +829,7 @@ class UserStore:
             session.query(Account).filter(Account.user_id == old_chat_id).update({"user_id": new_chat_id})
             session.query(Subscription).filter(Subscription.user_id == old_chat_id).update({"user_id": new_chat_id})
             session.query(UserCategory).filter(UserCategory.user_id == old_chat_id).update({"user_id": new_chat_id})
+            session.query(SavedReport).filter(SavedReport.user_id == old_chat_id).update({"user_id": new_chat_id})
 
             # Ora nessuna FK referenzia piu' old_chat_id: la vecchia riga users si puo' cancellare
             session.query(User).filter(User.chat_id == old_chat_id).delete()

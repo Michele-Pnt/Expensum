@@ -1,6 +1,6 @@
 import pytest
 from datetime import date, datetime
-from src.user_store import User, DailyMetrics, Feedback, OAuthSession, PlanChange, UserPlan
+from src.user_store import User, DailyMetrics, Feedback, OAuthSession, PlanChange, UserPlan, ChatMessage
 import src.storage.models  # registra UserCategory e tabelle storage nella Base condivisa
 
 pytestmark = pytest.mark.integration
@@ -174,14 +174,22 @@ def test_delete_user_completely_removes_all_tables(mock_db_session):
 
 
 def test_reassign_user_chat_id_respects_foreign_keys(mock_db_session):
-    """reassign_user_chat_id deve aggiornare users.chat_id PRIMA delle tabelle figlie.
+    """reassign_user_chat_id deve spostare TUTTE le tabelle figlie senza violare FK/UNIQUE.
 
-    Regressione: in produzione (PostgreSQL, FK enforcement rigido per statement)
-    l'ordine sbagliato causava ForeignKeyViolation su user_plans.chat_id durante
-    il login Telegram con riassegnazione account. SQLite di default non applica i
-    vincoli FK, quindi va abilitato esplicitamente qui per riprodurre il bug.
+    Regressione (3 bug trovati in produzione durante il login Telegram con
+    riassegnazione account, PostgreSQL ha FK/UNIQUE enforcement rigido che SQLite
+    di default non applica, va abilitato esplicitamente qui):
+    1. Ordine di update sbagliato -> ForeignKeyViolation su user_plans
+    2. Due righe users temporaneamente con la stessa email -> UniqueViolation
+    3. plan_changes/chat_messages/saved_reports mancanti dall'elenco delle tabelle
+       migrate -> ForeignKeyViolation alla cancellazione della vecchia riga users
+
+    Questo test semina una riga in OGNI tabella con FK su users.chat_id, cosi'
+    una futura tabella dimenticata fa fallire il test invece di rompersi in prod.
     """
     from sqlalchemy import event
+    from src.user_store import LlmTokenReservation, LlmUsageEvent, DatabaseSchema
+    from src.storage.models import Expense, Income, Account, Subscription, UserCategory, SavedReport
 
     store = mock_db_session
 
@@ -192,15 +200,46 @@ def test_reassign_user_chat_id_respects_foreign_keys(mock_db_session):
     old_chat_id, new_chat_id = "old_chat_fk", "new_chat_fk"
     store.add_user(chat_id=old_chat_id, username="t", storage_backend="postgres")
     store.set_credentials(old_chat_id, "reassign-fk@example.com", "Password123")
-    store.get_user_plan(old_chat_id)  # crea la riga in user_plans per old_chat_id
+    store.get_user_plan(old_chat_id)  # crea la riga in user_plans
+
+    with store.Session() as s:
+        s.add(ChatMessage(chat_id=old_chat_id, source="webapp", role="user", text="ciao"))
+        s.add(PlanChange(chat_id=old_chat_id, to_plan="pro", change_type="upgrade"))
+        s.add(DatabaseSchema(chat_id=old_chat_id, db_key="expense"))
+        s.add(Feedback(chat_id=old_chat_id, message="test"))
+        acc = Account(user_id=old_chat_id, name="Conto", opening_balance=0)
+        s.add(acc)
+        s.flush()
+        s.add(Expense(user_id=old_chat_id, expense_date=datetime.utcnow().date(), amount=10, name="Spesa", account_id=acc.id))
+        s.add(Income(user_id=old_chat_id, income_date=datetime.utcnow().date(), amount=10, name="Entrata", account_id=acc.id))
+        s.add(Subscription(user_id=old_chat_id, name="Netflix", amount=10))
+        s.add(UserCategory(user_id=old_chat_id, name="Cibo"))
+        s.add(SavedReport(
+            user_id=old_chat_id, report_type="weekly",
+            report_date=datetime.utcnow().date(), text_content="report",
+        ))
+        s.commit()
 
     result = store.reassign_user_chat_id(old_chat_id, new_chat_id)
 
     assert result is True
     with store.Session() as s:
-        plan = s.query(UserPlan).filter_by(chat_id=new_chat_id).first()
-        assert plan is not None
-        assert s.query(UserPlan).filter_by(chat_id=old_chat_id).first() is None
+        # Nessuna tabella deve referenziare ancora old_chat_id
+        for model, col in [
+            (ChatMessage, "chat_id"), (PlanChange, "chat_id"),
+            (DatabaseSchema, "chat_id"), (Feedback, "chat_id"),
+            (UserPlan, "chat_id"), (Account, "user_id"),
+            (Expense, "user_id"), (Income, "user_id"),
+            (Subscription, "user_id"), (UserCategory, "user_id"),
+            (SavedReport, "user_id"),
+        ]:
+            assert s.query(model).filter(getattr(model, col) == old_chat_id).first() is None, (
+                f"{model.__name__}.{col} referenzia ancora old_chat_id"
+            )
+            assert s.query(model).filter(getattr(model, col) == new_chat_id).first() is not None, (
+                f"{model.__name__}.{col} non e' stato spostato su new_chat_id"
+            )
+
         new_user = s.query(User).filter_by(chat_id=new_chat_id).first()
         assert new_user.email == "reassign-fk@example.com"
         assert s.query(User).filter_by(chat_id=old_chat_id).first() is None
