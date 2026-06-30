@@ -787,12 +787,19 @@ class UserStore:
                 session.delete(target_user)
                 session.flush()
 
-            # users.chat_id va aggiornato per primo: le tabelle figlie sotto hanno
-            # una foreign key su users.chat_id, quindi new_chat_id deve gia' esistere
-            # nella tabella padre prima che le query UPDATE successive lo referenzino
-            # (altrimenti PostgreSQL solleva ForeignKeyViolation, a differenza di
-            # SQLite che di default non applica i vincoli FK con la stessa rigidita').
+            # Non si puo' aggiornare users.chat_id in-place in nessun ordine: la FK
+            # (senza ON UPDATE CASCADE) blocca sia l'update della tabella padre mentre
+            # le figlie referenziano ancora old_chat_id, sia l'update delle figlie verso
+            # un new_chat_id che non esiste ancora nella tabella padre. Si clona la riga
+            # users con make_transient (nuovo INSERT con new_chat_id), si spostano le
+            # tabelle figlie sul nuovo valore, e solo alla fine si cancella la vecchia
+            # riga users (quando nessuna FK la referenzia piu').
+            from sqlalchemy.orm import make_transient
+
+            session.expunge(user)
+            make_transient(user)
             user.chat_id = new_chat_id
+            session.add(user)
             session.flush()
 
             # Tabelle di supporto
@@ -809,6 +816,9 @@ class UserStore:
             session.query(Account).filter(Account.user_id == old_chat_id).update({"user_id": new_chat_id})
             session.query(Subscription).filter(Subscription.user_id == old_chat_id).update({"user_id": new_chat_id})
             session.query(UserCategory).filter(UserCategory.user_id == old_chat_id).update({"user_id": new_chat_id})
+
+            # Ora nessuna FK referenzia piu' old_chat_id: la vecchia riga users si puo' cancellare
+            session.query(User).filter(User.chat_id == old_chat_id).delete()
 
             session.commit()
             return True
