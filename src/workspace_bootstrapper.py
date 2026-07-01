@@ -20,20 +20,147 @@ logger = logging.getLogger("financial_agent.bootstrapper")
 # ---------------------------------------------------------------------------
 
 DEFAULT_CATEGORIES: list[str] = [
-    "Alimentari",
-    "Ristoranti",
-    "Trasporti",
-    "Salute",
-    "Casa",
-    "Bollette",
-    "Intrattenimento",
-    "Sport",
+    # Abitazione (35% budget medio ISTAT 2024)
+    "Affitto",
+    "Mutuo",
+    "Bollette luce",
+    "Bollette gas",
+    "Acqua",
+    "Condominio",
+    "Casa Vario",
+    # Alimentari (19% budget ISTAT 2024)
+    "Supermercato",
+    "Mercato",
+    # Ristorazione (6% budget, +4% YoY ISTAT 2024)
+    "Ristorante",
+    "Bar",
+    "Food delivery",
+    # Trasporti (11% budget ISTAT 2024)
+    "Carburante",
+    "Mezzi pubblici",
+    "Taxi",
+    "Parcheggio",
+    "Auto Vario",
+    # Salute
+    "Farmacia",
+    "Medicina",
+    # Comunicazione
+    "Telefono",
+    "Internet",
+    # Persona
     "Abbigliamento",
-    "Tecnologia",
-    "Viaggi",
+    "Scarpe",
+    "Parrucchiere",
+    "Igiene personale",
+    # Finanza
+    "Assicurazioni",
+    "Banca",
+    # Varie
     "Regali",
     "Altro",
 ]
+
+# Categorie aggiuntive per tag stile di vita selezionati in onboarding.
+# Nessuna di queste duplica voci già presenti in DEFAULT_CATEGORIES.
+HOBBY_CATEGORIES: dict[str, list[str]] = {
+    # 💪 Sport / Palestra
+    "palestra": [
+        "Palestra",
+        "Abbigliamento sportivo",
+        "Integratori",
+        "Attrezzatura sportiva",
+    ],
+    # 📺 Streaming / Gaming
+    "streaming": [
+        "Gaming",
+        "Abbonamenti digitali",
+        "E-book",
+    ],
+    # ✈️ Viaggi
+    "viaggi": [
+        "Voli",
+        "Alloggio",
+        "Noleggio auto",
+        "Escursioni",
+        "Visti e documenti",
+        "Assicurazione viaggio",
+        "Souvenir",
+    ],
+    # 🎭 Cinema / Cultura
+    "cultura": [
+        "Cinema",
+        "Teatro",
+        "Concerti",
+        "Musei",
+        "Libri",
+        "Riviste e podcast",
+    ],
+    # 💻 Tech / Elettronica
+    "tech": [
+        "Smartphone",
+        "PC e laptop",
+        "Accessori tech",
+        "Riparazioni tech",
+        "Domotica",
+    ],
+    # 🐾 Animali domestici
+    "animali": [
+        "Veterinario",
+        "Cibo animali",
+        "Farmaci animali",
+        "Toelettatura",
+        "Accessori animali",
+        "Pensione animali",
+        "Assicurazione animali",
+    ],
+    # 🍳 Cibo / Gourmet
+    "cucina": [
+        "Alcolici",
+        "Attrezzatura cucina",
+        "Corsi di cucina",
+    ],
+    # 👶 Famiglia / Figli
+    "famiglia": [
+        "Scuola",
+        "Asilo nido",
+        "Rette universitarie",
+        "Doposcuola",
+        "Sport figli",
+        "Giocattoli",
+        "Abbigliamento bambini",
+        "Babysitter",
+        "Gite scolastiche",
+        "Pediatra",
+    ],
+    # 👗 Moda / Beauty
+    "moda": [
+        "Borse e accessori",
+        "Estetista",
+        "Profumi",
+        "Cosmetici",
+        "Scarpe"
+    ],
+}
+
+
+def categories_from_hobbies(hobbies: list[str]) -> list[str]:
+    """Ritorna categorie deduplicate: DEFAULT_CATEGORIES + extra da hobby selezionati.
+
+    Usata nell'onboarding al posto della chiamata AI — lookup statica basata su
+    dati ISTAT 2024 sulle abitudini finanziarie degli italiani 18-50 anni.
+    """
+    seen: set[str] = set()
+    result: list[str] = []
+    for cat in DEFAULT_CATEGORIES:
+        if cat not in seen:
+            seen.add(cat)
+            result.append(cat)
+    for tag in hobbies:
+        for cat in HOBBY_CATEGORIES.get(tag, []):
+            if cat not in seen:
+                seen.add(cat)
+                result.append(cat)
+    return result
 
 DEFAULT_ACCOUNTS: list[tuple[str, float]] = []
 

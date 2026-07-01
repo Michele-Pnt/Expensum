@@ -22,9 +22,12 @@ psutil>=5.9.0
 psycopg2-binary>=2.9.9
 requests>=2.31.0
 
+posthog>=3.0.0
+
 # Testing Suite
 pytest
 pytest-mock
 pytest-flask
 pytest-cov
 bcrypt
+argon2-cffi

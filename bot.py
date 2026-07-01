@@ -63,6 +63,7 @@ from src.dashboard_message import build_dashboard_text
 from src.llm_usage_tracker import build_request_key, estimate_reserved_tokens, normalize_usage_metadata
 from src.report_builder import WeeklyPlanBuilder, WeeklyPlanData, MonthlyPlanBuilder, MonthlyPlanData
 from src.mistral_client import MistralClient
+from src import analytics
 
 logger = logging.getLogger("financial_agent.bot")
 
@@ -87,14 +88,14 @@ PRIVACY_TERMS_CB = "privacy_terms_placeholder"
 PREFS_EDIT_START_CB = "prefs_edit_start"
 
 # ---------------------------------------------------------------------------
-# Stati wizard onboarding /impostazioni
+# Stati wizard onboarding — 5 step: age gate → lingua → stile vita →
+#                                   notifiche → conferma
 # ---------------------------------------------------------------------------
-(
-    OB_LANGUAGE, OB_CURRENCY, OB_TIMEZONE,
-    OB_TRANSPORT, OB_DINING, OB_HOBBIES,
-    OB_BUDGET, OB_NOTIFICATIONS,
-    OB_CATEGORIES_REVIEW, OB_CONFIRM,
-) = range(10, 20)
+OB_AGE_GATE = 20
+OB_LANGUAGE = 10
+OB_HOBBIES = 15
+OB_NOTIFICATIONS = 17
+OB_CONFIRM = 19
 
 # ---------------------------------------------------------------------------
 # Stati della inizializzazione del template
@@ -1026,6 +1027,7 @@ async def cmd_feedback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         return
         
     _user_store.save_feedback(chat_id, text)
+    analytics.track(chat_id, "feedback_submitted")
     await update.message.reply_text("✅ *Grazie per il tuo feedback!*\n\nIl tuo commento è stato salvato e lo terremo in considerazione per le prossime versioni di Expensum ✨", parse_mode=ParseMode.MARKDOWN)
 
 async def cmd_registra(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1182,6 +1184,7 @@ async def process_accounts_db(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     context.user_data.clear()
     logger.info(f"[User {chat_id}] Registrazione completata con tutti i DB.")
+    analytics.track(chat_id, "user_signed_up", {"auth_method": "telegram", "storage_backend": "notion"})
     await update.message.reply_text(
         "🎊 *Configurazione completata!*\n\n"
         "Ora puoi usare il bot per tracciare le tue finanze. Scrivi una spesa in modo naturale!",
@@ -1351,6 +1354,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         return
 
     # Passa la palla alla nuova funzione condivisa
+    context.user_data["input_method"] = "text"
     await _process_expense_text(update, context, message_text, chat_id)
 
 async def _process_expense_text(update: Update, context: ContextTypes.DEFAULT_TYPE, message_text: str, chat_id: str) -> None:
@@ -1403,6 +1407,7 @@ async def _process_expense_text(update: Update, context: ContextTypes.DEFAULT_TY
 
     if result is None:
         _user_store.increment_ai_metrics(success=False)
+        analytics.track(chat_id, "expense_tracking_failed", {"reason": "ai_unavailable", "input_method": "text"})
         await update.message.reply_text(
             "⚠️ Non sono riuscito ad elaborare il messaggio in questo momento.\n"
             "Il servizio AI è temporaneamente sovraccarico — riprova tra qualche secondo! 🔄",
@@ -1599,6 +1604,7 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         except Exception as _le:
             logger.debug("[User %s] log_message voice fallito: %s", chat_id, _le)
         await update.message.reply_text("🎙️ Ho ascoltato! Sto elaborando...")
+        context.user_data["input_method"] = "voice"
         await _process_expense_text(update, context, message_trascribed, chat_id)
 
     finally:
@@ -1674,6 +1680,7 @@ async def handle_photos(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         except Exception as _le:
             logger.debug("[User %s] log_message photo fallito: %s", chat_id, _le)
         await update.message.reply_text("📸 Foto analizzata! Sto elaborando...")
+        context.user_data["input_method"] = "photo"
         await _process_expense_text(update, context, message_trascribed, chat_id)
 
     finally:
@@ -1735,6 +1742,13 @@ async def _save_to_notion(query, context, chat_id: str, account_id: str | None =
                 _user_store.log_message(chat_id, source="telegram", role="bot", text=_success_text, metadata=data)
             except Exception as _le:
                 logger.debug("[User %s] log_message expense saved fallito: %s", chat_id, _le)
+
+        input_method = context.user_data.pop("input_method", "text")
+        analytics.track(chat_id, "expense_tracked", {
+            "input_method": input_method,
+            "storage_backend": _user_store.get_user(chat_id).storage_backend if _user_store.get_user(chat_id) else "unknown",
+            "transaction_type": data.get("type", "expense"),
+        })
 
         # Aggiorna la dashboard pinnata in background (se esiste)
         try:
@@ -1828,8 +1842,10 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         return
 
     if query.data == "cancel":
+        input_method = context.user_data.pop("input_method", "text")
         context.user_data.pop("pending_expense", None)
         context.user_data.pop("waiting_for_amount", None)
+        analytics.track(chat_id, "expense_tracking_failed", {"reason": "user_cancelled", "input_method": input_method})
         await query.edit_message_text("❌ Operazione annullata.")
         return
 
@@ -2011,6 +2027,7 @@ def _daily_dashboard_job(app: Application, loop: asyncio.AbstractEventLoop) -> N
 
                 # Salva
                 _user_store.set_pinned_dashboard_msg_id(chat_id, msg.message_id)
+                analytics.track(chat_id, "notification_sent", {"notification_type": "daily_dashboard"})
                 sent += 1
                 logger.info(f"[DailyDashboard] Dashboard inviata a {chat_id}")
 
@@ -2044,6 +2061,7 @@ def _weekly_plan_job(app: Application, loop: asyncio.AbstractEventLoop) -> None:
             chat_id = user.chat_id
             try:
                 await _build_and_send_weekly_plan(chat_id=chat_id, bot=bot)
+                analytics.track(chat_id, "notification_sent", {"notification_type": "weekly_plan"})
                 sent += 1
                 logger.info(f"[WeeklyPlan] Piano inviato a {chat_id}")
             except Exception as e:
@@ -2075,6 +2093,7 @@ def _monthly_plan_job(app: Application, loop: asyncio.AbstractEventLoop) -> None
             chat_id = user.chat_id
             try:
                 await _build_and_send_monthly_plan(chat_id=chat_id, bot=bot)
+                analytics.track(chat_id, "notification_sent", {"notification_type": "monthly_plan"})
                 sent += 1
                 logger.info(f"[MonthlyPlan] Piano inviato a {chat_id}")
             except Exception as e:
@@ -2221,33 +2240,98 @@ def _ob_keyboard(options: list[tuple[str, str]], *, skip: bool = False, back: bo
     return InlineKeyboardMarkup(rows)
 
 
-def _ob_progress(step: int, total: int = 10) -> str:
+_HOBBY_LABELS: dict[str, str] = {
+    "palestra":  "💪 Palestra",
+    "streaming": "📺 Streaming",
+    "viaggi":    "✈️ Viaggi",
+    "cultura":   "🎭 Cultura",
+    "tech":      "💻 Tech",
+    "animali":   "🐾 Animali",
+    "cucina":    "🍳 Cucina",
+    "famiglia":  "👶 Famiglia",
+    "moda":      "👗 Moda",
+}
+
+
+def _ob_hobbies_keyboard(selected: list[str]) -> InlineKeyboardMarkup:
+    """Griglia toggle per la selezione stile di vita (9 tag)."""
+    keys = list(_HOBBY_LABELS.keys())
+    rows = []
+    for i in range(0, len(keys), 2):
+        row = []
+        for k in keys[i:i + 2]:
+            icon = "✅ " if k in selected else ""
+            row.append(InlineKeyboardButton(f"{icon}{_HOBBY_LABELS[k]}", callback_data=f"ob_hob_{k}"))
+        rows.append(row)
+    rows.append([InlineKeyboardButton("✅ Avanti →", callback_data="ob_hob_done")])
+    rows.append([
+        InlineKeyboardButton("↩ Indietro", callback_data="ob_back"),
+        InlineKeyboardButton("⏭ Salta", callback_data="ob_skip"),
+    ])
+    return InlineKeyboardMarkup(rows)
+
+
+def _ob_progress(step: int, total: int = 5) -> str:
     filled = round((step / total) * 10)
     bar = "█" * filled + "░" * (10 - filled)
     return f"[{bar}] Step {step}/{total}\n\n"
 
 
 async def cmd_onboarding(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Avvia il wizard preferenze. Richiamabile da /impostazioni_wizard (legacy)
-    o dal bottone "✏️ Modifica preferenze" del menu /impostazioni (callback)."""
+    """Avvia il wizard preferenze (age gate → lingua → stile vita → notifiche → conferma)."""
     if not _is_authorized(update):
         await _reply_not_authorized(update)
         return ConversationHandler.END
     context.user_data.clear()
-    context.user_data["lifestyle"] = {}
-    context.user_data["categories"] = []
+    context.user_data["hobbies"] = []
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("✅ Sì, ho 18 anni o più", callback_data="ob_age_yes")],
+        [InlineKeyboardButton("❌ Sono minorenne", callback_data="ob_age_no")],
+    ])
     msg = (
-        "👋 <b>Configurazione Expensum</b>\n\n"
-        "In pochi step personalizzerò il tuo spazio.\n\n"
-        f"{_ob_progress(1)}"
-        "🌍 <b>Che lingua preferisci?</b>"
+        "🔞 <b>Verifica età</b>\n\n"
+        "Expensum è riservato a utenti maggiorenni (18+).\n"
+        "<i>D.Lgs. 101/2018 — capacità contrattuale</i>"
     )
-    keyboard = _ob_keyboard([("🇮🇹 Italiano", "ob_lang_it"), ("🇬🇧 English", "ob_lang_en")], back=False)
     if update.callback_query:
         await update.callback_query.answer()
         await update.callback_query.edit_message_text(msg, parse_mode=ParseMode.HTML, reply_markup=keyboard)
     elif update.message:
         await update.message.reply_text(msg, parse_mode=ParseMode.HTML, reply_markup=keyboard)
+    return OB_AGE_GATE
+
+
+async def ob_handle_age_gate(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Gestisce la verifica età 18+. Se confermata, auto-rileva valuta/timezone e procede."""
+    query = update.callback_query
+    await query.answer()
+    if query.data == "ob_age_no":
+        await query.edit_message_text(
+            "⚠️ <b>Servizio riservato ai maggiorenni</b>\n\n"
+            "Expensum è disponibile solo per utenti con 18 anni o più.\n"
+            "Per ulteriori informazioni consulta la nostra Privacy Policy.",
+            parse_mode=ParseMode.HTML,
+        )
+        return ConversationHandler.END
+    chat_id = str(query.from_user.id)
+    _user_store.set_age_attestation(chat_id, ip_address=None, platform="telegram")
+    # Auto-rileva valuta e timezone dal language_code Telegram
+    lc = (query.from_user.language_code or "it").lower()
+    if lc.startswith("en-us") or lc == "en_us":
+        currency, tz = "USD", "America/New_York"
+    elif lc.startswith("en-gb") or lc == "en_gb":
+        currency, tz = "GBP", "Europe/London"
+    elif lc.startswith("en"):
+        currency, tz = "GBP", "Europe/London"
+    else:
+        currency, tz = "EUR", "Europe/Rome"
+    _user_store.save_onboarding_progress(chat_id, "currency", {"currency": currency})
+    _user_store.save_onboarding_progress(chat_id, "timezone", {"timezone": tz})
+    keyboard = _ob_keyboard([("🇮🇹 Italiano", "ob_lang_it"), ("🇬🇧 English", "ob_lang_en")], back=False)
+    await query.edit_message_text(
+        f"{_ob_progress(1)}🌍 <b>Che lingua preferisci?</b>",
+        parse_mode=ParseMode.HTML, reply_markup=keyboard,
+    )
     return OB_LANGUAGE
 
 
@@ -2257,96 +2341,13 @@ async def ob_handle_language(update: Update, context: ContextTypes.DEFAULT_TYPE)
     lang = "it" if query.data == "ob_lang_it" else "en"
     context.user_data["language"] = lang
     _user_store.save_onboarding_progress(str(query.from_user.id), "language", {"language": lang})
-    keyboard = _ob_keyboard([
-        ("€ EUR", "ob_cur_EUR"), ("$ USD", "ob_cur_USD"),
-        ("£ GBP", "ob_cur_GBP"), ("Fr CHF", "ob_cur_CHF"),
-    ])
     await query.edit_message_text(
-        f"{_ob_progress(2)}💱 <b>Valuta principale?</b>",
-        parse_mode=ParseMode.HTML, reply_markup=keyboard,
+        f"{_ob_progress(2)}🎯 <b>Stile di vita</b>\n"
+        "<i>Seleziona le aree che ti riguardano (opzionale). Tocca più volte per aggiungere o rimuovere.</i>",
+        parse_mode=ParseMode.HTML,
+        reply_markup=_ob_hobbies_keyboard([]),
     )
-    return OB_CURRENCY
-
-
-async def ob_handle_currency(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    query = update.callback_query
-    await query.answer()
-    if query.data == "ob_back":
-        keyboard = _ob_keyboard([("🇮🇹 Italiano", "ob_lang_it"), ("🇬🇧 English", "ob_lang_en")], back=False)
-        await query.edit_message_text(f"{_ob_progress(1)}🌍 <b>Lingua?</b>", parse_mode=ParseMode.HTML, reply_markup=keyboard)
-        return OB_LANGUAGE
-    currency = query.data.replace("ob_cur_", "")
-    context.user_data["currency"] = currency
-    _user_store.save_onboarding_progress(str(query.from_user.id), "currency", {"currency": currency})
-    keyboard = _ob_keyboard([
-        ("🇮🇹 Europe/Rome", "ob_tz_Europe/Rome"),
-        ("🇬🇧 Europe/London", "ob_tz_Europe/London"),
-        ("🇺🇸 America/New_York", "ob_tz_America/New_York"),
-        ("🌏 Asia/Tokyo", "ob_tz_Asia/Tokyo"),
-    ])
-    await query.edit_message_text(
-        f"{_ob_progress(3)}🕐 <b>Fuso orario?</b>",
-        parse_mode=ParseMode.HTML, reply_markup=keyboard,
-    )
-    return OB_TIMEZONE
-
-
-async def ob_handle_timezone(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    query = update.callback_query
-    await query.answer()
-    if query.data == "ob_back":
-        keyboard = _ob_keyboard([("€ EUR", "ob_cur_EUR"), ("$ USD", "ob_cur_USD"), ("£ GBP", "ob_cur_GBP"), ("Fr CHF", "ob_cur_CHF")])
-        await query.edit_message_text(f"{_ob_progress(2)}💱 <b>Valuta principale?</b>", parse_mode=ParseMode.HTML, reply_markup=keyboard)
-        return OB_CURRENCY
-    tz = query.data.replace("ob_tz_", "")
-    context.user_data["timezone"] = tz
-    _user_store.save_onboarding_progress(str(query.from_user.id), "timezone", {"timezone": tz})
-    keyboard = _ob_keyboard([
-        ("🚗 Auto / Moto", "ob_tr_auto"),
-        ("🚌 Mezzi pubblici", "ob_tr_mezzi"),
-        ("🚶 A piedi / Bici", "ob_tr_piedi"),
-    ], skip=True)
-    await query.edit_message_text(
-        f"{_ob_progress(4)}🚗 <b>Come ti sposti di solito?</b>\n<i>(opzionale)</i>",
-        parse_mode=ParseMode.HTML, reply_markup=keyboard,
-    )
-    return OB_TRANSPORT
-
-
-async def ob_handle_transport(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    query = update.callback_query
-    await query.answer()
-    if query.data == "ob_back":
-        keyboard = _ob_keyboard([("🇮🇹 Europe/Rome", "ob_tz_Europe/Rome"), ("🇬🇧 Europe/London", "ob_tz_Europe/London"), ("🇺🇸 America/New_York", "ob_tz_America/New_York"), ("🌏 Asia/Tokyo", "ob_tz_Asia/Tokyo")])
-        await query.edit_message_text(f"{_ob_progress(3)}🕐 <b>Fuso orario?</b>", parse_mode=ParseMode.HTML, reply_markup=keyboard)
-        return OB_TIMEZONE
-    if query.data != "ob_skip":
-        transport = query.data.replace("ob_tr_", "")
-        context.user_data["lifestyle"]["transport"] = transport
-        _user_store.save_onboarding_progress(str(query.from_user.id), "transport", {"transport": transport})
-    keyboard = _ob_keyboard([
-        ("🍕 Spesso (3+/sett)", "ob_din_spesso"),
-        ("🍽️ A volte (1-2/sett)", "ob_din_a_volte"),
-        ("🏠 Raramente", "ob_din_raramente"),
-    ], skip=True)
-    await query.edit_message_text(
-        f"{_ob_progress(5)}🍽️ <b>Mangi spesso fuori casa?</b>\n<i>(opzionale)</i>",
-        parse_mode=ParseMode.HTML, reply_markup=keyboard,
-    )
-    return OB_DINING
-
-
-async def ob_handle_dining(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    query = update.callback_query
-    await query.answer()
-    if query.data == "ob_back":
-        keyboard = _ob_keyboard([("🚗 Auto / Moto", "ob_tr_auto"), ("🚌 Mezzi pubblici", "ob_tr_mezzi"), ("🚶 A piedi / Bici", "ob_tr_piedi")], skip=True)
-        await query.edit_message_text(f"{_ob_progress(4)}🚗 <b>Come ti sposti?</b>", parse_mode=ParseMode.HTML, reply_markup=keyboard)
-        return OB_TRANSPORT
-    if query.data != "ob_skip":
-        dining = query.data.replace("ob_din_", "")
-        context.user_data["lifestyle"]["dining"] = dining
-        _user_store.save_onboarding_progress(str(query.from_user.id), "dining", {"dining": dining})
+    return OB_HOBBIES
     keyboard = _ob_keyboard([
         ("💪 Sport / Palestra", "ob_hob_palestra"),
         ("📺 Streaming / Gaming", "ob_hob_streaming"),
@@ -2370,109 +2371,64 @@ async def ob_handle_dining(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
 
 async def ob_handle_hobbies(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Toggle multi-selezione stile di vita (9 tag). Back → lingua, Done/Skip → notifiche."""
     query = update.callback_query
     await query.answer()
+    hobbies: list[str] = context.user_data.setdefault("hobbies", [])
+
     if query.data == "ob_back":
-        keyboard = _ob_keyboard([("🍕 Spesso (3+/sett)", "ob_din_spesso"), ("🍽️ A volte", "ob_din_a_volte"), ("🏠 Raramente", "ob_din_raramente")], skip=True)
-        await query.edit_message_text(f"{_ob_progress(5)}🍽️ <b>Mangi spesso fuori?</b>", parse_mode=ParseMode.HTML, reply_markup=keyboard)
-        return OB_DINING
+        keyboard = _ob_keyboard([("🇮🇹 Italiano", "ob_lang_it"), ("🇬🇧 English", "ob_lang_en")], back=False)
+        await query.edit_message_text(
+            f"{_ob_progress(1)}🌍 <b>Che lingua preferisci?</b>",
+            parse_mode=ParseMode.HTML, reply_markup=keyboard,
+        )
+        return OB_LANGUAGE
 
     if query.data in ("ob_hob_done", "ob_skip"):
-        hobbies = context.user_data.get("hobbies_selected", [])
-        if hobbies:
-            context.user_data["lifestyle"]["hobbies"] = hobbies
-            _user_store.save_onboarding_progress(str(query.from_user.id), "hobbies", {"hobbies": hobbies})
+        _user_store.save_onboarding_progress(str(query.from_user.id), "hobbies", {"hobbies": hobbies})
+        keyboard = _ob_keyboard([
+            ("🔔 Sì, alle 08:00", "ob_notif_08:00"),
+            ("🔕 No grazie", "ob_notif_off"),
+        ], skip=True)
         await query.edit_message_text(
-            f"{_ob_progress(7)}💰 <b>Budget mensile indicativo?</b>\n"
-            "<i>Rispondi con un numero (es. 1500) oppure salta.</i>",
-            parse_mode=ParseMode.HTML,
-            reply_markup=_ob_keyboard([], skip=True),
+            f"{_ob_progress(4)}🔔 <b>Vuoi un riepilogo giornaliero?</b>",
+            parse_mode=ParseMode.HTML, reply_markup=keyboard,
         )
-        context.user_data["awaiting_budget_text"] = True
-        return OB_BUDGET
+        return OB_NOTIFICATIONS
 
-    # Toggle hobby
-    hobby_key = query.data.replace("ob_hob_", "")
-    hobbies: list = context.user_data.setdefault("hobbies_selected", [])
-    if hobby_key in hobbies:
-        hobbies.remove(hobby_key)
-    else:
-        hobbies.append(hobby_key)
+    # Toggle tag
+    tag = query.data.replace("ob_hob_", "")
+    if tag in _HOBBY_LABELS:
+        if tag in hobbies:
+            hobbies.remove(tag)
+        else:
+            hobbies.append(tag)
+        context.user_data["hobbies"] = hobbies
 
-    labels = {"palestra": "💪 Palestra", "streaming": "📺 Streaming", "viaggi": "✈️ Viaggi", "cultura": "🎭 Cinema"}
-    def _btn(k: str) -> InlineKeyboardButton:
-        sel = "✅ " if k in hobbies else ""
-        return InlineKeyboardButton(f"{sel}{labels[k]}", callback_data=f"ob_hob_{k}")
-
+    selected_str = ", ".join(_HOBBY_LABELS[h] for h in hobbies) if hobbies else "nessuno"
     await query.edit_message_text(
-        f"{_ob_progress(6)}🎮 <b>Hobby e interessi?</b>\n"
-        f"<i>Selezionati: {', '.join(hobbies) or 'nessuno'}</i>",
+        f"{_ob_progress(2)}🎯 <b>Stile di vita</b>\n"
+        f"<i>Selezionati: {selected_str}</i>",
         parse_mode=ParseMode.HTML,
-        reply_markup=InlineKeyboardMarkup([
-            [_btn("palestra"), _btn("streaming")],
-            [_btn("viaggi"), _btn("cultura")],
-            [InlineKeyboardButton("✅ Avanti →", callback_data="ob_hob_done")],
-            [InlineKeyboardButton("↩ Indietro", callback_data="ob_back"),
-             InlineKeyboardButton("⏭ Salta", callback_data="ob_skip")],
-        ]),
+        reply_markup=_ob_hobbies_keyboard(hobbies),
     )
     return OB_HOBBIES
 
 
-async def ob_handle_budget(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Gestisce input testuale per il budget."""
-    if update.callback_query:
-        query = update.callback_query
-        await query.answer()
-        if query.data == "ob_back":
-            await query.edit_message_text(
-                f"{_ob_progress(6)}🎮 <b>Hobby e interessi?</b>",
-                parse_mode=ParseMode.HTML,
-                reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("💪 Palestra", callback_data="ob_hob_palestra"),
-                     InlineKeyboardButton("📺 Streaming", callback_data="ob_hob_streaming")],
-                    [InlineKeyboardButton("✈️ Viaggi", callback_data="ob_hob_viaggi"),
-                     InlineKeyboardButton("🎭 Cinema", callback_data="ob_hob_cultura")],
-                    [InlineKeyboardButton("✅ Avanti →", callback_data="ob_hob_done")],
-                    [InlineKeyboardButton("↩ Indietro", callback_data="ob_back"),
-                     InlineKeyboardButton("⏭ Salta", callback_data="ob_skip")],
-                ]),
-            )
-            return OB_HOBBIES
-        # ob_skip → vai a notifiche
-    elif update.message:
-        text = update.message.text.strip()
-        try:
-            budget = float(text.replace(",", "."))
-            _user_store.save_onboarding_progress(str(update.effective_user.id), "budget", {"budget": budget})
-            context.user_data["budget"] = budget
-        except ValueError:
-            await update.message.reply_text("⚠️ Inserisci solo un numero (es. 1500). Riprova o /skip.")
-            return OB_BUDGET
-
-    keyboard = _ob_keyboard([
-        ("🔔 Sì, alle 08:00", "ob_notif_08:00"),
-        ("🔕 No grazie", "ob_notif_off"),
-    ], skip=True)
-    if update.effective_message:
-        await update.effective_message.reply_text(
-            f"{_ob_progress(8)}🔔 <b>Vuoi un riepilogo giornaliero?</b>",
-            parse_mode=ParseMode.HTML, reply_markup=keyboard,
-        )
-    return OB_NOTIFICATIONS
-
-
 async def ob_handle_notifications(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Gestisce la preferenza riepilogo giornaliero. Back → hobbies, next → confirm."""
     query = update.callback_query
     await query.answer()
     if query.data == "ob_back":
+        hobbies: list[str] = context.user_data.get("hobbies", [])
+        selected_str = ", ".join(_HOBBY_LABELS[h] for h in hobbies) if hobbies else "nessuno"
         await query.edit_message_text(
-            f"{_ob_progress(7)}💰 <b>Budget mensile?</b>\n<i>Rispondi con un numero oppure salta.</i>",
+            f"{_ob_progress(2)}🎯 <b>Stile di vita</b>\n"
+            f"<i>Selezionati: {selected_str}</i>",
             parse_mode=ParseMode.HTML,
-            reply_markup=_ob_keyboard([], skip=True),
+            reply_markup=_ob_hobbies_keyboard(hobbies),
         )
-        context.user_data["awaiting_budget_text"] = True
-        return OB_BUDGET
+        return OB_HOBBIES
     if query.data != "ob_skip" and query.data != "ob_notif_off":
         notif_time = query.data.replace("ob_notif_", "")
         _user_store.save_onboarding_progress(str(query.from_user.id), "notifications", {
@@ -2484,123 +2440,61 @@ async def ob_handle_notifications(update: Update, context: ContextTypes.DEFAULT_
             "notifications_enabled": False,
         })
 
-    # Step 9: generazione categorie
-    await query.edit_message_text(
-        f"{_ob_progress(9)}⏳ <b>Sto pensando alle categorie giuste per te…</b>",
-        parse_mode=ParseMode.HTML,
+    # Mostra step 5/5 — riepilogo e conferma
+    chat_id = str(query.from_user.id)
+    prefs = _user_store.get_user_preferences(chat_id)
+    hobbies = context.user_data.get("hobbies", [])
+    hobby_labels = ", ".join(_HOBBY_LABELS.get(h, h) for h in hobbies) or "nessuno"
+    summary = (
+        f"{_ob_progress(5)}🎉 <b>Tutto pronto!</b>\n\n"
+        f"🌍 Lingua: {prefs.get('preferred_language', 'it').upper()}\n"
+        f"💱 Valuta: {prefs.get('currency', 'EUR')} <i>(rilevata automaticamente)</i>\n"
+        f"🕐 Timezone: {prefs.get('timezone', 'Europe/Rome')} <i>(rilevata automaticamente)</i>\n"
+        f"🎯 Interessi: {hobby_labels}\n\n"
+        "Confermi e inizia a usare Expensum?"
     )
-    lifestyle = context.user_data.get("lifestyle", {})
-    try:
-        mc = MistralClient()
-        categories = mc.generate_lifestyle_categories(lifestyle)
-    except Exception:
-        from src.workspace_bootstrapper import DEFAULT_CATEGORIES
-        categories = list(DEFAULT_CATEGORIES)
-
-    context.user_data["categories_all"] = categories
-    context.user_data["categories_selected"] = set(categories)
-
-    await _show_categories_keyboard(query, context)
-    return OB_CATEGORIES_REVIEW
-
-
-async def _show_categories_keyboard(query, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Edita il messaggio mostrando la griglia di categorie toggle."""
-    all_cats: list[str] = context.user_data.get("categories_all", [])
-    selected: set[str] = context.user_data.get("categories_selected", set())
-
-    rows = []
-    for i in range(0, len(all_cats), 2):
-        row = []
-        for cat in all_cats[i:i + 2]:
-            icon = "✅" if cat in selected else "☐"
-            row.append(InlineKeyboardButton(f"{icon} {cat}", callback_data=f"ob_cat_toggle:{cat}"))
-        rows.append(row)
-    rows.append([InlineKeyboardButton(
-        f"✅ Conferma {len(selected)} categorie", callback_data="ob_cat_confirm"
-    )])
-    rows.append([InlineKeyboardButton("↩ Indietro", callback_data="ob_back")])
-
     await query.edit_message_text(
-        f"{_ob_progress(9)}📂 <b>Le tue categorie</b>\n"
-        "<i>Tocca per aggiungere/rimuovere. Poi conferma.</i>",
+        summary,
         parse_mode=ParseMode.HTML,
-        reply_markup=InlineKeyboardMarkup(rows),
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("🚀 Inizia!", callback_data="ob_confirm_yes")],
+            [InlineKeyboardButton("↩ Indietro", callback_data="ob_back")],
+        ]),
     )
+    return OB_CONFIRM
 
 
-async def ob_handle_categories_review(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+async def ob_handle_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Step 5/5 — conferma finale. Crea categorie via lookup table e completa onboarding."""
     query = update.callback_query
     await query.answer()
 
     if query.data == "ob_back":
-        keyboard = _ob_keyboard([("🔔 Sì, alle 08:00", "ob_notif_08:00"), ("🔕 No grazie", "ob_notif_off")], skip=True)
+        keyboard = _ob_keyboard([
+            ("🔔 Sì, alle 08:00", "ob_notif_08:00"),
+            ("🔕 No grazie", "ob_notif_off"),
+        ], skip=True)
         await query.edit_message_text(
-            f"{_ob_progress(8)}🔔 <b>Riepilogo giornaliero?</b>",
+            f"{_ob_progress(4)}🔔 <b>Vuoi un riepilogo giornaliero?</b>",
             parse_mode=ParseMode.HTML, reply_markup=keyboard,
         )
         return OB_NOTIFICATIONS
 
-    if query.data.startswith("ob_cat_toggle:"):
-        cat = query.data.removeprefix("ob_cat_toggle:")
-        selected: set[str] = context.user_data.get("categories_selected", set())
-        if cat in selected:
-            selected.discard(cat)
-        else:
-            selected.add(cat)
-        context.user_data["categories_selected"] = selected
-        await _show_categories_keyboard(query, context)
-        return OB_CATEGORIES_REVIEW
-
-    if query.data == "ob_cat_confirm":
-        selected = context.user_data.get("categories_selected", set())
-        context.user_data["final_categories"] = list(selected)
-        cats_preview = ", ".join(list(selected)[:5])
-        if len(selected) > 5:
-            cats_preview += f"… +{len(selected) - 5}"
-        prefs = _user_store.get_user_preferences(str(query.from_user.id))
-        summary = (
-            f"{_ob_progress(10)}🎉 <b>Tutto pronto!</b>\n\n"
-            f"🌍 Lingua: {prefs.get('preferred_language', 'it').upper()}\n"
-            f"💱 Valuta: {prefs.get('currency', 'EUR')}\n"
-            f"🕐 Timezone: {prefs.get('timezone', 'Europe/Rome')}\n"
-            f"📂 Categorie ({len(selected)}): {cats_preview}\n\n"
-            "Confermi e inizia a usare Expensum?"
-        )
-        await query.edit_message_text(
-            summary,
-            parse_mode=ParseMode.HTML,
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("🚀 Inizia!", callback_data="ob_confirm_yes")],
-                [InlineKeyboardButton("↩ Indietro", callback_data="ob_back")],
-            ]),
-        )
-        return OB_CONFIRM
-
-    return OB_CATEGORIES_REVIEW
-
-
-async def ob_handle_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    query = update.callback_query
-    await query.answer()
-
-    if query.data == "ob_back":
-        await _show_categories_keyboard(query, context)
-        return OB_CATEGORIES_REVIEW
-
     chat_id = str(query.from_user.id)
-    selected_categories = context.user_data.get("final_categories", [])
+    hobbies: list[str] = context.user_data.get("hobbies", [])
 
     await query.edit_message_text("⏳ Creo le categorie e finalizzo…", parse_mode=ParseMode.HTML)
 
     try:
+        from src.workspace_bootstrapper import bootstrap_lifestyle_categories, categories_from_hobbies
+        categories = categories_from_hobbies(hobbies)
         storage = _get_storage(chat_id)
-        from src.workspace_bootstrapper import bootstrap_lifestyle_categories
-        bootstrap_lifestyle_categories(storage, selected_categories)
+        bootstrap_lifestyle_categories(storage, categories)
     except Exception as e:
         logger.warning("Errore bootstrap categorie onboarding Telegram: %s", e)
 
     _user_store.complete_onboarding(chat_id)
+    analytics.track(chat_id, "onboarding_completed", {"platform": "telegram", "hobbies": hobbies})
 
     await query.edit_message_text(
         "✅ <b>Configurazione completata!</b>\n\n"
@@ -2793,18 +2687,10 @@ def _build_onboarding_conversation_handler() -> ConversationHandler:
     return ConversationHandler(
         entry_points=[CallbackQueryHandler(cmd_onboarding, pattern=f"^{PREFS_EDIT_START_CB}$")],
         states={
+            OB_AGE_GATE: [CallbackQueryHandler(ob_handle_age_gate, pattern="^ob_age_")],
             OB_LANGUAGE: [CallbackQueryHandler(ob_handle_language, pattern="^ob_lang_")],
-            OB_CURRENCY: [CallbackQueryHandler(ob_handle_currency, pattern="^ob_(cur_|back)")],
-            OB_TIMEZONE: [CallbackQueryHandler(ob_handle_timezone, pattern="^ob_(tz_|back)")],
-            OB_TRANSPORT: [CallbackQueryHandler(ob_handle_transport, pattern="^ob_(tr_|back|skip)")],
-            OB_DINING: [CallbackQueryHandler(ob_handle_dining, pattern="^ob_(din_|back|skip)")],
             OB_HOBBIES: [CallbackQueryHandler(ob_handle_hobbies, pattern="^ob_(hob_|back|skip)")],
-            OB_BUDGET: [
-                CallbackQueryHandler(ob_handle_budget, pattern="^ob_(back|skip)"),
-                MessageHandler(filters.TEXT & ~filters.COMMAND, ob_handle_budget),
-            ],
             OB_NOTIFICATIONS: [CallbackQueryHandler(ob_handle_notifications, pattern="^ob_(notif_|back|skip)")],
-            OB_CATEGORIES_REVIEW: [CallbackQueryHandler(ob_handle_categories_review, pattern="^ob_(cat_|back)")],
             OB_CONFIRM: [CallbackQueryHandler(ob_handle_confirm, pattern="^ob_(confirm_|back)")],
         },
         fallbacks=[CommandHandler("impostazioni", _cancel_wizard_show_menu)],

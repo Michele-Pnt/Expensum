@@ -43,6 +43,56 @@ def _get_fernet() -> Fernet:
     return Fernet(key)
 
 
+# ---------------------------------------------------------------------------
+# Hashing password — Argon2id (con migrazione trasparente da bcrypt legacy)
+# ---------------------------------------------------------------------------
+from argon2 import PasswordHasher
+from argon2.exceptions import VerifyMismatchError, InvalidHashError, VerificationError
+
+# Istanza condivisa con i parametri di default di argon2-cffi (Argon2id).
+_password_hasher = PasswordHasher()
+
+
+def hash_password(password: str) -> str:
+    """Genera un hash Argon2id della password."""
+    return _password_hasher.hash(password)
+
+
+def verify_password_hash(password: str, stored_hash: str) -> tuple[bool, Optional[str]]:
+    """Verifica la password contro l'hash memorizzato.
+
+    Supporta sia hash **Argon2id** (nuovo standard) sia hash **bcrypt** legacy.
+    Ritorna `(is_valid, new_hash)` dove `new_hash` è un nuovo hash Argon2id da
+    persistere quando è opportuno ri-hashare (hash bcrypt legacy o parametri
+    Argon2 obsoleti), altrimenti `None`.
+    """
+    if not stored_hash:
+        return False, None
+
+    if stored_hash.startswith("$argon2"):
+        try:
+            _password_hasher.verify(stored_hash, password)
+        except (VerifyMismatchError, InvalidHashError, VerificationError):
+            return False, None
+        new_hash = None
+        try:
+            if _password_hasher.check_needs_rehash(stored_hash):
+                new_hash = _password_hasher.hash(password)
+        except InvalidHashError:
+            new_hash = _password_hasher.hash(password)
+        return True, new_hash
+
+    # Fallback: hash bcrypt legacy → verifica e, se valido, ri-hasha ad Argon2id.
+    import bcrypt
+    try:
+        ok = bcrypt.checkpw(password.encode(), stored_hash.encode())
+    except (ValueError, TypeError):
+        return False, None
+    if not ok:
+        return False, None
+    return True, hash_password(password)
+
+
 class EncryptedString(types.TypeDecorator):
     """Colonna String che cifra/decifra i valori con Fernet (AES-128-CBC + HMAC)."""
 
@@ -133,6 +183,9 @@ class User(Base):
     privacy_policy_version_accepted = Column(String, nullable=True)
     privacy_accepted_at = Column(DateTime, nullable=True)
 
+    # Attestazione età 18+ (D.Lgs. 101/2018 + capacità contrattuale Pro)
+    age_attestation_at = Column(DateTime, nullable=True)
+
     def __repr__(self):
         return f"<User(chat_id={self.chat_id}, username='{self.username}')>"
 
@@ -221,6 +274,45 @@ class AuditLog(Base):
 
     __table_args__ = (
         Index("ix_audit_log_user_timestamp", "user_id", "timestamp"),
+    )
+
+
+class DataBreach(Base):
+    """Registro delle violazioni di dati personali (Art. 33(5) GDPR).
+
+    Deve documentare **ogni** violazione — anche quelle non notificate al
+    Garante — così che l'Autorità possa verificarne la gestione. A differenza
+    di `audit_log` (retention 365gg) questi record NON hanno `expires_at`:
+    vanno conservati a lungo per accountability.
+    """
+    __tablename__ = "data_breaches"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    # Riferimento leggibile incident-YYYYMMDD-NNN
+    breach_ref = Column(String(32), nullable=False, unique=True)
+    detected_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    discovered_by = Column(String(100), nullable=True)  # es. 'sentry', 'utente', 'vendor:mistral'
+    nature = Column(Text, nullable=True)                # descrizione della violazione
+    affected_data_categories = Column(JSON, nullable=True)  # es. ["identita", "transazioni"]
+    affected_users_count = Column(Integer, nullable=True)
+    risk_level = Column(String(10), nullable=True)      # 'low' | 'medium' | 'high'
+    # Notifica al Garante (Art. 33)
+    garante_notified = Column(Boolean, nullable=False, default=False)
+    garante_notified_at = Column(DateTime, nullable=True)
+    garante_receipt_ref = Column(String(100), nullable=True)  # protocollo/ricevuta portale
+    # Comunicazione agli interessati (Art. 34)
+    users_notified = Column(Boolean, nullable=False, default=False)
+    users_notified_at = Column(DateTime, nullable=True)
+    art34_exempt_reason = Column(Text, nullable=True)   # motivo esenzione Art. 34(3), se applicabile
+    # Gestione
+    containment_measures = Column(Text, nullable=True)
+    root_cause = Column(Text, nullable=True)
+    status = Column(String(12), nullable=False, default="open")  # open|contained|notified|closed
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    updated_at = Column(DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    __table_args__ = (
+        Index("ix_data_breaches_detected_at", "detected_at"),
     )
 
 
@@ -663,10 +755,9 @@ class UserStore:
             }
 
     def set_credentials(self, chat_id: str, email: str, password: str) -> None:
-        """Salva email e hash bcrypt della password per un utente."""
-        import bcrypt
+        """Salva email e hash Argon2id della password per un utente."""
         chat_id = str(chat_id)
-        hashed = bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
+        hashed = hash_password(password)
         with self.Session() as session:
             user = session.query(User).filter(User.chat_id == chat_id).first()
             if user:
@@ -687,9 +778,8 @@ class UserStore:
 
     def update_password(self, chat_id: str, new_password: str) -> bool:
         """Aggiorna solo l'hash della password di un utente già registrato. Ritorna False se l'utente non esiste."""
-        import bcrypt
         chat_id = str(chat_id)
-        hashed = bcrypt.hashpw(new_password.encode(), bcrypt.gensalt()).decode()
+        hashed = hash_password(new_password)
         with self.Session() as session:
             user = session.query(User).filter(User.chat_id == chat_id).first()
             if not user:
@@ -713,25 +803,43 @@ class UserStore:
                 User.email == email.lower().strip(),
             ).first()
 
+    def _persist_password_hash(self, chat_id: str, new_hash: str) -> None:
+        """Aggiorna in modo mirato l'hash password (usato per il rehash trasparente)."""
+        with self.Session() as session:
+            session.query(User).filter(User.chat_id == str(chat_id)).update(
+                {"password_hash": new_hash}
+            )
+            session.commit()
+
     def verify_password(self, email: str, password: str) -> User | None:
-        """Verifica email+password. Ritorna l'utente se le credenziali sono corrette, None altrimenti."""
-        import bcrypt
+        """Verifica email+password. Ritorna l'utente se le credenziali sono corrette, None altrimenti.
+
+        Supporta hash Argon2id e bcrypt legacy: se la verifica ha successo su un
+        hash legacy/obsoleto, la password viene ri-hashata ad Argon2id e salvata.
+        """
         user = self.get_user_by_email(email)
         if not user or not user.password_hash:
             return None
-        if bcrypt.checkpw(password.encode(), user.password_hash.encode()):
-            return user
-        return None
+        ok, new_hash = verify_password_hash(password, user.password_hash)
+        if not ok:
+            return None
+        if new_hash:
+            self._persist_password_hash(user.chat_id, new_hash)
+            user.password_hash = new_hash
+        return user
 
     def verify_password_any_status(self, email: str, password: str) -> User | None:
         """Come verify_password ma cerca anche utenti sospesi (is_active=False). Usato per il re-login."""
-        import bcrypt
         user = self.get_user_by_email_any_status(email)
         if not user or not user.password_hash:
             return None
-        if bcrypt.checkpw(password.encode(), user.password_hash.encode()):
-            return user
-        return None
+        ok, new_hash = verify_password_hash(password, user.password_hash)
+        if not ok:
+            return None
+        if new_hash:
+            self._persist_password_hash(user.chat_id, new_hash)
+            user.password_hash = new_hash
+        return user
 
     def logout_user(self, chat_id: str) -> None:
         """Sospende temporaneamente l'account impostando is_active=False. I dati sono preservati."""
@@ -1196,6 +1304,132 @@ class UserStore:
         except Exception:
             logger.exception("[AuditLog] Scrittura fallita per user_id=%s action=%s", user_id, action)
 
+    def set_age_attestation(
+        self,
+        chat_id: str,
+        ip_address: Optional[str],
+        platform: str = "web",
+    ) -> None:
+        """Registra l'attestazione età 18+ dell'utente.
+
+        Salva il timestamp su users.age_attestation_at e scrive una riga
+        in audit_log con l'IP (None per Telegram, dove non è disponibile).
+        """
+        try:
+            with self.Session() as session:
+                user = session.query(User).filter_by(chat_id=chat_id).first()
+                if user:
+                    user.age_attestation_at = datetime.utcnow()
+                    session.commit()
+        except Exception:
+            logger.exception("[AgeAttestation] Aggiornamento user fallito per chat_id=%s", chat_id)
+        self.write_audit_log(
+            user_id=chat_id,
+            actor="user",
+            action="age_attestation",
+            ip_address=ip_address,
+            metadata={"platform": platform},
+        )
+
+    # ---------------------------------------------------------------------
+    # Registro violazioni dati personali (Art. 33(5) GDPR)
+    # ---------------------------------------------------------------------
+    def _next_breach_ref(self, session, detected_at: datetime) -> str:
+        """Genera il prossimo riferimento incident-YYYYMMDD-NNN per la data indicata."""
+        prefix = f"incident-{detected_at:%Y%m%d}-"
+        last = (
+            session.query(DataBreach)
+            .filter(DataBreach.breach_ref.like(prefix + "%"))
+            .order_by(DataBreach.breach_ref.desc())
+            .first()
+        )
+        seq = 1
+        if last is not None:
+            try:
+                seq = int(last.breach_ref.rsplit("-", 1)[1]) + 1
+            except (ValueError, IndexError):
+                seq = 1
+        return f"{prefix}{seq:03d}"
+
+    def create_breach_record(
+        self,
+        nature: Optional[str] = None,
+        *,
+        breach_ref: Optional[str] = None,
+        detected_at: Optional[datetime] = None,
+        discovered_by: Optional[str] = None,
+        affected_data_categories: Optional[list] = None,
+        affected_users_count: Optional[int] = None,
+        risk_level: Optional[str] = None,
+        containment_measures: Optional[str] = None,
+    ) -> str:
+        """Apre un nuovo record nel registro violazioni e ritorna il suo `breach_ref`.
+
+        Se `breach_ref` non è fornito viene generato come incident-YYYYMMDD-NNN
+        sulla base di `detected_at` (default: adesso).
+        """
+        detected = detected_at or datetime.utcnow()
+        with self.Session() as session:
+            ref = breach_ref or self._next_breach_ref(session, detected)
+            session.add(DataBreach(
+                breach_ref=ref,
+                detected_at=detected,
+                discovered_by=discovered_by,
+                nature=nature,
+                affected_data_categories=affected_data_categories,
+                affected_users_count=affected_users_count,
+                risk_level=risk_level,
+                containment_measures=containment_measures,
+                status="open",
+            ))
+            session.commit()
+        logger.info("[DataBreach] Aperto record %s (risk=%s)", ref, risk_level)
+        return ref
+
+    def update_breach_record(self, breach_ref: str, **fields) -> bool:
+        """Aggiorna i campi di un record violazione. Ritorna False se non trovato.
+
+        Accetta solo attributi realmente presenti sul modello `DataBreach`.
+        """
+        with self.Session() as session:
+            record = session.query(DataBreach).filter(
+                DataBreach.breach_ref == breach_ref
+            ).first()
+            if record is None:
+                logger.warning("[DataBreach] update su ref inesistente: %s", breach_ref)
+                return False
+            for key, value in fields.items():
+                if not hasattr(record, key):
+                    raise AttributeError(f"DataBreach non ha il campo '{key}'")
+                setattr(record, key, value)
+            session.commit()
+        return True
+
+    def get_breach_record(self, breach_ref: str) -> Optional["DataBreach"]:
+        """Ritorna un singolo record violazione, o None."""
+        with self.Session() as session:
+            return session.query(DataBreach).filter(
+                DataBreach.breach_ref == breach_ref
+            ).first()
+
+    def list_breach_records(self, *, status: Optional[str] = None) -> list["DataBreach"]:
+        """Elenca i record violazione (opzionalmente filtrati per stato), più recenti prima."""
+        with self.Session() as session:
+            query = session.query(DataBreach)
+            if status is not None:
+                query = query.filter(DataBreach.status == status)
+            return query.order_by(DataBreach.detected_at.desc()).all()
+
+    def get_users_for_breach_notification(self) -> list[tuple[str, Optional[str]]]:
+        """Ritorna (chat_id, email) di tutti gli utenti attivi da avvisare (Art. 34)."""
+        with self.Session() as session:
+            rows = (
+                session.query(User.chat_id, User.email)
+                .filter(User.is_active == True)  # noqa: E712
+                .all()
+            )
+            return [(row[0], row[1]) for row in rows]
+
     def delete_user_completely(self, chat_id: str) -> str:
         """Elimina l'account e tutti i dati locali dell'utente in modo atomico.
 
@@ -1203,7 +1437,8 @@ class UserStore:
         'not_found' se l'utente non esiste.
         """
         from src.storage.models import (
-            Expense, Income, Account, Subscription, UserCategory, UserCategoryNotionLink
+            Expense, Income, Account, Subscription, UserCategory, UserCategoryNotionLink,
+            SavedReport,
         )
 
         chat_id = str(chat_id)
@@ -1232,6 +1467,8 @@ class UserStore:
                 session.query(Subscription).filter(Subscription.user_id == chat_id).delete()
 
             session.query(UserCategory).filter(UserCategory.user_id == chat_id).delete()
+            session.query(SavedReport).filter(SavedReport.user_id == chat_id).delete()
+            session.query(ChatMessage).filter(ChatMessage.chat_id == chat_id).delete()
             # Ledger token
             session.query(LlmUsageEvent).filter(LlmUsageEvent.chat_id == chat_id).delete()
             session.query(LlmTokenReservation).filter(LlmTokenReservation.chat_id == chat_id).delete()

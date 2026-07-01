@@ -2,10 +2,12 @@
 
 import { Send } from "lucide-react";
 import styles from "./feedback.module.css";
+import { trackFeedbackSubmitted } from "@/lib/analytics";
 
 export default function Feedback() {
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
+    trackFeedbackSubmitted();
     alert("Feedback inviato a Moneo! Grazie.");
   };
 

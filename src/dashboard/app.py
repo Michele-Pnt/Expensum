@@ -25,6 +25,7 @@ if str(ROOT_DIR) not in sys.path:
 
 from config import Config
 from src.user_store import UserStore, User, LlmUsageEvent, LlmPricing, DailyMetrics, Feedback, ChatMessage
+from src import analytics
 from src.privacy_export import build_export_json, build_csv_rows, CSV_HEADER, NOTION_CSV_UNAVAILABLE_MESSAGE
 from src.notion_client import NotionFinanceClient
 from src.storage.notion_storage import NotionStorage
@@ -334,6 +335,7 @@ def web_register():
         logger.exception("Errore registrazione web per email=%s", email)
         return _err("Errore durante la registrazione. Riprova.")
 
+    analytics.track(web_chat_id, "user_signed_up", {"auth_method": "web", "storage_backend": "postgres"})
     session["user_logged_in"] = True
     session["chat_id"] = web_chat_id
     return redirect("/onboarding")
@@ -2255,6 +2257,17 @@ def api_chat_confirm():
     except (ValueError, AttributeError, TypeError):
         tx_date = _date.today()
 
+    # Controlla se è la prima spesa (per first_expense_tracked) prima di salvare
+    _is_first_expense = False
+    try:
+        if user.storage_backend == "postgres" and parsed_type == "expense":
+            with store.Session() as _s:
+                from src.storage.models import Expense as _ExpenseModel
+                _count = _s.query(_ExpenseModel).filter_by(user_id=chat_id).count()
+                _is_first_expense = _count == 0
+    except Exception:
+        pass
+
     saved = False
     try:
         if user.storage_backend == "postgres":
@@ -2302,6 +2315,18 @@ def api_chat_confirm():
     except Exception as e:
         logger.exception("Errore salvataggio transazione confermata: %s", e)
 
+    if saved:
+        input_method = data.get("input_method", "text")
+        analytics.track(chat_id, "expense_tracked", {
+            "input_method": input_method,
+            "storage_backend": user.storage_backend,
+            "transaction_type": parsed_type,
+        })
+        if _is_first_expense:
+            analytics.track(chat_id, "first_expense_tracked", {"input_method": input_method})
+    else:
+        analytics.track(chat_id, "expense_tracking_failed", {"reason": "save_error"})
+
     amount_str = f"€{float(parsed.get('amount', 0)):.2f}"
     if parsed_type == "expense":
         cat = parsed.get("category") or "Altro"
@@ -2324,7 +2349,7 @@ def api_chat_confirm():
     except Exception:
         pass
 
-    return jsonify({"ok": saved, "saved": saved, "reply": reply})
+    return jsonify({"ok": saved, "saved": saved, "reply": reply, "is_first_expense": _is_first_expense and saved})
 
 
 @app.route("/api/chat/voice", methods=["POST"])
@@ -2952,22 +2977,30 @@ def api_onboarding_generate_categories():
 
 @app.route("/api/onboarding/complete", methods=["POST"])
 def api_onboarding_complete():
-    """Finalizza l'onboarding: crea le categorie selezionate e segna come completato."""
+    """Finalizza l'onboarding: genera categorie da hobby e segna come completato.
+
+    Body: { "hobbies": ["palestra", "streaming", ...] }
+    Le categorie vengono generate via lookup table statica (categories_from_hobbies)
+    senza chiamate AI — l'AI per categorie viene usata in futuro su dati reali.
+    """
     chat_id, _ = _resolve_request_chat_id()
     if not chat_id:
         return jsonify({"error": "Unauthorized"}), 401
     body = request.get_json(silent=True) or {}
-    selected_categories = body.get("selected_categories", [])
+    hobbies: list[str] = body.get("hobbies", [])
 
     user = _get_user_by_chat_id(chat_id)
     if not user:
         return jsonify({"error": "User not found"}), 404
 
+    from src.workspace_bootstrapper import categories_from_hobbies
+    categories = categories_from_hobbies(hobbies)
+
     try:
         if user.storage_backend == "postgres":
             db_session = store.Session()
             storage = PostgresStorage(session=db_session, user_id=chat_id)
-            created = bootstrap_lifestyle_categories(storage, selected_categories)
+            created = bootstrap_lifestyle_categories(storage, categories)
             db_session.commit()
         else:
             from src.notion_client import NotionFinanceClient
@@ -2977,13 +3010,28 @@ def api_onboarding_complete():
                 categories_db_id=user.categories_db_id,
             )
             storage = NotionStorage(notion_client)
-            created = bootstrap_lifestyle_categories(storage, selected_categories)
+            created = bootstrap_lifestyle_categories(storage, categories)
     except Exception as e:
         logger.error("Errore bootstrap lifestyle categories: %s", e)
         created = []
 
     store.complete_onboarding(chat_id)
+    analytics.track(chat_id, "onboarding_completed", {"platform": "web", "hobbies": hobbies})
     return jsonify({"status": "ok", "categories_created": created})
+
+
+@app.route("/api/onboarding/age-confirm", methods=["POST"])
+def api_onboarding_age_confirm():
+    """Registra l'attestazione età 18+ dell'utente (D.Lgs. 101/2018)."""
+    chat_id, _ = _resolve_request_chat_id()
+    if not chat_id:
+        return jsonify({"error": "Unauthorized"}), 401
+    body = request.get_json(silent=True) or {}
+    if not body.get("confirmed", False):
+        return jsonify({"error": "Age not confirmed"}), 403
+    ip = request.headers.get("X-Forwarded-For", request.remote_addr)
+    store.set_age_attestation(chat_id, ip_address=ip, platform="web")
+    return jsonify({"status": "ok"})
 
 
 @app.route("/api/user/preferences", methods=["GET"])

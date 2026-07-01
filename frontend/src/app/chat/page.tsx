@@ -5,6 +5,12 @@ import Image from "next/image";
 import styles from "./page.module.css";
 import MoneoWidget, { type MoneoState } from "@/components/MoneoWidget";
 import { getCsrfToken } from "@/lib/csrf";
+import {
+  trackExpenseTracked,
+  trackExpenseTrackingFailed,
+  trackFirstExpenseTracked,
+  type InputMethod,
+} from "@/lib/analytics";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -104,6 +110,7 @@ export default function ChatPage() {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const audioChunksRef = useRef<Blob[]>([]);
+  const pendingInputMethodRef = useRef<InputMethod>("text");
 
   // Whether to show the welcome screen (no user/bot messages yet except welcome)
   const hasConversation = messages.length > 0 && historyLoaded;
@@ -202,6 +209,7 @@ export default function ChatPage() {
   // ── Confirm / Cancel ──────────────────────────────────────────────────────
 
   const handleConfirm = useCallback(async (botMsgId: string, parsed: ParsedData) => {
+    const inputMethod = pendingInputMethodRef.current;
     setMessages((prev) =>
       prev.map((m) => (m.id === botMsgId ? { ...m, awaitingConfirm: false } : m))
     );
@@ -212,10 +220,17 @@ export default function ChatPage() {
         method: "POST",
         headers: { "Content-Type": "application/json", ...(await buildHeaders()) },
         credentials: "same-origin",
-        body: JSON.stringify({ parsed }),
+        body: JSON.stringify({ parsed, input_method: inputMethod }),
       });
       const data = await res.json();
       setShowTypingIndicator(false);
+
+      if (data.saved) {
+        trackExpenseTracked(inputMethod);
+        if (data.is_first_expense) trackFirstExpenseTracked(inputMethod);
+      } else {
+        trackExpenseTrackingFailed("save_error", inputMethod);
+      }
 
       const confirmMsg: Message = {
         id: `confirm-${Date.now()}`,
@@ -244,6 +259,7 @@ export default function ChatPage() {
   }, []);
 
   const handleCancel = useCallback((botMsgId: string) => {
+    trackExpenseTrackingFailed("user_cancelled", pendingInputMethodRef.current);
     setMessages((prev) =>
       prev.map((m) =>
         m.id === botMsgId
@@ -271,6 +287,7 @@ export default function ChatPage() {
     setInputText("");
     setIsLoading(true);
     setShowTypingIndicator(true);
+    pendingInputMethodRef.current = "text";
 
     try {
       const res = await fetch("/api/chat/message", {
@@ -343,6 +360,7 @@ export default function ChatPage() {
         setShowTypingIndicator(true);
 
         try {
+          pendingInputMethodRef.current = "voice";
           const formData = new FormData();
           formData.append("audio", blob, "voice.webm");
           const res = await fetch("/api/chat/voice", {
@@ -420,6 +438,7 @@ export default function ChatPage() {
     setShowTypingIndicator(true);
 
     try {
+      pendingInputMethodRef.current = "photo";
       const formData = new FormData();
       formData.append("image", file);
       const res = await fetch("/api/chat/photo", {

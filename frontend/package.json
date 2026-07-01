@@ -16,9 +16,11 @@
     "@mui/material-nextjs": "^9.0.0",
     "lucide-react": "^1.7.0",
     "next": "^16.2.9",
+    "posthog-js": "^1.396.3",
     "react": "19.2.4",
     "react-dom": "19.2.4",
-    "recharts": "^3.8.1"
+    "recharts": "^3.8.1",
+    "vanilla-cookieconsent": "^3.1.0"
   },
   "devDependencies": {
     "@types/node": "^20",

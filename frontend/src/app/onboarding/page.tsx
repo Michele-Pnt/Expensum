@@ -3,11 +3,11 @@
 import { useState, useEffect, useCallback } from "react";
 import { useRouter } from "next/navigation";
 import { getCsrfToken } from "@/lib/csrf";
+import { trackOnboardingStepCompleted, trackOnboardingCompleted } from "@/lib/analytics";
 import {
   Box,
   Typography,
   Button,
-  Chip,
   CircularProgress,
   LinearProgress,
   TextField,
@@ -15,27 +15,27 @@ import {
   ToggleButtonGroup,
   Switch,
   FormControlLabel,
-  Skeleton,
 } from "@mui/material";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
-
-interface Lifestyle {
-  transport?: string;
-  dining?: string;
-  hobbies?: string[];
-}
 
 interface WizardState {
   language: string;
   currency: string;
   timezone: string;
-  lifestyle: Lifestyle;
-  budget: string;
+  hobbies: string[];
   notificationsEnabled: boolean;
   notificationTime: string;
-  categories: string[];
-  selectedCategories: Set<string>;
+}
+
+function detectLocaleDefaults(): { timezone: string; currency: string } {
+  const tz = Intl.DateTimeFormat().resolvedOptions().timeZone || "Europe/Rome";
+  const lang = typeof navigator !== "undefined" ? navigator.language : "it";
+  const currency = lang.startsWith("en-US") ? "USD"
+    : lang.startsWith("en-GB") ? "GBP"
+    : lang.startsWith("de") || lang.startsWith("fr") || lang.startsWith("es") || lang.startsWith("it") ? "EUR"
+    : "EUR";
+  return { timezone: tz, currency };
 }
 
 function getTelegramInitData(): string {
@@ -58,15 +58,69 @@ function WelcomeStep({ onNext }: { onNext: () => void }) {
   return (
     <Box sx={{ textAlign: "center", py: 4 }}>
       <Typography variant="h4" fontWeight={700} sx={{ mb: 2, color: "var(--color-primary)" }}>
-        👋 Benvenuto su Moneo!
+        👋 Benvenuto su Expensum!
       </Typography>
       <Typography variant="body1" sx={{ mb: 4, color: "var(--color-text-2)", maxWidth: 340, mx: "auto" }}>
-        In pochi minuti personalizzeremo il tuo spazio in base al tuo stile di vita.
-        Ci vorranno meno di 2 minuti.
+        In meno di 2 minuti personalizzeremo il tuo spazio in base al tuo stile di vita.
       </Typography>
       <Button variant="contained" size="large" onClick={onNext} sx={primaryBtnSx}>
         Iniziamo 🚀
       </Button>
+    </Box>
+  );
+}
+
+function AgeGateStep({
+  onConfirm,
+  loading,
+}: {
+  onConfirm: () => void;
+  loading: boolean;
+}) {
+  const [blocked, setBlocked] = useState(false);
+
+  if (blocked) {
+    return (
+      <Box sx={{ textAlign: "center", py: 4 }}>
+        <Typography variant="h6" fontWeight={600} sx={{ mb: 2 }}>
+          ⚠️ Servizio riservato ai maggiorenni
+        </Typography>
+        <Typography variant="body2" sx={{ color: "var(--color-text-2)" }}>
+          Expensum è disponibile solo per utenti con 18 anni o più (D.Lgs. 101/2018).
+        </Typography>
+      </Box>
+    );
+  }
+
+  return (
+    <Box>
+      <Typography variant="h6" fontWeight={600} sx={{ mb: 1 }}>
+        🔞 Verifica età
+      </Typography>
+      <Typography variant="body2" sx={{ color: "var(--color-text-2)", mb: 3 }}>
+        Expensum è riservato a utenti maggiorenni (18+), in conformità al D.Lgs. 101/2018
+        e per garantire la capacità contrattuale per il piano Pro.
+      </Typography>
+      <Box sx={{ display: "flex", flexDirection: "column", gap: 2 }}>
+        <Button
+          variant="contained"
+          size="large"
+          onClick={onConfirm}
+          disabled={loading}
+          sx={primaryBtnSx}
+        >
+          {loading ? <CircularProgress size={20} sx={{ color: "#fff" }} /> : "✅ Sì, ho 18 anni o più"}
+        </Button>
+        <Button
+          variant="outlined"
+          size="large"
+          onClick={() => setBlocked(true)}
+          disabled={loading}
+          sx={{ textTransform: "none", borderRadius: 2 }}
+        >
+          ❌ Sono minorenne
+        </Button>
+      </Box>
     </Box>
   );
 }
@@ -104,144 +158,19 @@ function LanguageStep({
   );
 }
 
-function CurrencyStep({
-  value,
-  onChange,
-  onNext,
-  onBack,
-}: {
-  value: string;
-  onChange: (v: string) => void;
-  onNext: () => void;
-  onBack: () => void;
-}) {
-  const options = ["EUR", "USD", "GBP", "CHF"];
-  return (
-    <StepWrapper title="Valuta principale" required onNext={onNext} onBack={onBack} canNext={!!value}>
-      <ToggleButtonGroup
-        value={value}
-        exclusive
-        onChange={(_, v) => v && onChange(v)}
-        sx={{ display: "flex", gap: 1, flexWrap: "wrap" }}
-      >
-        {options.map((o) => (
-          <ToggleButton key={o} value={o} sx={toggleBtnSx}>
-            {o}
-          </ToggleButton>
-        ))}
-      </ToggleButtonGroup>
-    </StepWrapper>
-  );
-}
+const LIFESTYLE_OPTIONS = [
+  { value: "palestra", label: "💪 Sport / Palestra" },
+  { value: "streaming", label: "📺 Streaming / Gaming" },
+  { value: "viaggi", label: "✈️ Viaggi" },
+  { value: "cultura", label: "🎭 Cinema / Cultura" },
+  { value: "tech", label: "💻 Tech / Elettronica" },
+  { value: "animali", label: "🐾 Animali domestici" },
+  { value: "cucina", label: "🍳 Cibo / Gourmet" },
+  { value: "famiglia", label: "👶 Famiglia / Figli" },
+  { value: "moda", label: "👗 Moda / Beauty" },
+];
 
-function TimezoneStep({
-  value,
-  onChange,
-  onNext,
-  onBack,
-}: {
-  value: string;
-  onChange: (v: string) => void;
-  onNext: () => void;
-  onBack: () => void;
-}) {
-  const presets = [
-    { value: "Europe/Rome", label: "🇮🇹 Roma (CET)" },
-    { value: "Europe/London", label: "🇬🇧 Londra (GMT)" },
-    { value: "America/New_York", label: "🇺🇸 New York (EST)" },
-    { value: "America/Los_Angeles", label: "🇺🇸 Los Angeles (PST)" },
-  ];
-  return (
-    <StepWrapper title="Fuso orario" required onNext={onNext} onBack={onBack} canNext={!!value}>
-      <ToggleButtonGroup
-        value={value}
-        exclusive
-        onChange={(_, v) => v && onChange(v)}
-        sx={{ display: "flex", flexDirection: "column", gap: 1 }}
-      >
-        {presets.map((p) => (
-          <ToggleButton key={p.value} value={p.value} sx={{ ...toggleBtnSx, justifyContent: "flex-start" }}>
-            {p.label}
-          </ToggleButton>
-        ))}
-      </ToggleButtonGroup>
-    </StepWrapper>
-  );
-}
-
-function TransportStep({
-  value,
-  onChange,
-  onNext,
-  onBack,
-  onSkip,
-}: {
-  value: string;
-  onChange: (v: string) => void;
-  onNext: () => void;
-  onBack: () => void;
-  onSkip: () => void;
-}) {
-  const options = [
-    { value: "auto", label: "🚗 Auto / Moto" },
-    { value: "mezzi", label: "🚌 Mezzi pubblici" },
-    { value: "piedi", label: "🚶 A piedi / Bici" },
-  ];
-  return (
-    <StepWrapper title="Come ti sposti di solito?" onNext={onNext} onBack={onBack} onSkip={onSkip} canNext={!!value}>
-      <ToggleButtonGroup
-        value={value}
-        exclusive
-        onChange={(_, v) => v && onChange(v)}
-        sx={{ display: "flex", flexDirection: "column", gap: 1 }}
-      >
-        {options.map((o) => (
-          <ToggleButton key={o.value} value={o.value} sx={{ ...toggleBtnSx, justifyContent: "flex-start" }}>
-            {o.label}
-          </ToggleButton>
-        ))}
-      </ToggleButtonGroup>
-    </StepWrapper>
-  );
-}
-
-function DiningStep({
-  value,
-  onChange,
-  onNext,
-  onBack,
-  onSkip,
-}: {
-  value: string;
-  onChange: (v: string) => void;
-  onNext: () => void;
-  onBack: () => void;
-  onSkip: () => void;
-}) {
-  const options = [
-    { value: "spesso", label: "🍕 Spesso (3+ volte/settimana)" },
-    { value: "a_volte", label: "🍽️ A volte (1-2 volte/settimana)" },
-    { value: "raramente", label: "🏠 Raramente (cucino quasi sempre)" },
-  ];
-  return (
-    <StepWrapper title="Mangi spesso fuori casa?" onNext={onNext} onBack={onBack} onSkip={onSkip} canNext={!!value}>
-      <ToggleButtonGroup
-        value={value}
-        exclusive
-        onChange={(_, v) => v && onChange(v)}
-        sx={{ display: "flex", flexDirection: "column", gap: 1 }}
-      >
-        {options.map((o) => (
-          <ToggleButton key={o.value} value={o.value} sx={{ ...toggleBtnSx, justifyContent: "flex-start" }}>
-            {o.label}
-          </ToggleButton>
-        ))}
-      </ToggleButtonGroup>
-    </StepWrapper>
-  );
-}
-
-function HobbiesStep({
+function LifestyleStep({
   value,
   onChange,
   onNext,
@@ -254,22 +183,16 @@ function HobbiesStep({
   onBack: () => void;
   onSkip: () => void;
 }) {
-  const options = [
-    { value: "palestra", label: "💪 Sport / Palestra" },
-    { value: "streaming", label: "📺 Streaming / Gaming" },
-    { value: "viaggi", label: "✈️ Viaggi" },
-    { value: "cultura", label: "🎭 Cinema / Cultura" },
-  ];
   const toggle = (v: string) => {
     onChange(value.includes(v) ? value.filter((x) => x !== v) : [...value, v]);
   };
   return (
-    <StepWrapper title="Quali sono i tuoi hobby?" onNext={onNext} onBack={onBack} onSkip={onSkip} canNext>
+    <StepWrapper title="Il tuo stile di vita" onNext={onNext} onBack={onBack} onSkip={onSkip} canNext>
       <Typography variant="caption" sx={{ color: "var(--color-text-2)", mb: 1, display: "block" }}>
-        Puoi selezionare più opzioni
+        Seleziona uno o più interessi. Useremo questa informazione per personalizzare le categorie di spesa.
       </Typography>
       <Box sx={{ display: "flex", flexWrap: "wrap", gap: 1 }}>
-        {options.map((o) => (
+        {LIFESTYLE_OPTIONS.map((o) => (
           <ToggleButton
             key={o.value}
             value={o.value}
@@ -281,37 +204,6 @@ function HobbiesStep({
           </ToggleButton>
         ))}
       </Box>
-    </StepWrapper>
-  );
-}
-
-function BudgetStep({
-  value,
-  onChange,
-  onNext,
-  onBack,
-  onSkip,
-}: {
-  value: string;
-  onChange: (v: string) => void;
-  onNext: () => void;
-  onBack: () => void;
-  onSkip: () => void;
-}) {
-  return (
-    <StepWrapper title="Budget mensile indicativo" onNext={onNext} onBack={onBack} onSkip={onSkip} canNext>
-      <Typography variant="caption" sx={{ color: "var(--color-text-2)", mb: 2, display: "block" }}>
-        Quant&apos;è la tua spesa mensile tipica? Puoi lasciarlo vuoto.
-      </Typography>
-      <TextField
-        type="number"
-        label="Budget (€)"
-        value={value}
-        onChange={(e) => onChange(e.target.value)}
-        inputProps={{ min: 0 }}
-        fullWidth
-        size="small"
-      />
     </StepWrapper>
   );
 }
@@ -356,101 +248,6 @@ function NotificationsStep({
   );
 }
 
-function CategoryReviewStep({
-  lifestyle,
-  selected,
-  onToggle,
-  onNext,
-  onBack,
-}: {
-  lifestyle: Lifestyle;
-  selected: Set<string>;
-  onToggle: (cat: string) => void;
-  onNext: (cats: string[]) => void;
-  onBack: () => void;
-}) {
-  const [categories, setCategories] = useState<string[]>([]);
-  const [loading, setLoading] = useState(true);
-
-  useEffect(() => {
-    let cancelled = false;
-    setLoading(true);
-    buildHeaders()
-      .then((headers) => fetch("/api/onboarding/generate-categories", {
-        method: "POST",
-        headers: { ...headers, "Content-Type": "application/json" },
-        credentials: "same-origin",
-        body: JSON.stringify({ lifestyle }),
-      }))
-      .then((r) => r.json())
-      .then((data) => {
-        if (cancelled) return;
-        const cats: string[] = data.categories ?? [];
-        setCategories(cats);
-        // Pre-seleziona tutte
-        cats.forEach((c) => {
-          if (!selected.has(c)) onToggle(c);
-        });
-      })
-      .catch(() => {
-        if (!cancelled) setCategories([]);
-      })
-      .finally(() => {
-        if (!cancelled) setLoading(false);
-      });
-    return () => { cancelled = true; };
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  const selectedList = categories.filter((c) => selected.has(c));
-
-  return (
-    <Box>
-      <Typography variant="h6" fontWeight={600} sx={{ mb: 1 }}>
-        Le tue categorie di spesa
-      </Typography>
-      <Typography variant="body2" sx={{ color: "var(--color-text-2)", mb: 2 }}>
-        Ho pensato a queste categorie per te. Rimuovi quelle che non ti servono.
-      </Typography>
-
-      {loading ? (
-        <Box sx={{ display: "flex", flexWrap: "wrap", gap: 1 }}>
-          {Array.from({ length: 12 }).map((_, i) => (
-            <Skeleton key={i} variant="rounded" width={100 + (i % 3) * 30} height={32} />
-          ))}
-        </Box>
-      ) : (
-        <Box sx={{ display: "flex", flexWrap: "wrap", gap: 1, mb: 3 }}>
-          {categories.map((cat) => (
-            <Chip
-              key={cat}
-              label={cat}
-              variant={selected.has(cat) ? "filled" : "outlined"}
-              color={selected.has(cat) ? "primary" : "default"}
-              onClick={() => onToggle(cat)}
-              sx={{ cursor: "pointer", fontWeight: selected.has(cat) ? 600 : 400 }}
-            />
-          ))}
-        </Box>
-      )}
-
-      <Box sx={{ display: "flex", gap: 1, mt: 2 }}>
-        <Button variant="outlined" onClick={onBack} sx={{ flex: "0 0 auto" }}>
-          ↩ Indietro
-        </Button>
-        <Button
-          variant="contained"
-          onClick={() => onNext(selectedList)}
-          disabled={loading || selectedList.length === 0}
-          sx={{ ...primaryBtnSx, flex: 1 }}
-        >
-          Continua con {selectedList.length} categorie
-        </Button>
-      </Box>
-    </Box>
-  );
-}
-
 function ConfirmStep({
   state,
   onConfirm,
@@ -462,15 +259,19 @@ function ConfirmStep({
   onBack: () => void;
   loading: boolean;
 }) {
+  const hobbyLabels = state.hobbies.map(
+    (h) => LIFESTYLE_OPTIONS.find((o) => o.value === h)?.label ?? h
+  );
+
   const rows = [
     { label: "Lingua", value: state.language === "it" ? "🇮🇹 Italiano" : "🇬🇧 English" },
-    { label: "Valuta", value: state.currency },
-    { label: "Timezone", value: state.timezone },
-    ...(state.lifestyle.transport ? [{ label: "Trasporti", value: state.lifestyle.transport }] : []),
-    ...(state.lifestyle.dining ? [{ label: "Dining", value: state.lifestyle.dining }] : []),
-    ...(state.lifestyle.hobbies?.length ? [{ label: "Hobby", value: state.lifestyle.hobbies.join(", ") }] : []),
-    ...(state.budget ? [{ label: "Budget", value: `€ ${state.budget}` }] : []),
-    { label: "Categorie", value: `${state.selectedCategories.size} selezionate` },
+    { label: "Valuta", value: `${state.currency} (auto-rilevata)` },
+    { label: "Timezone", value: `${state.timezone} (auto-rilevata)` },
+    ...(hobbyLabels.length ? [{ label: "Interessi", value: hobbyLabels.join(", ") }] : []),
+    {
+      label: "Notifiche",
+      value: state.notificationsEnabled ? `✅ Alle ${state.notificationTime}` : "🔕 Disabilitate",
+    },
   ];
 
   return (
@@ -480,12 +281,27 @@ function ConfirmStep({
       </Typography>
       <Box sx={{ mb: 3, display: "flex", flexDirection: "column", gap: 1 }}>
         {rows.map((r) => (
-          <Box key={r.label} sx={{ display: "flex", justifyContent: "space-between", py: 0.5, borderBottom: "1px solid var(--color-border)" }}>
-            <Typography variant="body2" sx={{ color: "var(--color-text-2)" }}>{r.label}</Typography>
-            <Typography variant="body2" fontWeight={500}>{r.value}</Typography>
+          <Box
+            key={r.label}
+            sx={{
+              display: "flex",
+              justifyContent: "space-between",
+              py: 0.5,
+              borderBottom: "1px solid var(--color-border)",
+            }}
+          >
+            <Typography variant="body2" sx={{ color: "var(--color-text-2)" }}>
+              {r.label}
+            </Typography>
+            <Typography variant="body2" fontWeight={500} sx={{ textAlign: "right", ml: 2 }}>
+              {r.value}
+            </Typography>
           </Box>
         ))}
       </Box>
+      <Typography variant="caption" sx={{ color: "var(--color-text-2)", display: "block", mb: 2 }}>
+        Le categorie di spesa verranno create automaticamente in base ai tuoi interessi.
+      </Typography>
       <Box sx={{ display: "flex", gap: 1 }}>
         <Button variant="outlined" onClick={onBack} disabled={loading}>
           ↩ Indietro
@@ -526,13 +342,24 @@ function StepWrapper({
     <Box>
       <Typography variant="h6" fontWeight={600} sx={{ mb: 0.5 }}>
         {title}
-        {required && <Typography component="span" sx={{ color: "var(--color-primary)", ml: 0.5, fontSize: 12 }}>★</Typography>}
+        {required && (
+          <Typography component="span" sx={{ color: "var(--color-primary)", ml: 0.5, fontSize: 12 }}>
+            ★
+          </Typography>
+        )}
       </Typography>
       <Box sx={{ mb: 3 }}>{children}</Box>
       <Box sx={{ display: "flex", gap: 1, flexWrap: "wrap" }}>
-        <Button variant="outlined" onClick={onBack} size="small">↩ Indietro</Button>
+        <Button variant="outlined" onClick={onBack} size="small">
+          ↩ Indietro
+        </Button>
         {onSkip && (
-          <Button variant="text" onClick={onSkip} size="small" sx={{ color: "var(--color-text-2)" }}>
+          <Button
+            variant="text"
+            onClick={onSkip}
+            size="small"
+            sx={{ color: "var(--color-text-2)" }}
+          >
             ⏭ Salta
           </Button>
         )}
@@ -573,15 +400,15 @@ const toggleBtnSx = {
   },
 };
 
-// ─── Step definitions (ordered) ───────────────────────────────────────────────
+// ─── Step definitions ─────────────────────────────────────────────────────────
+// step 0 = welcome (non conta nel progress)
+// step 1 = age_gate   (visible 1/5)
+// step 2 = language   (visible 2/5)
+// step 3 = lifestyle  (visible 3/5)
+// step 4 = notifications (visible 4/5)
+// step 5 = confirm    (visible 5/5)
 
-const STEP_NAMES = [
-  "welcome", "language", "currency", "timezone",
-  "transport", "dining", "hobbies", "budget",
-  "notifications", "categories", "confirm",
-] as const;
-
-const TOTAL_VISIBLE = 10; // step 0 (welcome) non conta nella progress bar
+const TOTAL_VISIBLE = 5;
 
 // ─── Main wizard ──────────────────────────────────────────────────────────────
 
@@ -589,18 +416,18 @@ export default function OnboardingPage() {
   const router = useRouter();
   const [step, setStep] = useState(0);
   const [submitting, setSubmitting] = useState(false);
+  const [ageLoading, setAgeLoading] = useState(false);
   const [animDir, setAnimDir] = useState<"forward" | "back">("forward");
+
+  const { timezone: detectedTz, currency: detectedCurrency } = detectLocaleDefaults();
 
   const [state, setState] = useState<WizardState>({
     language: "it",
-    currency: "EUR",
-    timezone: "Europe/Rome",
-    lifestyle: {},
-    budget: "",
+    currency: detectedCurrency,
+    timezone: detectedTz,
+    hobbies: [],
     notificationsEnabled: true,
     notificationTime: "08:00",
-    categories: [],
-    selectedCategories: new Set(),
   });
 
   const update = useCallback((partial: Partial<WizardState>) => {
@@ -623,10 +450,13 @@ export default function OnboardingPage() {
   const goNext = useCallback(
     (stepName: string, data: Record<string, unknown> = {}) => {
       setAnimDir("forward");
-      if (stepName !== "welcome") saveStep(stepName, data);
+      if (stepName !== "welcome") {
+        saveStep(stepName, data);
+        trackOnboardingStepCompleted(stepName, step + 1);
+      }
       setStep((s) => s + 1);
     },
-    [saveStep]
+    [saveStep, step]
   );
 
   const goBack = useCallback(() => {
@@ -634,13 +464,24 @@ export default function OnboardingPage() {
     setStep((s) => Math.max(0, s - 1));
   }, []);
 
-  const toggleCategory = useCallback((cat: string) => {
-    setState((prev) => {
-      const next = new Set(prev.selectedCategories);
-      next.has(cat) ? next.delete(cat) : next.add(cat);
-      return { ...prev, selectedCategories: next };
-    });
-  }, []);
+  const handleAgeConfirm = useCallback(async () => {
+    setAgeLoading(true);
+    try {
+      const headers = await buildHeaders();
+      await fetch("/api/onboarding/age-confirm", {
+        method: "POST",
+        headers: { ...headers, "Content-Type": "application/json" },
+        credentials: "same-origin",
+        body: JSON.stringify({ confirmed: true }),
+      });
+      goNext("age_gate", { confirmed: true });
+    } catch {
+      // procedi comunque — il log verrà riscritto al complete
+      goNext("age_gate", { confirmed: true });
+    } finally {
+      setAgeLoading(false);
+    }
+  }, [goNext]);
 
   const handleComplete = useCallback(async () => {
     setSubmitting(true);
@@ -650,16 +491,22 @@ export default function OnboardingPage() {
         headers: { ...(await buildHeaders()), "Content-Type": "application/json" },
         credentials: "same-origin",
         body: JSON.stringify({
-          selected_categories: [...state.selectedCategories],
+          language: state.language,
+          currency: state.currency,
+          timezone: state.timezone,
+          hobbies: state.hobbies,
+          notifications_enabled: state.notificationsEnabled,
+          notification_time: state.notificationsEnabled ? state.notificationTime : null,
         }),
       });
+      trackOnboardingCompleted();
       router.push("/chat");
     } catch {
       setSubmitting(false);
     }
-  }, [state.selectedCategories, router]);
+  }, [state, router]);
 
-  // Check if already completed
+  // Controlla se l'onboarding è già completato
   useEffect(() => {
     buildHeaders()
       .then((headers) => fetch("/api/onboarding/status", { headers, credentials: "same-origin" }))
@@ -673,7 +520,6 @@ export default function OnboardingPage() {
       .catch(() => {});
   }, [router, update]);
 
-  const visibleStep = step; // step 0 = welcome, 1..10 = actual steps
   const progressValue = step === 0 ? 0 : (step / TOTAL_VISIBLE) * 100;
 
   return (
@@ -698,7 +544,6 @@ export default function OnboardingPage() {
           boxShadow: "0 2px 16px rgba(0,0,0,0.07)",
         }}
       >
-        {/* Header */}
         {step > 0 && (
           <Box sx={{ mb: 3 }}>
             <Typography variant="caption" sx={{ color: "var(--color-text-2)" }}>
@@ -718,7 +563,6 @@ export default function OnboardingPage() {
           </Box>
         )}
 
-        {/* Step content with slide animation */}
         <Box
           key={`${step}-${animDir}`}
           sx={{
@@ -736,6 +580,10 @@ export default function OnboardingPage() {
           {step === 0 && <WelcomeStep onNext={() => goNext("welcome")} />}
 
           {step === 1 && (
+            <AgeGateStep onConfirm={handleAgeConfirm} loading={ageLoading} />
+          )}
+
+          {step === 2 && (
             <LanguageStep
               value={state.language}
               onChange={(v) => update({ language: v })}
@@ -744,67 +592,17 @@ export default function OnboardingPage() {
             />
           )}
 
-          {step === 2 && (
-            <CurrencyStep
-              value={state.currency}
-              onChange={(v) => update({ currency: v })}
-              onNext={() => goNext("currency", { currency: state.currency })}
-              onBack={goBack}
-            />
-          )}
-
           {step === 3 && (
-            <TimezoneStep
-              value={state.timezone}
-              onChange={(v) => update({ timezone: v })}
-              onNext={() => goNext("timezone", { timezone: state.timezone })}
+            <LifestyleStep
+              value={state.hobbies}
+              onChange={(v) => update({ hobbies: v })}
+              onNext={() => goNext("lifestyle", { hobbies: state.hobbies })}
               onBack={goBack}
+              onSkip={() => goNext("lifestyle_skipped")}
             />
           )}
 
           {step === 4 && (
-            <TransportStep
-              value={state.lifestyle.transport ?? ""}
-              onChange={(v) => update({ lifestyle: { ...state.lifestyle, transport: v } })}
-              onNext={() => goNext("transport", { transport: state.lifestyle.transport })}
-              onBack={goBack}
-              onSkip={() => goNext("transport_skipped")}
-            />
-          )}
-
-          {step === 5 && (
-            <DiningStep
-              value={state.lifestyle.dining ?? ""}
-              onChange={(v) => update({ lifestyle: { ...state.lifestyle, dining: v } })}
-              onNext={() => goNext("dining", { dining: state.lifestyle.dining })}
-              onBack={goBack}
-              onSkip={() => goNext("dining_skipped")}
-            />
-          )}
-
-          {step === 6 && (
-            <HobbiesStep
-              value={state.lifestyle.hobbies ?? []}
-              onChange={(v) => update({ lifestyle: { ...state.lifestyle, hobbies: v } })}
-              onNext={() => goNext("hobbies", { hobbies: state.lifestyle.hobbies })}
-              onBack={goBack}
-              onSkip={() => goNext("hobbies_skipped")}
-            />
-          )}
-
-          {step === 7 && (
-            <BudgetStep
-              value={state.budget}
-              onChange={(v) => update({ budget: v })}
-              onNext={() =>
-                goNext("budget", { budget: state.budget ? parseFloat(state.budget) : null })
-              }
-              onBack={goBack}
-              onSkip={() => goNext("budget_skipped")}
-            />
-          )}
-
-          {step === 8 && (
             <NotificationsStep
               enabled={state.notificationsEnabled}
               time={state.notificationTime}
@@ -821,20 +619,7 @@ export default function OnboardingPage() {
             />
           )}
 
-          {step === 9 && (
-            <CategoryReviewStep
-              lifestyle={state.lifestyle}
-              selected={state.selectedCategories}
-              onToggle={toggleCategory}
-              onNext={(cats) => {
-                update({ categories: cats });
-                setStep(10);
-              }}
-              onBack={goBack}
-            />
-          )}
-
-          {step === 10 && (
+          {step === 5 && (
             <ConfirmStep
               state={state}
               onConfirm={handleComplete}
@@ -842,9 +627,6 @@ export default function OnboardingPage() {
               loading={submitting}
             />
           )}
-
-          {/* Fallback guard */}
-          {visibleStep > 10 && null}
         </Box>
       </Box>
     </Box>

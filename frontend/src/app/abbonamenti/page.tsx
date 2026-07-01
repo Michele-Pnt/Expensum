@@ -1,9 +1,15 @@
 "use client";
 
+import { useEffect } from "react";
 import { Box, Card, CardContent, CardActions, Typography, Grid, Button, List, ListItem, ListItemIcon, ListItemText } from "@mui/material";
 import { Check } from "@mui/icons-material";
+import { trackPaywallViewed, trackSubscriptionStarted } from "@/lib/analytics";
 
 export default function Abbonamenti() {
+  useEffect(() => {
+    trackPaywallViewed("abbonamenti_page");
+  }, []);
+
   return (
     <Box sx={{ p: { xs: 2, md: 4 }, display: 'flex', flexDirection: 'column', alignItems: 'center' }}>
       <Box sx={{ mb: 6, textAlign: 'center' }}>
@@ -81,7 +87,13 @@ export default function Abbonamenti() {
               </List>
             </CardContent>
             <CardActions sx={{ p: 3, pt: 0 }}>
-              <Button fullWidth variant="contained" color="secondary" size="large">
+              <Button
+                fullWidth
+                variant="contained"
+                color="secondary"
+                size="large"
+                onClick={() => trackSubscriptionStarted("pro", "free")}
+              >
                 Esegui l&apos;upgrade
               </Button>
             </CardActions>

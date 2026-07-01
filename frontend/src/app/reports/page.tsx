@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import Link from "next/link";
 import { CircularProgress } from "@mui/material";
 import styles from "./reports.module.css";
+import { trackReportViewed, trackReportShared } from "@/lib/analytics";
 
 interface ReportSummary {
   id: number;
@@ -35,6 +36,7 @@ export default function ReportsPage() {
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
+    trackReportViewed("list");
     const telegramWindow = window as TelegramWindow;
     const initData = telegramWindow.Telegram?.WebApp?.initData ?? "";
     const headers: HeadersInit = initData ? { "X-Telegram-Init-Data": initData } : {};
@@ -91,6 +93,7 @@ export default function ReportsPage() {
             key={r.share_token}
             href={`/reports/${r.share_token}`}
             className={styles.reportCard}
+            onClick={() => trackReportShared(r.report_type)}
           >
             <div className={styles.reportCardLeft}>
               <span className={styles.reportIcon}>
