@@ -28,7 +28,7 @@ def track(distinct_id: str, event: str, properties: dict | None = None) -> None:
     if not _api_key:
         return
     try:
-        _ph.capture(distinct_id, event, properties or {})
+        _ph.capture(distinct_id=distinct_id, event=event, properties=properties or {})
     except Exception as exc:
         logger.debug("[analytics] capture fallito per '%s': %s", event, exc)
 
@@ -38,6 +38,6 @@ def identify(distinct_id: str, properties: dict | None = None) -> None:
     if not _api_key:
         return
     try:
-        _ph.identify(distinct_id, properties or {})
+        _ph.identify(distinct_id=distinct_id, properties=properties or {})
     except Exception as exc:
         logger.debug("[analytics] identify fallito per '%s': %s", distinct_id, exc)

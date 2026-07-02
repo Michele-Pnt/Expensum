@@ -379,8 +379,6 @@ function StepWrapper({
 // ─── Styles ───────────────────────────────────────────────────────────────────
 
 const primaryBtnSx = {
-  bgcolor: "var(--color-primary)",
-  "&:hover": { bgcolor: "var(--color-primary-dark)" },
   textTransform: "none",
   borderRadius: 2,
   fontWeight: 600,
