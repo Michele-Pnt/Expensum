@@ -1463,10 +1463,13 @@ class UserStore:
                 ).delete(synchronize_session=False)
 
             if backend == "postgres":
+                # Ordine obbligato dalle FK:
+                # Expense/Income/Subscription → account_id → accounts.id
+                # Expense/Subscription → category_id → user_categories.id
                 session.query(Expense).filter(Expense.user_id == chat_id).delete()
                 session.query(Income).filter(Income.user_id == chat_id).delete()
-                session.query(Account).filter(Account.user_id == chat_id).delete()
                 session.query(Subscription).filter(Subscription.user_id == chat_id).delete()
+                session.query(Account).filter(Account.user_id == chat_id).delete()
 
             session.query(UserCategory).filter(UserCategory.user_id == chat_id).delete()
             session.query(SavedReport).filter(SavedReport.user_id == chat_id).delete()
