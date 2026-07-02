@@ -241,8 +241,8 @@ export default function PrivacyPage() {
         throw new Error(json.error || "delete_failed");
       }
       window.location.assign(json.redirect_url || "/login");
-    } catch {
-      setError("Eliminazione account non riuscita. Controlla la conferma e riprova.");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Eliminazione account non riuscita. Riprova.");
       setBusy(null);
     }
   }

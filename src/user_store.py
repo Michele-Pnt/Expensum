@@ -1449,18 +1449,20 @@ class UserStore:
 
             backend = user.storage_backend or "notion"
 
+            # Elimina i link Notion delle categorie (FK su user_categories.id) prima
+            # di eliminare le categorie stesse — vale sia per Notion che per postgres.
+            cat_ids = [
+                r[0] for r in session.execute(
+                    text("SELECT id FROM user_categories WHERE user_id = :uid"),
+                    {"uid": chat_id},
+                ).fetchall()
+            ]
+            if cat_ids:
+                session.query(UserCategoryNotionLink).filter(
+                    UserCategoryNotionLink.category_id.in_(cat_ids)
+                ).delete(synchronize_session=False)
+
             if backend == "postgres":
-                # Elimina prima i link Notion delle categorie
-                cat_ids = [
-                    r[0] for r in session.execute(
-                        text("SELECT id FROM user_categories WHERE user_id = :uid"),
-                        {"uid": chat_id},
-                    ).fetchall()
-                ]
-                if cat_ids:
-                    session.query(UserCategoryNotionLink).filter(
-                        UserCategoryNotionLink.category_id.in_(cat_ids)
-                    ).delete(synchronize_session=False)
                 session.query(Expense).filter(Expense.user_id == chat_id).delete()
                 session.query(Income).filter(Income.user_id == chat_id).delete()
                 session.query(Account).filter(Account.user_id == chat_id).delete()
