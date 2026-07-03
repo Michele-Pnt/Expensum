@@ -965,7 +965,13 @@ def _process_oauth_background(
             store.mark_setup_completed(chat_id)
 
             report_msg += (
-                "\n\n🎉 Ora completa il tuo profilo per personalizzare Expensum!\n"
+                "\n\n💬 <b>Come registrare le tue spese</b>\n"
+                "Scrivimi una spesa in linguaggio naturale, mandami un vocale oppure scattami una "
+                "foto dello scontrino: ci penso io ad analizzarla e salvarla automaticamente.\n"
+                "Esempi: <i>\"25€ per la spesa al super\"</i>, <i>\"netflix 13.99\"</i>.\n\n"
+                "📋 Trovi tutti i comandi disponibili toccando il pulsante <b>Menu</b> in basso a "
+                "sinistra, accanto al campo di testo.\n\n"
+                "🎉 Ora completa il tuo profilo per personalizzare Expensum!\n"
                 "Apri la webapp e segui il wizard di configurazione, oppure scrivi "
                 "<b>/impostazioni</b> qui in chat."
             )
@@ -1041,7 +1047,13 @@ def _process_postgres_background(chat_id: str) -> None:
             "1️⃣ Clicca sul pulsante qui sotto.\n"
             "2️⃣ Aggiungi i tuoi <b>Conti</b> (es. Conto Corrente, Contanti) e imposta il saldo iniziale.\n"
             "3️⃣ Personalizza le tue <b>Categorie</b> di spesa ed eventuali budget.\n"
-            "4️⃣ Inserisci i tuoi <b>Abbonamenti</b> per tenerne traccia automaticamente."
+            "4️⃣ Inserisci i tuoi <b>Abbonamenti</b> per tenerne traccia automaticamente.\n\n"
+            "💬 <b>Come registrare le tue spese</b>\n"
+            "Scrivimi una spesa in linguaggio naturale, mandami un vocale oppure scattami una "
+            "foto dello scontrino: ci penso io ad analizzarla e salvarla automaticamente.\n"
+            "Esempi: <i>\"25€ per la spesa al super\"</i>, <i>\"netflix 13.99\"</i>.\n\n"
+            "📋 Trovi tutti i comandi disponibili toccando il pulsante <b>Menu</b> in basso a "
+            "sinistra, accanto al campo di testo."
         )
 
         try:

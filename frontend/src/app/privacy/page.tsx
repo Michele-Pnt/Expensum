@@ -152,25 +152,25 @@ export default function PrivacyPolicyPage() {
                     <td>SCC (Art. 46(2)(c) GDPR)</td>
                   </tr>
                   <tr>
-                    <td><strong>Mistral AI</strong> (Small 3.1)</td>
-                    <td>Analisi NLP del testo delle spese e riconoscimento testo da foto scontrino</td>
+                    <td><strong>Mistral AI</strong></td>
+                    <td>Analisi NLP</td>
                     <td>Francia 🇫🇷 (UE)</td>
                     <td>Contratto (Art. 6(1)(b))</td>
                     <td>Nessun trasferimento extra-UE</td>
                   </tr>
                   <tr>
-                    <td><strong>Mistral AI</strong> (Large 3)</td>
-                    <td>Agente conversazionale AI (chat &quot;Moneo&quot;)</td>
+                    <td><strong>Mistral AI</strong></td>
+                    <td>Agente conversazionale AI</td>
                     <td>Francia 🇫🇷 (UE)</td>
                     <td>Contratto (Art. 6(1)(b))</td>
                     <td>Nessun trasferimento extra-UE</td>
                   </tr>
                   <tr>
                     <td><strong>Google Vertex AI</strong> (Gemini 2.0)</td>
-                    <td>Trascrizione messaggi vocali in testo (solo piano Pro) — solo testo estratto, no audio conservato</td>
-                    <td>USA 🇺🇸</td>
+                    <td>Analisi NLP (solo piano Pro), elaborazione vincolata alla region UE tramite parametro <code>location</code> impostato nel nostro codice</td>
+                    <td>Francoforte 🇩🇪 (UE)</td>
                     <td>Contratto (Art. 6(1)(b))</td>
-                    <td>SCC (Art. 46(2)(c))</td>
+                    <td>Nessun trasferimento extra-UE</td>
                   </tr>
                   <tr>
                     <td><strong>Tesseract OCR</strong></td>
@@ -181,7 +181,7 @@ export default function PrivacyPolicyPage() {
                   </tr>
                   <tr>
                     <td><strong>Notion Labs Inc.</strong></td>
-                    <td>Archiviazione dati finanziari nel workspace Notion dell&apos;utente (backend opzionale scelto dall&apos;utente)</td>
+                    <td>Archiviazione dati finanziari nel workspace Notion dell&apos;utente, il collegamento è facoltativo e a scelta dell&apos;utente (alternativa disponibile: DBMS su server UE)</td>
                     <td>USA 🇺🇸</td>
                     <td>Contratto (Art. 6(1)(b))</td>
                     <td>SCC (Art. 46(2)(c))</td>
@@ -216,14 +216,14 @@ export default function PrivacyPolicyPage() {
                   </tr>
                   <tr>
                     <td><strong>Tally.so</strong></td>
-                    <td>Modulo raccolta email lista d&apos;attesa early access</td>
+                    <td>Per sviluppo form</td>
                     <td>Belgio 🇧🇪 (UE)</td>
                     <td>Consenso (Art. 6(1)(a))</td>
                     <td>Trattamento interno UE</td>
                   </tr>
                   <tr>
                     <td><strong>Stripe Inc.</strong> (futuro)</td>
-                    <td>Gestione pagamenti piano Premium — <em>non ancora attivo</em></td>
+                    <td>Gestione pagamenti piani disponibili sulla piattaforma — <em>non ancora attivo</em></td>
                     <td>USA/IE 🇺🇸🇮🇪</td>
                     <td>Contratto (Art. 6(1)(b))</td>
                     <td>SCC (Art. 46(2)(c))</td>
@@ -242,7 +242,7 @@ export default function PrivacyPolicyPage() {
             <section>
               <h2>4. Trasferimento dei dati fuori dall&apos;UE</h2>
               <p>
-                Alcuni fornitori (Google, Meta, Telegram, Notion, Stripe) sono stabiliti negli USA o
+                Alcuni fornitori (Meta, Telegram, Notion, Stripe) sono stabiliti negli USA o
                 in paesi extra-UE. Il trasferimento avviene esclusivamente sulla base di Clausole
                 Contrattuali Standard (SCC) ai sensi dell&apos;Art. 46(2)(c) GDPR, che garantiscono
                 un livello di protezione equivalente a quello europeo.
@@ -254,8 +254,31 @@ export default function PrivacyPolicyPage() {
                 dello stack AI di Expensum.
               </p>
               <p>
+                <strong>Google Vertex AI</strong> (usato solo per la trascrizione vocale, piano Pro)
+                è configurato per elaborare i dati esclusivamente nella region europea di Francoforte
+                (<code>europe-west3</code>), impostata esplicitamente nel nostro codice tramite il
+                parametro <code>location</code> passato ad ogni chiamata API. Non essendoci alcun
+                trasferimento extra-UE per questo trattamento, non si applicano le SCC.
+              </p>
+              <p>
                 <strong>Netcup GmbH</strong> (hosting e database) è tedesca e opera esclusivamente
                 in Germania.
+              </p>
+              <p>
+                <strong>⚠️ Backend Notion e residenza dei dati finanziari.</strong> Se scegli di
+                collegare il tuo workspace Notion come backend per i dati finanziari, tali dati
+                (spese, entrate, categorie, conti, ecc.) vengono scritti e letti direttamente nel
+                tuo workspace tramite l&apos;API ufficiale Notion, previa tua autorizzazione OAuth.
+                Notion Labs, Inc. ha sede negli Stati Uniti e, salvo che tu abbia attivato opzioni
+                di data residency UE sul tuo account Notion (disponibili solo su piani Enterprise
+                Notion), i tuoi dati finanziari potrebbero essere conservati ed elaborati al di
+                fuori dello Spazio Economico Europeo, sulla base delle SCC stipulate da Notion.
+                Expensum non ha controllo sulle garanzie di trasferimento applicate da Notion e
+                agisce come intermediario tecnico che trasmette i dati per tuo conto, su tua
+                istruzione esplicita. <strong>Se preferisci mantenere i tuoi dati esclusivamente
+                su infrastruttura europea, puoi scegliere il backend PostgreSQL</strong>, ospitato
+                sui nostri server in UE (Germania, Netcup GmbH), senza alcun trasferimento verso
+                paesi terzi.
               </p>
             </section>
 

@@ -195,8 +195,12 @@ class BootstrapResult(NamedTuple):
         lines = ["🚀 <b>Workspace inizializzato!</b>\n"]
 
         if self.categories_created:
-            lines.append(f"📂 <b>Categorie create ({len(self.categories_created)}):</b>")
-            lines.append(", ".join(self.categories_created))
+            lines.append(
+                f"📂 <b>Categorie create ({len(self.categories_created)}):</b>\n"
+                "Abbiamo impostato per te delle categorie standard, pronte all'uso. "
+                "Puoi modificarle, rimuoverle o aggiungerne di nuove in qualsiasi momento "
+                "usando il pulsante qui sotto."
+            )
         elif self.skipped_categories:
             lines.append("📂 Categorie: già presenti, nessuna modifica.")
 
