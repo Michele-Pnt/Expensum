@@ -994,7 +994,6 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             "👋 *Benvenuto!*\n\n"
             "Sono **Moneo** 🐷, l'assistente AI di Expensum.\n"
             "Le mie risposte sono generate automaticamente con Mistral AI europea. Posso sbagliare: verifica sempre i dati finanziari importanti.\n\n"
-            "Visto che sono molto geloso dei miei file, questo sistema è privato. Per poterti aiutare, devi prima configurare le tue credenziali Notion.\n\n"
             "Digita /registrati per creare un account, o /login se ne hai già uno! 🚀",
             parse_mode=ParseMode.MARKDOWN
         )
@@ -1079,7 +1078,11 @@ async def cmd_registra(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     await update.message.reply_text(
         "🚀 *Scegli come registrarti*\n\n"
         "🔗 *Notion* — sincronizza le spese nel tuo workspace Notion (autorizzazione OAuth).\n"
-        "🐘 *PostgreSQL* — salva i dati nel database interno di Expensum, più veloce e senza rate limit.\n\n"
+        "⚠️ I tuoi dati finanziari saranno conservati sull'infrastruttura di Notion Labs Inc. "
+        "(*USA* 🇺🇸), salvo che tu abbia attivato la data residency UE sul tuo account Notion "
+        "(solo piani Enterprise).\n\n"
+        "🐘 *PostgreSQL* — salva i dati nel database interno di Expensum, su server *UE* 🇪🇺 "
+        "(Germania), più veloce e senza rate limit.\n\n"
         "Puoi cambiare idea più avanti scrivendo al supporto. 🛡️",
         parse_mode=ParseMode.MARKDOWN,
         reply_markup=keyboard
@@ -1743,10 +1746,19 @@ async def _save_to_notion(query, context, chat_id: str, account_id: str | None =
             except Exception as _le:
                 logger.debug("[User %s] log_message expense saved fallito: %s", chat_id, _le)
 
+        # Cancella i dati demo al primo salvataggio reale
+        user_obj = _user_store.get_user(chat_id)
+        if user_obj and user_obj.has_demo_data:
+            try:
+                _user_store.clear_demo_data(chat_id, storage)
+                logger.info("[User %s] Demo data cancellati al primo salvataggio reale.", chat_id)
+            except Exception as _de:
+                logger.warning("[User %s] Errore cancellazione demo data: %s", chat_id, _de)
+
         input_method = context.user_data.pop("input_method", "text")
         analytics.track(chat_id, "expense_tracked", {
             "input_method": input_method,
-            "storage_backend": _user_store.get_user(chat_id).storage_backend if _user_store.get_user(chat_id) else "unknown",
+            "storage_backend": user_obj.storage_backend if user_obj else "unknown",
             "transaction_type": data.get("type", "expense"),
         })
 
@@ -1831,7 +1843,9 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         target = "Notion" if query.data == "switch_to_notion" else "PostgreSQL"
         await query.edit_message_text(
             f"✅ *Dati precedenti eliminati con successo!*\n\n"
-            f"Ora puoi procedere alla nuova registrazione con {target} (o cambiare idea) scegliendo un'opzione qui sotto:",
+            f"Ora puoi procedere alla nuova registrazione con {target} (o cambiare idea) scegliendo un'opzione qui sotto:\n\n"
+            "⚠️ *Notion*: dati conservati su infrastruttura USA 🇺🇸 (salvo data residency UE su piani "
+            "Enterprise Notion). *PostgreSQL*: dati su server UE 🇪🇺 (Germania).",
             parse_mode=ParseMode.MARKDOWN,
             reply_markup=keyboard
         )
@@ -2496,11 +2510,29 @@ async def ob_handle_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     _user_store.complete_onboarding(chat_id)
     analytics.track(chat_id, "onboarding_completed", {"platform": "telegram", "hobbies": hobbies})
 
+    # Carica dati demo automaticamente per il tour nella web app
+    demo_count = 0
+    try:
+        from src.demo_data import load_demo_data
+        storage = _get_storage(chat_id)
+        demo_count = load_demo_data(storage)
+        _user_store.set_has_demo_data(chat_id, True)
+        analytics.track(chat_id, "demo_data_loaded", {"expense_count": demo_count, "platform": "telegram"})
+    except Exception as e:
+        logger.warning("[User %s] Errore caricamento demo data post-onboarding: %s", chat_id, e)
+
+    webapp_url = f"{Config.WEBAPP_BASE_URL}/chat?tour=1&demo=1"
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("✨ Scopri Expensum", web_app=WebAppInfo(url=webapp_url))],
+    ])
     await query.edit_message_text(
-        "✅ <b>Configurazione completata!</b>\n\n"
-        "Ora puoi iniziare a registrare le tue spese. Scrivimi qualcosa tipo:\n"
-        "<i>\"caffè 1.50\"</i> o <i>\"cena con amici 45€\"</i>",
+        "🎉 <b>Tutto pronto!</b>\n\n"
+        "Ho preparato <b>30 giorni di dati di esempio</b> così puoi vedere subito "
+        "come funzionano analytics, report e tutto il resto.\n\n"
+        "Apri la web app — ti guiderò in un tour rapido, poi puliamo i dati demo "
+        "e sei pronto a iniziare davvero. 👇",
         parse_mode=ParseMode.HTML,
+        reply_markup=keyboard,
     )
     return ConversationHandler.END
 
@@ -2582,6 +2614,80 @@ async def _show_preferences_menu(query, chat_id: str) -> None:
     await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=_preferences_menu_keyboard())
 
 
+async def _send_privacy_export(context: ContextTypes.DEFAULT_TYPE, chat_id: str) -> bool:
+    """Genera e invia l'export dati (Art. 15/20 GDPR), condiviso tra /export e il bottone /impostazioni.
+
+    Ritorna False se l'utente non esiste (nessun documento inviato), True altrimenti.
+    """
+    with _user_store.Session() as s:
+        user = s.query(User).filter_by(chat_id=chat_id).first()
+        if not user:
+            return False
+        export_data = build_export_json(s, user)
+        csv_rows = build_csv_rows(s, user)
+
+    _user_store.write_audit_log(chat_id, actor="user", action="export_json", user_agent="telegram-bot")
+
+    json_bytes = json.dumps(export_data, ensure_ascii=False, indent=2, default=str).encode("utf-8")
+    today_str = date.today().isoformat()
+    await context.bot.send_document(
+        chat_id=int(chat_id),
+        document=InputFile(io.BytesIO(json_bytes), filename=f"expensum_dati_{today_str}.json"),
+        caption="📥 Copia completa dei tuoi dati personali (Art. 15 GDPR).",
+    )
+
+    if csv_rows is not None:
+        _user_store.write_audit_log(chat_id, actor="user", action="export_csv", user_agent="telegram-bot")
+        buffer = io.StringIO()
+        writer = csv.writer(buffer)
+        writer.writerow(CSV_HEADER)
+        for row in csv_rows:
+            writer.writerow(row)
+        csv_bytes = buffer.getvalue().encode("utf-8")
+        await context.bot.send_document(
+            chat_id=int(chat_id),
+            document=InputFile(io.BytesIO(csv_bytes), filename=f"expensum_transazioni_{today_str}.csv"),
+            caption="📥 Le tue transazioni in formato portabile (Art. 20 GDPR).",
+        )
+    else:
+        await context.bot.send_message(
+            chat_id=int(chat_id),
+            text=(
+                "ℹ️ I tuoi dati finanziari sono nel tuo workspace Notion personale: "
+                "esportali direttamente da notion.so."
+            ),
+        )
+    return True
+
+
+async def _send_privacy_policy_link(context: ContextTypes.DEFAULT_TYPE, chat_id: str) -> None:
+    """Invia il link alla privacy policy, condiviso tra /privacy e il bottone /impostazioni."""
+    await context.bot.send_message(
+        chat_id=int(chat_id),
+        text=f"📄 Privacy Policy: {Config.WEBAPP_BASE_URL}/privacy",
+    )
+
+
+async def cmd_privacy(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handler per /privacy — invia direttamente il link alla privacy policy."""
+    if not _is_authorized(update):
+        await _reply_not_authorized(update)
+        return
+    await _send_privacy_policy_link(context, str(update.effective_chat.id))
+
+
+async def cmd_export(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handler per /export — genera ed invia l'export dati (Art. 15/20 GDPR) senza passare dal menu."""
+    if not _is_authorized(update):
+        await _reply_not_authorized(update)
+        return
+    chat_id = str(update.effective_chat.id)
+    await update.message.reply_text("⏳ Generazione export in corso...")
+    ok = await _send_privacy_export(context, chat_id)
+    if not ok:
+        await update.message.reply_text("❌ Utente non trovato.")
+
+
 async def handle_impostazioni_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Dispatcher per i bottoni del menu /impostazioni (Privacy e dati / Preferenze)."""
     query = update.callback_query
@@ -2608,45 +2714,10 @@ async def handle_impostazioni_menu_callback(update: Update, context: ContextType
 
     if query.data == PRIVACY_EXPORT_CB:
         await query.edit_message_text("⏳ Generazione export in corso...")
-        with _user_store.Session() as s:
-            user = s.query(User).filter_by(chat_id=chat_id).first()
-            if not user:
-                await query.edit_message_text("❌ Utente non trovato.")
-                return
-            export_data = build_export_json(s, user)
-            csv_rows = build_csv_rows(s, user)
-
-        _user_store.write_audit_log(chat_id, actor="user", action="export_json", user_agent="telegram-bot")
-
-        json_bytes = json.dumps(export_data, ensure_ascii=False, indent=2, default=str).encode("utf-8")
-        today_str = date.today().isoformat()
-        await context.bot.send_document(
-            chat_id=int(chat_id),
-            document=InputFile(io.BytesIO(json_bytes), filename=f"expensum_dati_{today_str}.json"),
-            caption="📥 Copia completa dei tuoi dati personali (Art. 15 GDPR).",
-        )
-
-        if csv_rows is not None:
-            _user_store.write_audit_log(chat_id, actor="user", action="export_csv", user_agent="telegram-bot")
-            buffer = io.StringIO()
-            writer = csv.writer(buffer)
-            writer.writerow(CSV_HEADER)
-            for row in csv_rows:
-                writer.writerow(row)
-            csv_bytes = buffer.getvalue().encode("utf-8")
-            await context.bot.send_document(
-                chat_id=int(chat_id),
-                document=InputFile(io.BytesIO(csv_bytes), filename=f"expensum_transazioni_{today_str}.csv"),
-                caption="📥 Le tue transazioni in formato portabile (Art. 20 GDPR).",
-            )
-        else:
-            await context.bot.send_message(
-                chat_id=int(chat_id),
-                text=(
-                    "ℹ️ I tuoi dati finanziari sono nel tuo workspace Notion personale: "
-                    "esportali direttamente da notion.so."
-                ),
-            )
+        ok = await _send_privacy_export(context, chat_id)
+        if not ok:
+            await query.edit_message_text("❌ Utente non trovato.")
+            return
         await _show_privacy_menu(query, chat_id)
         return
 
@@ -2663,10 +2734,7 @@ async def handle_impostazioni_menu_callback(update: Update, context: ContextType
         return
 
     if query.data == PRIVACY_POLICY_CB:
-        await context.bot.send_message(
-            chat_id=int(chat_id),
-            text=f"📄 Privacy Policy: {Config.WEBAPP_BASE_URL}/privacy",
-        )
+        await _send_privacy_policy_link(context, chat_id)
         return
 
     if query.data == PRIVACY_TERMS_CB:
@@ -2746,6 +2814,8 @@ def main():
     app.add_handler(CommandHandler("login", cmd_login))
     app.add_handler(CommandHandler("modify", cmd_modify))
     app.add_handler(CommandHandler("impostazioni", cmd_impostazioni_menu))
+    app.add_handler(CommandHandler("privacy", cmd_privacy))
+    app.add_handler(CommandHandler("export", cmd_export))
     app.add_handler(CommandHandler("feedback", cmd_feedback))
     app.add_handler(CommandHandler("status", cmd_status))
     app.add_handler(CommandHandler("piano", cmd_piano))

@@ -26,6 +26,7 @@ import re
 from datetime import date, datetime
 from typing import Optional
 
+import requests
 from notion_client import Client
 from notion_client.errors import APIResponseError
 from tenacity import (
@@ -38,6 +39,38 @@ from tenacity import (
 from config import Config
 
 logger = logging.getLogger("financial_agent.notion")
+
+NOTION_OAUTH_REVOKE_URL = "https://api.notion.com/v1/oauth/revoke"
+NOTION_OAUTH_API_VERSION = "2026-03-11"
+
+
+def revoke_notion_token(access_token: str) -> bool:
+    """Revoca un token OAuth Notion lato Notion (Art. 17 GDPR — diritto all'oblio).
+
+    Va chiamata da delete_user_completely() prima di cancellare l'utente, così
+    l'accesso concesso a Expensum sul workspace Notion dell'utente cessa
+    davvero, non solo lato DB Expensum. Non deve mai sollevare: se Notion non
+    risponde o rifiuta la richiesta, la cancellazione dell'account deve
+    comunque procedere — il fallimento viene solo loggato.
+    """
+    try:
+        response = requests.post(
+            NOTION_OAUTH_REVOKE_URL,
+            auth=(Config.NOTION_CLIENT_ID, Config.NOTION_CLIENT_SECRET),
+            headers={"Notion-Version": NOTION_OAUTH_API_VERSION},
+            json={"token": access_token},
+            timeout=10,
+        )
+        if not response.ok:
+            logger.warning(
+                "Revoca token Notion fallita (status %s): %s",
+                response.status_code, response.text,
+            )
+            return False
+        return True
+    except Exception:
+        logger.warning("Errore imprevisto durante la revoca del token Notion", exc_info=True)
+        return False
 
 
 class NotionFinanceClient:

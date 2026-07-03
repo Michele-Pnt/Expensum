@@ -1449,6 +1449,20 @@ class UserStore:
 
             backend = user.storage_backend or "notion"
 
+            if backend == "notion" and user.notion_access_token:
+                from src.notion_client import revoke_notion_token
+                try:
+                    revoked = revoke_notion_token(user.notion_access_token)
+                except Exception:
+                    revoked = False
+                    logger.warning(
+                        "revoke_notion_token ha sollevato un'eccezione per chat_id=%s", chat_id, exc_info=True,
+                    )
+                logger.info(
+                    "Revoca token Notion per chat_id=%s: %s",
+                    chat_id, "riuscita" if revoked else "fallita (procedo comunque con la cancellazione)",
+                )
+
             # Elimina i link Notion delle categorie (FK su user_categories.id) prima
             # di eliminare le categorie stesse — vale sia per Notion che per postgres.
             cat_ids = [

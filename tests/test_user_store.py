@@ -308,6 +308,45 @@ def test_delete_user_completely_removes_all_tables(mock_db_session):
         )
 
 
+def test_delete_user_completely_revokes_notion_token(mock_db_session, mocker):
+    """delete_user_completely() deve revocare il token Notion lato API (Art. 17).
+
+    Verifica sia che revoke_notion_token venga chiamata con il token corretto
+    per un utente storage_backend='notion', sia che la cancellazione riesca
+    comunque se la revoca fallisce (non deve mai bloccare l'eliminazione).
+    """
+    store = mock_db_session
+    chat_id = "notion_delete_test"
+    store.add_user(chat_id=chat_id, username="notion-user", storage_backend="notion",
+                    notion_access_token="secret_test_token")
+
+    mock_revoke = mocker.patch("src.notion_client.revoke_notion_token", return_value=True)
+
+    result = store.delete_user_completely(chat_id)
+
+    assert result == "notion"
+    mock_revoke.assert_called_once_with("secret_test_token")
+
+    with store.Session() as s:
+        assert s.query(User).filter(User.chat_id == chat_id).count() == 0
+
+
+def test_delete_user_completely_succeeds_even_if_notion_revoke_fails(mock_db_session, mocker):
+    """La cancellazione account non deve mai bloccarsi se la revoca Notion fallisce."""
+    store = mock_db_session
+    chat_id = "notion_delete_test_2"
+    store.add_user(chat_id=chat_id, username="notion-user-2", storage_backend="notion",
+                    notion_access_token="secret_test_token")
+
+    mocker.patch("src.notion_client.revoke_notion_token", side_effect=Exception("Notion API down"))
+
+    result = store.delete_user_completely(chat_id)
+
+    assert result == "notion"
+    with store.Session() as s:
+        assert s.query(User).filter(User.chat_id == chat_id).count() == 0
+
+
 def test_reassign_user_chat_id_respects_foreign_keys(mock_db_session):
     """reassign_user_chat_id deve spostare TUTTE le tabelle figlie senza violare FK/UNIQUE.
 

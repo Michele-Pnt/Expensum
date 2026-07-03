@@ -6,6 +6,7 @@ attributi di un oggetto Config singleton.
 
 import os
 import logging
+from logging.handlers import TimedRotatingFileHandler
 from pathlib import Path
 from dotenv import load_dotenv
 
@@ -134,12 +135,20 @@ def setup_logging() -> logging.Logger:
     Config.LOG_DIR.mkdir(exist_ok=True)
     log_file = Config.LOG_DIR / "agent.log"
 
+    # TimedRotatingFileHandler: un nuovo file ogni mezzanotte, mantiene solo gli
+    # ultimi 30 giorni (coerente con la retention documentata in
+    # data-breach-procedure.md §1.6 e nella GDPR roadmap §1.6). Prima di questo
+    # fix il FileHandler semplice faceva crescere agent.log senza limiti.
+    file_handler = TimedRotatingFileHandler(
+        log_file, when="midnight", backupCount=30, encoding="utf-8",
+    )
+
     logging.basicConfig(
         level=Config.LOG_LEVEL,
         format="%(asctime)s [%(levelname)s] %(name)s — %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
         handlers=[
-            logging.FileHandler(log_file, encoding="utf-8"),
+            file_handler,
             logging.StreamHandler(),
         ],
     )
