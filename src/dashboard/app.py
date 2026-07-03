@@ -86,6 +86,48 @@ def api_csrf_token():
     """
     return jsonify({"csrf_token": generate_csrf()})
 
+_TRACK_EVENT_RE = re.compile(r"^[a-z0-9_]{1,64}$")
+
+
+@app.route("/api/track", methods=["POST"])
+@limiter.limit("60 per minute")
+def api_track():
+    """Riceve un evento di analytics dal frontend e lo inoltra server-side.
+
+    Il browser non parla mai direttamente con PostHog/GA4/Meta: questa rotta
+    è same-origin, quindi la CSP non deve concedere script-src/connect-src a
+    nessuno di quei domini. Il consenso cookie (letto lato client dal CMP)
+    decide quali vendor vengono effettivamente notificati.
+    """
+    data = request.get_json(silent=True) or {}
+    event = data.get("event", "")
+    if not _TRACK_EVENT_RE.match(event):
+        return jsonify({"error": "invalid event name"}), 400
+
+    properties = data.get("properties") or {}
+    if not isinstance(properties, dict):
+        return jsonify({"error": "invalid properties"}), 400
+
+    anonymous_id = data.get("anonymous_id")
+    distinct_id = _get_session_chat_id() or anonymous_id
+    if not distinct_id or not isinstance(distinct_id, str) or len(distinct_id) > 128:
+        return jsonify({"error": "missing distinct id"}), 400
+
+    consent = data.get("consent") or {}
+    if event == "identify":
+        analytics.identify(distinct_id, properties)
+        return jsonify({"ok": True})
+
+    analytics.track(distinct_id, event, properties)
+    if consent.get("analytics"):
+        analytics.track_ga4(distinct_id, event, properties)
+    if consent.get("marketing"):
+        event_id = data.get("event_id") or str(uuid.uuid4())
+        analytics.track_meta(event, event_id, properties)
+
+    return jsonify({"ok": True})
+
+
 @app.after_request
 def skip_ngrok_interstitial(response):
     response.headers["ngrok-skip-browser-warning"] = "true"

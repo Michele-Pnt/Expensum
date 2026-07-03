@@ -1,19 +1,75 @@
 /**
- * Typed helpers per il tracking PostHog lato frontend.
+ * Tracking eventi lato frontend — inoltrato server-side via /api/track.
+ *
+ * Il browser non carica mai script di PostHog/GA4/Meta né apre connessioni
+ * verso i loro domini: la CSP resta chiusa a 'self'. Il backend Flask
+ * (src/analytics.py) inoltra l'evento ai vendor abilitati in base al
+ * consenso cookie corrente.
  *
  * Regole GDPR:
- * - distinct_id = chat_id Telegram (pseudonimo) o web user_id
+ * - distinct_id = chat_id Telegram (risolto server-side dalla sessione) o un
+ *   id anonimo generato client-side, persistito in localStorage
  * - NON includere mai amount, category_name, merchant nelle properties
  * - NON includere mai contenuto di feedback o notifiche
  */
-import posthog from "posthog-js";
+import { getCsrfToken } from "@/lib/csrf";
+
+const ANONYMOUS_ID_KEY = "expensum_anonymous_id";
+
+function getAnonymousId(): string {
+  if (typeof window === "undefined") return "";
+  let id = window.localStorage.getItem(ANONYMOUS_ID_KEY);
+  if (!id) {
+    id = crypto.randomUUID();
+    window.localStorage.setItem(ANONYMOUS_ID_KEY, id);
+  }
+  return id;
+}
+
+function getConsent(): { analytics: boolean; marketing: boolean } {
+  if (typeof window === "undefined") return { analytics: false, marketing: false };
+  try {
+    // vanilla-cookieconsent espone lo stato accettato via cookie dedicato;
+    // fallback a "non concesso" se non ancora inizializzato (fail-closed).
+    const w = window as unknown as {
+      __cookieConsentApi?: { acceptedCategory: (c: string) => boolean };
+    };
+    if (!w.__cookieConsentApi) return { analytics: false, marketing: false };
+    return {
+      analytics: w.__cookieConsentApi.acceptedCategory("analytics"),
+      marketing: w.__cookieConsentApi.acceptedCategory("marketing"),
+    };
+  } catch {
+    return { analytics: false, marketing: false };
+  }
+}
+
+async function sendEvent(event: string, properties?: Record<string, unknown>): Promise<void> {
+  if (typeof window === "undefined") return;
+  try {
+    const csrfToken = await getCsrfToken();
+    await fetch("/api/track", {
+      method: "POST",
+      credentials: "same-origin",
+      headers: { "Content-Type": "application/json", "X-CSRFToken": csrfToken },
+      body: JSON.stringify({
+        event,
+        properties: properties ?? {},
+        anonymous_id: getAnonymousId(),
+        consent: getConsent(),
+      }),
+    });
+  } catch {
+    // Fire-and-forget: il tracking non deve mai bloccare o rompere la UI.
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Identificazione utente
 // ---------------------------------------------------------------------------
 
 export function identifyUser(distinctId: string, properties?: Record<string, string>) {
-  posthog.identify(distinctId, properties);
+  void sendEvent("identify", { distinct_id: distinctId, ...properties });
 }
 
 // ---------------------------------------------------------------------------
@@ -21,15 +77,15 @@ export function identifyUser(distinctId: string, properties?: Record<string, str
 // ---------------------------------------------------------------------------
 
 export function trackUserSignedUp(authMethod: "web" | "telegram") {
-  posthog.capture("user_signed_up", { auth_method: authMethod });
+  void sendEvent("user_signed_up", { auth_method: authMethod });
 }
 
 export function trackOnboardingStepCompleted(stepName: string, stepNumber: number) {
-  posthog.capture("onboarding_step_completed", { step_name: stepName, step_number: stepNumber });
+  void sendEvent("onboarding_step_completed", { step_name: stepName, step_number: stepNumber });
 }
 
 export function trackOnboardingCompleted() {
-  posthog.capture("onboarding_completed", { platform: "web" });
+  void sendEvent("onboarding_completed", { platform: "web" });
 }
 
 // ---------------------------------------------------------------------------
@@ -39,15 +95,15 @@ export function trackOnboardingCompleted() {
 export type InputMethod = "text" | "voice" | "photo";
 
 export function trackExpenseTracked(inputMethod: InputMethod) {
-  posthog.capture("expense_tracked", { input_method: inputMethod });
+  void sendEvent("expense_tracked", { input_method: inputMethod });
 }
 
 export function trackExpenseTrackingFailed(reason: string, inputMethod: InputMethod = "text") {
-  posthog.capture("expense_tracking_failed", { reason, input_method: inputMethod });
+  void sendEvent("expense_tracking_failed", { reason, input_method: inputMethod });
 }
 
 export function trackFirstExpenseTracked(inputMethod: InputMethod) {
-  posthog.capture("first_expense_tracked", { input_method: inputMethod });
+  void sendEvent("first_expense_tracked", { input_method: inputMethod });
 }
 
 // ---------------------------------------------------------------------------
@@ -55,11 +111,11 @@ export function trackFirstExpenseTracked(inputMethod: InputMethod) {
 // ---------------------------------------------------------------------------
 
 export function trackReportViewed(reportType: "weekly" | "monthly" | string) {
-  posthog.capture("report_viewed", { report_type: reportType });
+  void sendEvent("report_viewed", { report_type: reportType });
 }
 
 export function trackReportShared(reportType: "weekly" | "monthly" | string) {
-  posthog.capture("report_shared", { report_type: reportType });
+  void sendEvent("report_shared", { report_type: reportType });
 }
 
 // ---------------------------------------------------------------------------
@@ -67,23 +123,23 @@ export function trackReportShared(reportType: "weekly" | "monthly" | string) {
 // ---------------------------------------------------------------------------
 
 export function trackPaywallViewed(source?: string) {
-  posthog.capture("paywall_viewed", { source: source ?? "direct" });
+  void sendEvent("paywall_viewed", { source: source ?? "direct" });
 }
 
 export function trackTrialStarted(planType: string) {
-  posthog.capture("trial_started", { plan_type: planType });
+  void sendEvent("trial_started", { plan_type: planType });
 }
 
 export function trackSubscriptionStarted(planType: string, fromPlan?: string) {
-  posthog.capture("subscription_started", { plan_type: planType, from_plan: fromPlan ?? "free" });
+  void sendEvent("subscription_started", { plan_type: planType, from_plan: fromPlan ?? "free" });
 }
 
 export function trackSubscriptionCancelled(planType: string) {
-  posthog.capture("subscription_cancelled", { plan_type: planType });
+  void sendEvent("subscription_cancelled", { plan_type: planType });
 }
 
 export function trackSubscriptionPaused(planType: string) {
-  posthog.capture("subscription_paused", { plan_type: planType });
+  void sendEvent("subscription_paused", { plan_type: planType });
 }
 
 // ---------------------------------------------------------------------------
@@ -91,7 +147,7 @@ export function trackSubscriptionPaused(planType: string) {
 // ---------------------------------------------------------------------------
 
 export function trackFeedbackSubmitted() {
-  posthog.capture("feedback_submitted");
+  void sendEvent("feedback_submitted");
 }
 
 // ---------------------------------------------------------------------------
