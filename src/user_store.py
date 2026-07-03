@@ -186,6 +186,9 @@ class User(Base):
     # Attestazione età 18+ (D.Lgs. 101/2018 + capacità contrattuale Pro)
     age_attestation_at = Column(DateTime, nullable=True)
 
+    # Flag demo data — True se l'utente ha caricato dati fittizi da esplorare
+    has_demo_data = Column(Boolean, default=False, nullable=False)
+
     def __repr__(self):
         return f"<User(chat_id={self.chat_id}, username='{self.username}')>"
 
@@ -734,6 +737,25 @@ class UserStore:
             user.onboarding_completed_at = datetime.utcnow()
             user.onboarding_step = 'completed'
             session.commit()
+
+    def set_has_demo_data(self, chat_id: str, value: bool) -> None:
+        """Imposta il flag has_demo_data per l'utente."""
+        chat_id = str(chat_id)
+        with self.Session() as session:
+            user = session.query(User).filter(User.chat_id == chat_id).first()
+            if not user:
+                return
+            user.has_demo_data = value
+            session.commit()
+
+    def clear_demo_data(self, chat_id: str, storage) -> int:
+        """Cancella le spese demo e resetta il flag. Ritorna il numero di spese cancellate."""
+        count = -1
+        if hasattr(storage, "delete_expenses_by_prefix"):
+            from src.demo_data import DEMO_PREFIX
+            count = storage.delete_expenses_by_prefix(DEMO_PREFIX)
+        self.set_has_demo_data(chat_id, False)
+        return count
 
     def get_user_preferences(self, chat_id: str) -> dict:
         """Restituisce le preferenze utente come dizionario."""

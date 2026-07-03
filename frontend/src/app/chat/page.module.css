@@ -11,7 +11,7 @@
 .chatRoot {
   display: flex;
   flex-direction: column;
-  height: 100vh;
+  height: 100%;
   background: #0B1120;
   color: #e8eaf0;
   font-family: 'Inter', system-ui, sans-serif;

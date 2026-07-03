@@ -5,6 +5,8 @@ import { useRouter } from "next/navigation";
 import { Box, CircularProgress, Typography, IconButton, useMediaQuery, useTheme } from "@mui/material";
 import { Menu as MenuIcon } from "lucide-react";
 import Sidebar from "./Sidebar";
+import { TourProvider } from "@/context/TourContext";
+import TourOverlay from "./TourOverlay";
 
 type AuthStatus =
   | { phase: "loading"; isTelegram: boolean }
@@ -131,31 +133,43 @@ export default function ProtectedAppShell({ children }: { children: React.ReactN
   }
 
   if (authStatus.isTelegram) {
-    return <Box sx={{ minHeight: "100vh", bgcolor: "background.default" }}>{children}</Box>;
+    return (
+      <TourProvider>
+        <Box sx={{ minHeight: "100vh", bgcolor: "background.default" }}>{children}</Box>
+        <TourOverlay />
+      </TourProvider>
+    );
   }
 
   return (
-    <Box sx={{ display: "flex", minHeight: "100vh", bgcolor: "background.default" }}>
-      <Sidebar mobileOpen={mobileOpen} desktopOpen={desktopOpen} onToggle={handleDrawerToggle} isMobile={isMobile} />
-      <Box 
-        component="main" 
-        sx={{ 
-          flexGrow: 1, 
-          width: { sm: desktopOpen ? "calc(100% - 240px)" : "100%" },
-          display: "flex",
-          flexDirection: "column",
-          minWidth: 0,
-        }}
-      >
-        {(!desktopOpen || isMobile) && (
-          <Box sx={{ p: 2, pb: 0, display: "flex", alignItems: "center" }}>
-            <IconButton onClick={handleDrawerToggle} sx={{ bgcolor: "background.paper", boxShadow: 1, border: "1px solid var(--color-border)" }}>
-              <MenuIcon size={20} />
-            </IconButton>
+    <TourProvider>
+      <Box sx={{ display: "flex", height: ["100vh", "100dvh"], overflow: "hidden", bgcolor: "background.default" }}>
+        <Sidebar mobileOpen={mobileOpen} desktopOpen={desktopOpen} onToggle={handleDrawerToggle} isMobile={isMobile} />
+        <Box
+          component="main"
+          data-tour="tour-final"
+          sx={{
+            flexGrow: 1,
+            width: { sm: desktopOpen ? "calc(100% - 240px)" : "100%" },
+            display: "flex",
+            flexDirection: "column",
+            minWidth: 0,
+            overflow: "hidden",
+          }}
+        >
+          {(!desktopOpen || isMobile) && (
+            <Box sx={{ p: 2, pb: 0, display: "flex", alignItems: "center", flexShrink: 0 }}>
+              <IconButton onClick={handleDrawerToggle} data-action="sidebar-open" sx={{ bgcolor: "background.paper", boxShadow: 1, border: "1px solid var(--color-border)" }}>
+                <MenuIcon size={20} />
+              </IconButton>
+            </Box>
+          )}
+          <Box sx={{ flexGrow: 1, overflowY: "auto", minHeight: 0, display: "flex", flexDirection: "column" }}>
+            {children}
           </Box>
-        )}
-        {children}
+        </Box>
       </Box>
-    </Box>
+      <TourOverlay />
+    </TourProvider>
   );
 }

@@ -3034,6 +3034,38 @@ def api_onboarding_age_confirm():
     return jsonify({"status": "ok"})
 
 
+@app.route("/api/demo/load", methods=["POST"])
+def api_demo_load():
+    """Carica 30 giorni di spese demo (prefissate [Demo]) per l'utente."""
+    chat_id, _ = _resolve_request_chat_id()
+    if not chat_id:
+        return jsonify({"error": "Unauthorized"}), 401
+    try:
+        from src.demo_data import load_demo_data
+        storage = _get_storage(chat_id)
+        count = load_demo_data(storage)
+        store.set_has_demo_data(chat_id, True)
+        return jsonify({"ok": True, "expense_count": count})
+    except Exception as e:
+        app.logger.warning("[User %s] Errore caricamento demo data: %s", chat_id, e)
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@app.route("/api/demo/clear", methods=["POST"])
+def api_demo_clear():
+    """Cancella le spese demo (prefissate [Demo]) e resetta il flag has_demo_data."""
+    chat_id, _ = _resolve_request_chat_id()
+    if not chat_id:
+        return jsonify({"error": "Unauthorized"}), 401
+    try:
+        storage = _get_storage(chat_id)
+        count = store.clear_demo_data(chat_id, storage)
+        return jsonify({"ok": True, "deleted": count})
+    except Exception as e:
+        app.logger.warning("[User %s] Errore pulizia demo data: %s", chat_id, e)
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
 @app.route("/api/user/preferences", methods=["GET"])
 def api_user_preferences_get():
     """Restituisce le preferenze utente."""

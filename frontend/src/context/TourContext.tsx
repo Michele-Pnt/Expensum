@@ -2,6 +2,7 @@
 
 import React, { createContext, useCallback, useContext, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
+import { getCsrfToken } from "@/lib/csrf";
 
 export interface TourStep {
   id: string;
@@ -27,6 +28,7 @@ interface TourContextValue {
 const TOUR_PENDING_KEY = "expensum_tour_pending";
 const TOUR_DONE_KEY = "expensum_tour_done";
 const TOUR_STEP_KEY = "expensum_tour_step";
+const TOUR_DEMO_KEY = "expensum_demo_active";
 
 export const TOUR_STEPS: TourStep[] = [
   {
@@ -45,7 +47,7 @@ export const TOUR_STEPS: TourStep[] = [
     title: "Storico conversazioni",
     description:
       "Ogni spesa viene confermata prima di essere salvata. Se hai sbagliato importo o categoria, puoi annullare con un click.",
-    position: "bottom",
+    position: "top",
   },
   {
     id: "analytics-period",
@@ -112,8 +114,30 @@ export const TOUR_STEPS: TourStep[] = [
     selector: '[data-tour="sidebar-nav"]',
     title: "Navigazione",
     description:
-      "Puoi tornare in qualsiasi sezione in qualsiasi momento dalla barra laterale. Il tour è finito — benvenuto su Expensum!",
-    position: "right",
+      "Puoi tornare in qualsiasi sezione in qualsiasi momento dalla barra laterale.",
+    position: "bottom",
+    setup: () => {
+      // Su mobile il drawer è chiuso: lo apriamo prima di cercare il target
+      const nav = document.querySelector('[data-tour="sidebar-nav"]') as HTMLElement | null;
+      const isHidden = !nav || nav.getBoundingClientRect().width === 0;
+      if (isHidden) {
+        const btn = document.querySelector('[data-action="sidebar-open"]') as HTMLElement | null;
+        btn?.click();
+      }
+    },
+  },
+  {
+    id: "tour-complete",
+    page: "/chat",
+    selector: '[data-tour="tour-final"]',
+    title: "🎉 Ora sai come funziona!",
+    description: (
+      <>
+        Quello che hai visto erano <strong>dati di esempio</strong> — li cancelliamo adesso e il tuo spazio è
+        pronto per iniziare davvero. Tocca <strong>Fine</strong> e parte!
+      </>
+    ),
+    position: "center",
   },
 ];
 
@@ -135,9 +159,23 @@ export function TourProvider({ children }: { children: React.ReactNode }) {
     setIsActive(false);
     setCurrentStep(0);
     try {
+      const demoActive = localStorage.getItem(TOUR_DEMO_KEY) === "true";
       localStorage.removeItem(TOUR_PENDING_KEY);
       localStorage.removeItem(TOUR_STEP_KEY);
-      if (done) localStorage.setItem(TOUR_DONE_KEY, "true");
+      localStorage.removeItem(TOUR_DEMO_KEY);
+      if (done) {
+        localStorage.setItem(TOUR_DONE_KEY, "true");
+        if (demoActive) {
+          // Pulizia demo data fire-and-forget
+          getCsrfToken().then((csrfToken) => {
+            fetch("/api/demo/clear", {
+              method: "POST",
+              headers: { "X-CSRFToken": csrfToken },
+              credentials: "same-origin",
+            }).catch(() => {});
+          }).catch(() => {});
+        }
+      }
     } catch {
       // localStorage non disponibile (SSR o privacy mode)
     }
@@ -148,7 +186,7 @@ export function TourProvider({ children }: { children: React.ReactNode }) {
     setIsActive(true);
   }, []);
 
-  const skipTour = useCallback(() => endTour(true), [endTour]);
+  const skipTour = useCallback(() => endTour(false), [endTour]);
 
   const navigateToStep = useCallback(
     (step: TourStep) => {
@@ -187,8 +225,14 @@ export function TourProvider({ children }: { children: React.ReactNode }) {
   // Controlla il flag localStorage al mount (solo client).
   // Ogni pagina ha il proprio TourProvider, quindi persiste lo step corrente
   // in localStorage per riprendere dal punto giusto dopo la navigazione.
+  // Supporta anche ?tour=1&demo=1 come query param (percorso Bot Mini App).
   useEffect(() => {
     try {
+      if (typeof window !== "undefined") {
+        const params = new URLSearchParams(window.location.search);
+        if (params.get("tour") === "1") localStorage.setItem(TOUR_PENDING_KEY, "true");
+        if (params.get("demo") === "1") localStorage.setItem(TOUR_DEMO_KEY, "true");
+      }
       const pending = localStorage.getItem(TOUR_PENDING_KEY);
       const done = localStorage.getItem(TOUR_DONE_KEY);
       if (pending === "true" && done !== "true") {

@@ -23,23 +23,24 @@ export default function Sidebar({ mobileOpen = false, desktopOpen = true, onTogg
     { name: "Chat", path: "/chat", icon: <MessageCircle size={18} /> },
     { name: "Analytics", path: "/analytics", icon: <BarChart2 size={18} /> },
     { name: "Report", path: "/reports", icon: <FileText size={18} /> },
+    { name: "Il mio Spazio", path: "/spazio", icon: <User size={18} /> },
   ];
 
   const bottomNavItems = [
-    { name: "Il mio Spazio", path: "/spazio", icon: <User size={18} /> },
     { name: "Feedback", path: "/feedback", icon: <MessageSquare size={18} /> },
     { name: "Abbonamenti", path: "/abbonamenti", icon: <CreditCard size={18} /> },
     { name: "Impostazioni", path: "/impostazioni", icon: <Settings size={18} /> },
   ];
 
   const drawerContent = (
-    <>
-      <div className={styles.brand} onClick={onToggle} style={{ cursor: onToggle ? "pointer" : "default" }}>
-        <img src="/logo-expensum-icon.png" alt="Expensum" className={styles.brandLogo} />
-        <span className={styles.brandName}>EXPENSUM</span>
-      </div>
+    <Box sx={{ display: "flex", flexDirection: "column", height: "100%" }}>
+      <div data-tour="sidebar-nav">
+        <div className={styles.brand} onClick={onToggle} style={{ cursor: onToggle ? "pointer" : "default" }}>
+          <img src="/logo-expensum-icon.png" alt="Expensum" className={styles.brandLogo} />
+          <span className={styles.brandName}>EXPENSUM</span>
+        </div>
 
-      <List className={styles.navSection} disablePadding>
+        <List className={styles.navSection} disablePadding>
         {navItems.map((item) => {
           const isActive = pathname === item.path;
           return (
@@ -64,7 +65,8 @@ export default function Sidebar({ mobileOpen = false, desktopOpen = true, onTogg
             </ListItem>
           );
         })}
-      </List>
+        </List>
+      </div>
 
       <div className={styles.divider} />
 
@@ -94,7 +96,7 @@ export default function Sidebar({ mobileOpen = false, desktopOpen = true, onTogg
           );
         })}
       </List>
-    </>
+    </Box>
   );
 
   return (

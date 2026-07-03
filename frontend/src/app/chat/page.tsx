@@ -5,6 +5,7 @@ import Image from "next/image";
 import styles from "./page.module.css";
 import MoneoWidget, { type MoneoState } from "@/components/MoneoWidget";
 import { getCsrfToken } from "@/lib/csrf";
+import { useTour } from "@/context/TourContext";
 import {
   trackExpenseTracked,
   trackExpenseTrackingFailed,
@@ -93,9 +94,32 @@ const SUGGESTIONS = [
   "Affitto 450€",
 ];
 
+// ─── Tour demo exchange ───────────────────────────────────────────────────────
+
+const TOUR_DEMO_MESSAGES: Message[] = [
+  {
+    id: "tour-demo-user",
+    role: "user",
+    text: "Ho speso 24€ per il sushi",
+    timestamp: new Date(Date.now() - 30000),
+    status: "sent",
+  },
+  {
+    id: "tour-demo-bot",
+    role: "bot",
+    text: "Ho capito! Ecco cosa ho rilevato:\n\n📝 **Sushi** · **€24.00**\n📂 _Ristoranti & Fast Food_ · 📅 _Oggi_\n\nConfermi l'inserimento?",
+    timestamp: new Date(Date.now() - 28000),
+    parsed: { type: "expense", amount: 24, category: "Ristoranti & Fast Food", name: "Sushi", date: "oggi" },
+    awaitingConfirm: true,
+  },
+];
+
 // ─── Component ────────────────────────────────────────────────────────────────
 
 export default function ChatPage() {
+  const { isActive: isTourActive, currentStep: tourStep } = useTour();
+  const isTourChatStep = isTourActive && tourStep === 1;
+
   const [messages, setMessages] = useState<Message[]>([]);
   const [inputText, setInputText] = useState("");
   const [isLoading, setIsLoading] = useState(false);
@@ -115,7 +139,8 @@ export default function ChatPage() {
   // Whether to show the welcome screen (no user/bot messages yet except welcome)
   const hasConversation = messages.length > 0 && historyLoaded;
   const onlyWelcome = hasConversation && messages.length === 1 && messages[0].id === "welcome";
-  const showWelcome = !hasConversation || onlyWelcome;
+  const showWelcome = !isTourChatStep && (!hasConversation || onlyWelcome);
+  const displayMessages = isTourChatStep ? TOUR_DEMO_MESSAGES : messages;
 
   // ── Init: carica history dal server ───────────────────────────────────────
 
@@ -513,9 +538,9 @@ export default function ChatPage() {
       ) : (
         <>
           {/* ── Messages ───────────────────────────────────────────────── */}
-          <div className={styles.messagesArea}>
+          <div className={styles.messagesArea} data-tour="chat-messages">
             <div className={styles.messagesInner}>
-              {messages.map((msg) => (
+              {displayMessages.map((msg) => (
                 <div
                   key={msg.id}
                   className={`${styles.messageRow} ${msg.role === "user" ? styles.messageRowUser : styles.messageRowBot}`}
@@ -550,13 +575,13 @@ export default function ChatPage() {
                       <div className={styles.confirmRow}>
                         <button
                           className={`${styles.confirmBtn} ${styles.confirmBtnYes}`}
-                          onClick={() => handleConfirm(msg.id, msg.parsed!)}
+                          onClick={() => !isTourChatStep && handleConfirm(msg.id, msg.parsed!)}
                         >
                           ✅ Conferma
                         </button>
                         <button
                           className={`${styles.confirmBtn} ${styles.confirmBtnNo}`}
-                          onClick={() => handleCancel(msg.id)}
+                          onClick={() => !isTourChatStep && handleCancel(msg.id)}
                         >
                           ❌ Annulla
                         </button>
@@ -623,6 +648,7 @@ export default function ChatPage() {
         <textarea
           ref={inputRef}
           id="chat-input"
+          data-tour="chat-input"
           className={styles.chatInput}
           placeholder="Scrivi un messaggio…"
           value={inputText}

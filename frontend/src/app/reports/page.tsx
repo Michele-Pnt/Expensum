@@ -63,7 +63,7 @@ export default function ReportsPage() {
   }
 
   return (
-    <div className={styles.container}>
+    <div className={styles.container} data-tour="reports-list">
       <div className={styles.header}>
         <h1 className={styles.title}>Storico Report</h1>
         <p className={styles.subtitle}>Report settimanali e mensili generati automaticamente</p>

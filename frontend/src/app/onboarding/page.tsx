@@ -399,12 +399,13 @@ const toggleBtnSx = {
 };
 
 // ─── Step definitions ─────────────────────────────────────────────────────────
-// step 0 = welcome (non conta nel progress)
-// step 1 = age_gate   (visible 1/5)
-// step 2 = language   (visible 2/5)
-// step 3 = lifestyle  (visible 3/5)
-// step 4 = notifications (visible 4/5)
-// step 5 = confirm    (visible 5/5)
+// step 0 = welcome        (non conta nel progress)
+// step 1 = age_gate       (visible 1/5)
+// step 2 = language       (visible 2/5)
+// step 3 = lifestyle      (visible 3/5)
+// step 4 = notifications  (visible 4/5)
+// step 5 = confirm        (visible 5/5)
+// step 6 = aha-moment     (no progress bar — step finale)
 
 const TOTAL_VISIBLE = 5;
 
@@ -484,9 +485,10 @@ export default function OnboardingPage() {
   const handleComplete = useCallback(async () => {
     setSubmitting(true);
     try {
+      const headers = await buildHeaders();
       await fetch("/api/onboarding/complete", {
         method: "POST",
-        headers: { ...(await buildHeaders()), "Content-Type": "application/json" },
+        headers: { ...(headers as Record<string, string>), "Content-Type": "application/json" },
         credentials: "same-origin",
         body: JSON.stringify({
           language: state.language,
@@ -498,11 +500,25 @@ export default function OnboardingPage() {
         }),
       });
       trackOnboardingCompleted();
-      router.push("/chat");
+      // Carica demo data in background (fire-and-forget)
+      fetch("/api/demo/load", {
+        method: "POST",
+        headers: headers as Record<string, string>,
+        credentials: "same-origin",
+      }).catch(() => {});
+      // Setta flag tour + demo; rimuove "done" per chi si ri-registra
+      try {
+        localStorage.removeItem("expensum_tour_done");
+        localStorage.removeItem("expensum_tour_step");
+        localStorage.setItem("expensum_tour_pending", "true");
+        localStorage.setItem("expensum_demo_active", "true");
+      } catch { /* ignore */ }
+      // Hard reload: TourProvider deve rimontarsi su /chat per leggere i flag
+      window.location.assign("/chat");
     } catch {
       setSubmitting(false);
     }
-  }, [state, router]);
+  }, [state]);
 
   // Controlla se l'onboarding è già completato
   useEffect(() => {
@@ -542,7 +558,7 @@ export default function OnboardingPage() {
           boxShadow: "0 2px 16px rgba(0,0,0,0.07)",
         }}
       >
-        {step > 0 && (
+        {step > 0 && step <= TOTAL_VISIBLE && (
           <Box sx={{ mb: 3 }}>
             <Typography variant="caption" sx={{ color: "var(--color-text-2)" }}>
               Step {step} di {TOTAL_VISIBLE}
@@ -625,6 +641,7 @@ export default function OnboardingPage() {
               loading={submitting}
             />
           )}
+
         </Box>
       </Box>
     </Box>

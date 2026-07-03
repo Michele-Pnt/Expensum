@@ -68,9 +68,15 @@ export default function TourOverlay() {
 
   const measureTarget = useCallback(() => {
     if (!step) return;
-    const el = document.querySelector(step.selector) as HTMLElement | null;
+    // Cerca il primo match on-screen con dimensioni reali (evita duplicati hidden o in animazione)
+    const candidates = Array.from(document.querySelectorAll(step.selector)) as HTMLElement[];
+    const el = candidates.find((c) => {
+      const r = c.getBoundingClientRect();
+      return r.width > 0 && r.height > 0 && r.left >= -1 && r.top >= -1;
+    }) ?? null;
+
     if (!el) {
-      // Riprova: l'elemento potrebbe non essere ancora montato dopo la navigazione
+      // Elemento assente o ancora in animazione (es. drawer mobile) — riprova
       if (retryRef.current) clearTimeout(retryRef.current);
       retryRef.current = setTimeout(measureTarget, 120);
       return;
@@ -113,6 +119,7 @@ export default function TourOverlay() {
       h.style.zIndex = "";
       h.style.outline = "";
       h.style.outlineOffset = "";
+      h.style.position = "";
     });
   }, []);
 
@@ -186,35 +193,22 @@ export default function TourOverlay() {
 
   return (
     <>
-      {/* ── 4 pannelli spotlight ─────────────────────────────────────────── */}
+      {/* ── 4 pannelli spotlight — solo quando l'elemento è stato trovato ── */}
+      {visible && (
+        <>
+          {/* Top */}
+          <Box sx={{ ...panelSx, top: 0, left: 0, right: 0, height: spoTop }} />
 
-      {/* Top */}
-      <Box sx={{ ...panelSx, top: 0, left: 0, right: 0, height: visible ? spoTop : "100vh" }} />
+          {/* Bottom */}
+          <Box sx={{ ...panelSx, top: spoBottom, left: 0, right: 0, bottom: 0 }} />
 
-      {/* Bottom */}
-      <Box sx={{ ...panelSx, top: visible ? spoBottom : 0, left: 0, right: 0, bottom: 0 }} />
+          {/* Left */}
+          <Box sx={{ ...panelSx, top: spoTop, left: 0, width: spoLeft, height: spoBottom - spoTop }} />
 
-      {/* Left */}
-      <Box
-        sx={{
-          ...panelSx,
-          top: visible ? spoTop : 0,
-          left: 0,
-          width: visible ? spoLeft : "100vw",
-          height: visible ? spoBottom - spoTop : "100vh",
-        }}
-      />
-
-      {/* Right */}
-      <Box
-        sx={{
-          ...panelSx,
-          top: visible ? spoTop : 0,
-          left: visible ? spoRight : 0,
-          right: 0,
-          height: visible ? spoBottom - spoTop : "100vh",
-        }}
-      />
+          {/* Right */}
+          <Box sx={{ ...panelSx, top: spoTop, left: spoRight, right: 0, height: spoBottom - spoTop }} />
+        </>
+      )}
 
       {/* ── Tooltip card ───────────────────────────────────────────────────── */}
       <Box
@@ -228,8 +222,8 @@ export default function TourOverlay() {
           borderRadius: "14px",
           boxShadow: "0 8px 40px rgba(0,0,0,0.28), 0 2px 8px rgba(0,0,0,0.12)",
           p: 2.5,
-          opacity: visible ? 1 : 0,
-          transform: visible ? "translateY(0)" : "translateY(8px)",
+          opacity: 1,
+          transform: "translateY(0)",
           transition: TRANSITION,
           border: "1px solid var(--color-border, rgba(255,255,255,0.08))",
           pointerEvents: "auto",

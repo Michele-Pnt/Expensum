@@ -164,7 +164,7 @@ function PeriodSlider({ value, onChange, maxMonths, actualMonths }: {
   });
   const showActual = actualMonths !== undefined && actualMonths < value;
   return (
-    <Box sx={{ px: 2, mb: 3 }}>
+    <Box sx={{ px: 2, mb: 3 }} data-tour="analytics-period">
       <Typography variant="body2" color="text.secondary" mb={1}>
         Storico: <strong>ultimi {value} {value === 1 ? "mese" : "mesi"}</strong>
         {showActual && (
@@ -1003,6 +1003,7 @@ export default function AnalyticsPage() {
         variant="scrollable"
         scrollButtons="auto"
         allowScrollButtonsMobile
+        data-tour="analytics-tabs"
       >
         <Tab label="📈 Panoramica" sx={{ fontSize: "0.75rem", minHeight: 40 }} />
         <Tab label="💳 Spese" sx={{ fontSize: "0.75rem", minHeight: 40 }} />

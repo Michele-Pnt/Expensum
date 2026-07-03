@@ -671,6 +671,19 @@ class PostgresStorage(FinancialStorage):
         self._session.commit()
         return True
 
+    def delete_expenses_by_prefix(self, prefix: str) -> int:
+        """Cancella tutte le spese il cui nome inizia con `prefix`. Ritorna il conteggio."""
+        rows = self._session.query(Expense).filter(
+            Expense.user_id == self._user_id,
+            Expense.name.like(f"{prefix}%"),
+        ).all()
+        count = len(rows)
+        for row in rows:
+            self._session.delete(row)
+        if count:
+            self._session.commit()
+        return count
+
     def fetch_subscriptions_with_account_name(self) -> list[dict]:
         """Restituisce abbonamenti con nome conto risolto."""
         subs = self.fetch_subscriptions()

@@ -68,6 +68,7 @@
   height: 1px;
   background: var(--color-border);
   margin: 0.5rem 1.25rem;
+  margin-top: auto;
 }
 
 .bottomSection {
