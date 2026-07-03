@@ -1,7 +1,6 @@
 "use client";
 
 import React, { useEffect, useState } from "react";
-import Link from "next/link";
 import Script from "next/script";
 import Image from "next/image";
 import { MessageCircle, BarChart2, CreditCard, FileText, Check, Send, Sparkles, TrendingUp, BellRing, ChevronDown } from "lucide-react";
@@ -138,6 +137,7 @@ export default function LandingPage() {
             </button>
           </div>
           <div className={styles.navActions}>
+            {/* --- BOTTONI ORIGINALI (Nascosti temporaneamente per sponsorizzazione) ---
             <Link href="/login" className={styles.btnGhost}>
               Accedi alla web app
             </Link>
@@ -149,6 +149,7 @@ export default function LandingPage() {
             >
               Accedi su Telegram
             </a>
+            ---------------------------------------- */}
             {/* Hamburger — solo mobile */}
             <button
               className={styles.hamburger}
@@ -403,6 +404,7 @@ export default function LandingPage() {
                   <span className={styles.pricingAmount}>€0</span>
                   <span className={styles.pricingPeriod}>/mese</span>
                 </div>
+                {/* --- BOTTONE ORIGINALE (Nascosto temporaneamente per sponsorizzazione) ---
                 <a
                   href="https://t.me/ExspensumBot"
                   target="_blank"
@@ -411,6 +413,7 @@ export default function LandingPage() {
                 >
                   Inizia gratis
                 </a>
+                ---------------------------------------- */}
                 <ul className={styles.featureList}>
                   {FREE_FEATURES.map((feat) => (
                     <li key={feat} className={styles.featureListItem}>
@@ -431,6 +434,7 @@ export default function LandingPage() {
                   <span className={styles.pricingAmount}>€4.99</span>
                   <span className={styles.pricingPeriod}>/mese</span>
                 </div>
+                {/* --- BOTTONE ORIGINALE (Nascosto temporaneamente per sponsorizzazione) ---
                 <a
                   href="https://t.me/ExspensumBot"
                   target="_blank"
@@ -439,6 +443,7 @@ export default function LandingPage() {
                 >
                   Passa a Premium
                 </a>
+                ---------------------------------------- */}
                 <ul className={styles.featureList}>
                   {PREMIUM_FEATURES.map((feat) => (
                     <li key={feat} className={styles.featureListItem}>
@@ -506,9 +511,11 @@ export default function LandingPage() {
             <a href="https://instagram.com/expensum.finance" target="_blank" rel="noopener noreferrer" className={styles.footerSocialIcon} aria-label="Instagram">
               <svg width="18" height="18" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.8}><rect x="2" y="2" width="20" height="20" rx="5" /><circle cx="12" cy="12" r="5" /><circle cx="17.5" cy="6.5" r="1" fill="currentColor" stroke="none" /></svg>
             </a>
+            {/* --- ICONA ORIGINALE (Nascosta temporaneamente per sponsorizzazione) ---
             <a href="https://t.me/ExspensumBot" target="_blank" rel="noopener noreferrer" className={styles.footerSocialIcon} aria-label="Telegram">
               <svg width="18" height="18" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.8}><path d="M21 5L2 12.5l7 1M21 5l-3 15-9-5.5M21 5L9 13.5m0 0V19l3-3" /></svg>
             </a>
+            ---------------------------------------- */}
             <a href="https://acesse.one/ite4lxk" target="_blank" rel="noopener noreferrer" className={styles.footerSocialIcon} aria-label="Facebook">
               <svg width="18" height="18" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.8}><path d="M18 2h-3a5 5 0 0 0-5 5v3H7v4h3v8h4v-8h3l1-4h-4V7a1 1 0 0 1 1-1h3z" /></svg>
             </a>
@@ -530,10 +537,14 @@ export default function LandingPage() {
           </div>
           <div className={styles.footerCol}>
             <p className={styles.footerColTitle}>Per iniziare</p>
+            {/* --- LINK ORIGINALI (Nascosti temporaneamente per sponsorizzazione) ---
             <a href="https://t.me/ExspensumBot" target="_blank" rel="noopener noreferrer" className={styles.footerGridLink}>Accedi su Telegram</a>
+            ---------------------------------------- */}
             <a href="#prezzi" className={styles.footerGridLink}>Piano Free</a>
             <a href="#prezzi" className={styles.footerGridLink}>Piano Premium</a>
+            {/* --- LINK ORIGINALE (Nascosto temporaneamente per sponsorizzazione) ---
             <a href="/login" className={styles.footerGridLink}>Accedi alla web app</a>
+            ---------------------------------------- */}
           </div>
           <div className={styles.footerCol}>
             <p className={styles.footerColTitle}>Azienda</p>
@@ -547,7 +558,9 @@ export default function LandingPage() {
           <div className={styles.footerCol}>
             <p className={styles.footerColTitle}>Seguici</p>
             <a href="https://instagram.com/expensum.finance" target="_blank" rel="noopener noreferrer" className={styles.footerGridLink}>Instagram</a>
+            {/* --- LINK ORIGINALE (Nascosto temporaneamente per sponsorizzazione) ---
             <a href="https://t.me/ExspensumBot" target="_blank" rel="noopener noreferrer" className={styles.footerGridLink}>Telegram</a>
+            ---------------------------------------- */}
             <a href="https://acesse.one/ite4lxk" target="_blank" rel="noopener noreferrer" className={styles.footerGridLink}>Facebook</a>
             <a href="mailto:expensum.finance@gmail.com" className={styles.footerGridLink}>Email</a>
           </div>

@@ -4,8 +4,10 @@ Carica tutte le variabili d'ambiente dal file .env e le espone come
 attributi di un oggetto Config singleton.
 """
 
+import json
 import os
 import logging
+from datetime import datetime, timezone
 from logging.handlers import TimedRotatingFileHandler
 from pathlib import Path
 from dotenv import load_dotenv
@@ -110,7 +112,9 @@ class Config:
 
     # --- LOGGING ---
     LOG_DIR: Path = Path(__file__).parent / "logs"
-    LOG_LEVEL: int = logging.DEBUG
+    # Default INFO in produzione: DEBUG va abilitato esplicitamente in dev via .env
+    # (il vecchio default fisso a DEBUG era la causa diretta di agent.log a 75MB/mese).
+    LOG_LEVEL: int = getattr(logging, os.getenv("LOG_LEVEL", "INFO").upper(), logging.INFO)
 
 
 
@@ -130,32 +134,123 @@ class Config:
             )
 
 
+# Mappa segmento del nome logger (es. "bot" in "financial_agent.bot" o in
+# "src.dashboard.app") -> dominio, usata solo come fallback quando il
+# chiamante non passa esplicitamente extra={"domain": ...}.
+_DOMAIN_MAP: dict[str, str] = {
+    "bot": "bot",
+    "main": "bot",
+    "user_store": "storage",
+    "dashboard": "dashboard",
+    "rate_limiter": "security",
+    "input_sanitizer": "security",
+    "breach_notifier": "security",
+    "oauth_bg": "security",
+    "postgres_bg": "storage",
+    "auth_postgres": "security",
+}
+
+
+def _derive_domain(logger_name: str) -> str:
+    """Deriva il dominio dal nome del logger cercando un segmento noto.
+
+    Serve perché non tutti i logger del progetto seguono la gerarchia
+    "financial_agent.xxx" (es. src/dashboard/app.py usa logging.getLogger(__name__)
+    = "src.dashboard.app"), quindi non si può assumere una posizione fissa.
+    """
+    for part in logger_name.split("."):
+        if part in _DOMAIN_MAP:
+            return _DOMAIN_MAP[part]
+    return "app"
+
+
+class JsonFormatter(logging.Formatter):
+    """Formatta ogni record come una riga JSON (JSON Lines).
+
+    Schema fisso (ts/level/domain/logger/event/meta) pensato per restare
+    stabile anche in caso di futura migrazione a un servizio di log esterno
+    (Loki/Better Stack): cambia solo il trasporto, non il parsing.
+    """
+
+    def format(self, record: logging.LogRecord) -> str:
+        payload = {
+            "ts": datetime.fromtimestamp(record.created, tz=timezone.utc)
+            .isoformat(timespec="milliseconds")
+            .replace("+00:00", "Z"),
+            "level": record.levelname,
+            "domain": getattr(record, "domain", _derive_domain(record.name)),
+            "logger": record.name,
+            "event": getattr(record, "event", record.getMessage()[:60]),
+            "meta": getattr(record, "meta", {}),
+        }
+        chat_id = getattr(record, "chat_id", None)
+        if chat_id is not None:
+            payload["chat_id"] = str(chat_id)
+        if record.exc_info:
+            payload["exc_info"] = self.formatException(record.exc_info)
+        return json.dumps(payload, ensure_ascii=False)
+
+
+class DomainFilter(logging.Filter):
+    """Fa passare solo i record il cui dominio è tra quelli consentiti.
+
+    Se `allowed_domains` è None, il filtro lascia passare tutto (usato per
+    gli handler "aggregati" come app.jsonl/error.jsonl).
+    """
+
+    def __init__(self, allowed_domains: set[str] | None) -> None:
+        super().__init__()
+        self._allowed_domains = allowed_domains
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if self._allowed_domains is None:
+            return True
+        domain = getattr(record, "domain", _derive_domain(record.name))
+        return domain in self._allowed_domains
+
+
 def setup_logging() -> logging.Logger:
-    """Configura il sistema di logging con output su file e console."""
+    """Configura il sistema di logging multi-file JSON Lines, separato per dominio.
+
+    File prodotti in logs/: app.jsonl (flusso generale), error.jsonl (solo
+    ERROR+ cross-dominio), security.jsonl (eventi di sicurezza), access.jsonl
+    (azioni utente senza contenuto), debug.jsonl (solo se LOG_LEVEL=DEBUG).
+    """
     Config.LOG_DIR.mkdir(exist_ok=True)
-    log_file = Config.LOG_DIR / "agent.log"
 
-    # TimedRotatingFileHandler: un nuovo file ogni mezzanotte, mantiene solo gli
-    # ultimi 30 giorni (coerente con la retention documentata in
-    # data-breach-procedure.md §1.6 e nella GDPR roadmap §1.6). Prima di questo
-    # fix il FileHandler semplice faceva crescere agent.log senza limiti.
-    file_handler = TimedRotatingFileHandler(
-        log_file, when="midnight", backupCount=30, encoding="utf-8",
-    )
+    # Handler agganciati al ROOT logger (non a "financial_agent"): in questo
+    # modo si catturano anche i logger che non seguono quella gerarchia, es.
+    # src/dashboard/app.py usa logging.getLogger(__name__) = "src.dashboard.app".
+    root = logging.getLogger()
+    root.setLevel(Config.LOG_LEVEL)
+    root.handlers.clear()
 
-    logging.basicConfig(
-        level=Config.LOG_LEVEL,
-        format="%(asctime)s [%(levelname)s] %(name)s — %(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S",
-        handlers=[
-            file_handler,
-            logging.StreamHandler(),
-        ],
+    # (filename, livello minimo, retention in giorni, domini ammessi o None=tutti)
+    handlers_spec: list[tuple[str, int, int, set[str] | None]] = [
+        ("app.jsonl", logging.INFO, 14, None),
+        ("error.jsonl", logging.ERROR, 30, None),
+        ("security.jsonl", logging.WARNING, 180, {"security"}),
+        ("access.jsonl", logging.INFO, 30, {"access"}),
+    ]
+    if Config.LOG_LEVEL <= logging.DEBUG:
+        handlers_spec.append(("debug.jsonl", logging.DEBUG, 3, None))
+
+    for filename, level, backup_days, allowed_domains in handlers_spec:
+        handler = TimedRotatingFileHandler(
+            Config.LOG_DIR / filename, when="midnight", backupCount=backup_days, encoding="utf-8",
+        )
+        handler.setLevel(level)
+        handler.setFormatter(JsonFormatter())
+        handler.addFilter(DomainFilter(allowed_domains))
+        root.addHandler(handler)
+
+    # stdout resta testo semplice (non JSON) per compatibilità con journalctl/systemd
+    stream_handler = logging.StreamHandler()
+    stream_handler.setFormatter(
+        logging.Formatter("%(asctime)s [%(levelname)s] %(name)s — %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
     )
-    # Forza il livello debug per i nostri moduli se impostato in Config
-    logger = logging.getLogger("financial_agent.bot")
-    logging.getLogger("financial_agent").setLevel(Config.LOG_LEVEL)
-    
+    root.addHandler(stream_handler)
+
     return logging.getLogger("financial_agent")
 
 # Inizializza il logging centralizzato

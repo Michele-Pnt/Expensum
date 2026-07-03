@@ -131,7 +131,7 @@ class ExpenseParser:
         today = date.today()
         user_prompt = _build_user_prompt(message, self._categories, today)
 
-        logger.info(f"Parsing messaggio: '{message[:50]}...' con mistral")
+        logger.info("parsing_expense", extra={"meta": {"length": len(message)}})
 
         try:
             raw_response, usage = self._call_mistral(user_prompt)
@@ -143,7 +143,10 @@ class ExpenseParser:
 
         parsed = _extract_json(raw_response)
         if parsed is None:
-            logger.warning(f"Impossibile estrarre JSON dalla risposta: {raw_response[:200]}")
+            logger.warning(
+                "json_extraction_failed",
+                extra={"meta": {"response_length": len(raw_response)}},
+            )
             return None, usage
 
         # Se il LLM dice che non è una spesa

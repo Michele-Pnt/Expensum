@@ -21,6 +21,7 @@ import asyncio
 import csv
 import io
 import logging
+import shutil
 import sys
 import json
 import time
@@ -29,6 +30,7 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 from cachetools import TTLCache
 from apscheduler.schedulers.background import BackgroundScheduler
+import requests
 
 from src.billing_utils import get_next_billing_date
 from src.privacy_export import build_export_json, build_csv_rows, CSV_HEADER
@@ -177,7 +179,23 @@ def _is_authorized(update: Update) -> bool:
 
     chat_id = str(update.effective_chat.id)
     user = _user_store.get_user(chat_id)
-    return user is not None
+    if user is None:
+        from src.rate_limiter import track_failed_login
+
+        attempts = track_failed_login(f"unauth:{chat_id}")
+        level = logging.WARNING if attempts >= 3 else logging.INFO
+        logger.log(
+            level,
+            "unauthorized_access_attempt",
+            extra={
+                "domain": "security",
+                "event": "unauthorized_access_attempt",
+                "chat_id": chat_id,
+                "meta": {"attempts": attempts},
+            },
+        )
+        return False
+    return True
 
 
 async def _reply_not_authorized(update: Update) -> None:
@@ -1299,7 +1317,15 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         await update.message.reply_text(f"⚠️ Messaggio troppo lungo! Massimo {Config.MAX_MESSAGE_LEN} caratteri.")
         return
 
-    logger.info(f"[User {chat_id}] Messaggio ricevuto: '{message_text}'")
+    logger.info(
+        "message_received",
+        extra={
+            "domain": "access",
+            "event": "message_received",
+            "chat_id": chat_id,
+            "meta": {"input_type": "text", "length": len(message_text)},
+        },
+    )
     try:
         _user_store.log_message(chat_id, source="telegram", role="user", text=message_text)
     except Exception as _le:
@@ -1568,7 +1594,15 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             )
             return
 
-        logger.info(f"[User {chat_id}] Trascrizione Audio: {message_trascribed}")
+        logger.info(
+            "audio_transcribed",
+            extra={
+                "domain": "access",
+                "event": "audio_transcribed",
+                "chat_id": chat_id,
+                "meta": {"input_type": "voice", "length": len(message_trascribed)},
+            },
+        )
         response_usage = getattr(response, "usage_metadata", None)
         raw_transcription_usage = {}
         if response_usage:
@@ -1676,7 +1710,15 @@ async def handle_photos(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             )
             return
 
-        logger.info(f"[User {chat_id}] OCR scontrino: {message_trascribed[:100]}")
+        logger.info(
+            "receipt_ocr_processed",
+            extra={
+                "domain": "access",
+                "event": "receipt_ocr_processed",
+                "chat_id": chat_id,
+                "meta": {"input_type": "photo", "length": len(message_trascribed)},
+            },
+        )
         _user_store.increment_usage(chat_id, "photo")
         try:
             _user_store.log_message(chat_id, source="telegram", role="user", text=f"📷 {message_trascribed[:200]}")
@@ -2220,6 +2262,64 @@ def _nightly_retention_cleanup() -> None:
         logger.error(f"[NightlyRetention] Errore job: {e}")
 
 
+def _health_check_job() -> None:
+    """Job periodico — verifica che DB e Mistral siano raggiungibili.
+
+    Non blocca nulla: serve solo a far comparire un ERROR in error.jsonl/
+    app.jsonl se una dipendenza critica smette di rispondere, prima che
+    se ne accorga un utente.
+    """
+    from sqlalchemy import text as _sql_text
+
+    db_ok = True
+    try:
+        with _user_store.engine.connect() as conn:
+            conn.execute(_sql_text("SELECT 1"))
+    except Exception as e:
+        db_ok = False
+        logger.error(
+            "healthcheck_db_failed",
+            extra={"event": "healthcheck_db_failed", "meta": {"error_type": type(e).__name__}},
+        )
+
+    mistral_ok = True
+    try:
+        if Config.MISTRAL_API_KEY:
+            resp = requests.get(
+                "https://api.mistral.ai/v1/models",
+                headers={"Authorization": f"Bearer {Config.MISTRAL_API_KEY}"},
+                timeout=10,
+            )
+            mistral_ok = resp.ok
+    except Exception as e:
+        mistral_ok = False
+        logger.error(
+            "healthcheck_mistral_failed",
+            extra={"event": "healthcheck_mistral_failed", "meta": {"error_type": type(e).__name__}},
+        )
+
+    if db_ok and mistral_ok:
+        logger.info("healthcheck_ok", extra={"event": "healthcheck_ok", "meta": {}})
+
+
+def _disk_space_check_job(warning_mb: int = 1024, critical_mb: int = 500) -> None:
+    """Job periodico — verifica lo spazio libero sul disco che ospita logs/.
+
+    Il VPS ha risorse limitate (4GB RAM/disco): un disco pieno bloccherebbe
+    silenziosamente scrittura log e DB. Soglie in MB, valori ragionevoli
+    per un VPS Lite — regolabili se in futuro cambia la dimensione del disco.
+    """
+    usage = shutil.disk_usage(Config.LOG_DIR)
+    free_mb = usage.free // (1024 * 1024)
+    meta = {"free_mb": free_mb}
+    if free_mb < critical_mb:
+        logger.critical("disk_space_critical", extra={"event": "disk_space_critical", "meta": meta})
+    elif free_mb < warning_mb:
+        logger.warning("disk_space_low", extra={"event": "disk_space_low", "meta": meta})
+    else:
+        logger.info("disk_space_ok", extra={"event": "disk_space_ok", "meta": meta})
+
+
 async def _start_scheduler(app: Application) -> None:
     """Hook post_init PTB: cattura il loop PTB e avvia APScheduler con il loop corretto."""
     loop = asyncio.get_running_loop()
@@ -2230,10 +2330,13 @@ async def _start_scheduler(app: Application) -> None:
     scheduler.add_job(_daily_dashboard_job, 'cron', hour=8, minute=0, args=[app, loop])
     scheduler.add_job(_weekly_plan_job, 'cron', day_of_week='mon', hour=8, minute=5, args=[app, loop])
     scheduler.add_job(_monthly_plan_job, 'cron', day=1, hour=8, minute=0, args=[app, loop])
+    scheduler.add_job(_health_check_job, 'interval', hours=4)
+    scheduler.add_job(_disk_space_check_job, 'interval', hours=6)
     scheduler.start()
     logger.info(
         "⏰ Scheduler avviato (sync 03:00, subs 03:05, retention cleanup 03:10, "
-        "daily 08:00, weekly plan lun 08:05, monthly plan 1° 08:00)."
+        "daily 08:00, weekly plan lun 08:05, monthly plan 1° 08:00, "
+        "health-check ogni 4h, disk-check ogni 6h)."
     )
 
 

@@ -314,11 +314,21 @@ def web_login():
 
         error = "Email o password errati."
         failed_count = track_failed_login(email)
+        logger.warning(
+            "user_login_failed",
+            extra={"domain": "security", "event": "user_login_failed",
+                   "meta": {"failed_attempts": failed_count, "ip": request.remote_addr}},
+        )
         if failed_count >= 5:
             store.write_audit_log(
                 email or "unknown", actor="system", action="breach_detection",
                 metadata={"reason": "repeated_failed_login", "failed_attempts": failed_count},
                 ip_address=request.remote_addr, user_agent=request.headers.get("User-Agent"),
+            )
+            logger.warning(
+                "repeated_failed_login",
+                extra={"domain": "security", "event": "repeated_failed_login",
+                       "meta": {"failed_attempts": failed_count, "ip": request.remote_addr}},
             )
 
     return render_template("login.html", error=error)
@@ -434,6 +444,11 @@ def admin_login():
                 metadata={"result": "success"},
                 ip_address=request.remote_addr, user_agent=request.headers.get("User-Agent"),
             )
+            logger.info(
+                "admin_login_success",
+                extra={"domain": "security", "event": "admin_login_success",
+                       "meta": {"ip": request.remote_addr}},
+            )
             return redirect(url_for("index"))
         else:
             error = "Password amministratore errata!"
@@ -441,6 +456,11 @@ def admin_login():
                 user_id="admin", actor="admin", action="admin_login",
                 metadata={"result": "failure"},
                 ip_address=request.remote_addr, user_agent=request.headers.get("User-Agent"),
+            )
+            logger.warning(
+                "admin_login_failed",
+                extra={"domain": "security", "event": "admin_login_failed",
+                       "meta": {"ip": request.remote_addr}},
             )
 
     return render_template("login.html", admin_mode=True, error=error)
@@ -1166,6 +1186,10 @@ def auth_notion_callback():
     # 1. Verifica stato OAuth
     chat_id = store.get_and_delete_oauth_session(state)
     if not chat_id:
+        logger.warning(
+            "oauth_state_invalid",
+            extra={"domain": "security", "event": "oauth_state_invalid", "meta": {}},
+        )
         return "<h1>Sessione scaduta o non valida</h1><p>Riprova la registrazione dal bot.</p>", 403
 
     # 2. Scambio CODE -> ACCESS TOKEN (unica operazione sincrona)
@@ -1181,6 +1205,11 @@ def auth_notion_callback():
             timeout=TELEGRAM_REQUEST_TIMEOUT,
         )
         if not response.ok:
+            logger.warning(
+                "oauth_token_exchange_failed",
+                extra={"domain": "security", "event": "oauth_token_exchange_failed",
+                       "chat_id": chat_id, "meta": {"status_code": response.status_code}},
+            )
             return f"<h1>Errore scambio token</h1><p>{escape(response.text)}</p>", 500
 
         auth_data = response.json()
@@ -1188,6 +1217,11 @@ def auth_notion_callback():
         workspace_id = auth_data.get("workspace_id")
         template_page_id = auth_data.get("duplicated_template_id")
     except Exception as e:
+        logger.warning(
+            "oauth_token_exchange_failed",
+            extra={"domain": "security", "event": "oauth_token_exchange_failed",
+                   "chat_id": chat_id, "meta": {"error_type": type(e).__name__}},
+        )
         return f"<h1>Errore imprevisto</h1><p>{str(e)}</p>", 500
 
     # 3. Notifica immediata all'utente e avvio elaborazione in background

@@ -116,12 +116,20 @@ def _sanitize(text: str, source: str, max_len: int, chat_id: str) -> str:
     cleaned = "".join(ch for ch in text if ch not in _DANGEROUS_CHARS)
     if len(cleaned) < len(text):
         removed = len(text) - len(cleaned)
-        logger.warning("[User %s] [%s] Rimossi %d caratteri Unicode sospetti", chat_id, source, removed)
+        logger.warning(
+            "suspicious_unicode_removed",
+            extra={"domain": "security", "event": "suspicious_unicode_removed",
+                   "chat_id": chat_id, "meta": {"source": source, "removed_chars": removed}},
+        )
     text = cleaned
 
     # 3. Cap sulla lunghezza — previene token flooding
     if len(text) > max_len:
-        logger.warning("[User %s] [%s] Testo troncato da %d a %d caratteri", chat_id, source, len(text), max_len)
+        logger.warning(
+            "input_truncated",
+            extra={"domain": "security", "event": "input_truncated",
+                   "chat_id": chat_id, "meta": {"source": source, "original_len": len(text), "max_len": max_len}},
+        )
         text = text[:max_len]
 
     # 4. Rilevamento pattern injection
@@ -140,7 +148,12 @@ def _detect_injection(text: str, source: str, chat_id: str) -> None:
     for pattern, label in _COMPILED:
         if pattern.search(text):
             logger.warning(
-                "[User %s] [%s] PROMPT INJECTION RILEVATA — pattern: %s — testo: %.100r",
-                chat_id, source, label, text,
+                "injection_detected",
+                extra={
+                    "domain": "security",
+                    "event": "injection_detected",
+                    "chat_id": chat_id,
+                    "meta": {"source": source, "pattern": label},
+                },
             )
             raise InjectionDetectedError(source=source, matched_label=label)

@@ -44,8 +44,17 @@ def is_rate_limited(chat_id: str, max_messages: int, window_seconds: int = 60) -
     # 2. Controllo: se siamo già al limite, blocchiamo
     if len(_history[chat_id]) >= max_messages:
         logger.warning(
-            f"[User {chat_id}] Rate limit superato: "
-            f"{len(_history[chat_id])}/{max_messages} messaggi negli ultimi {window_seconds}s."
+            "rate_limit_triggered",
+            extra={
+                "domain": "security",
+                "event": "rate_limit_triggered",
+                "chat_id": chat_id,
+                "meta": {
+                    "count": len(_history[chat_id]),
+                    "max_messages": max_messages,
+                    "window_seconds": window_seconds,
+                },
+            },
         )
         return True
 
