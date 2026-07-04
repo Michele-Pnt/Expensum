@@ -3,87 +3,28 @@
 import React, { useEffect, useState } from "react";
 import Script from "next/script";
 import Image from "next/image";
+import { useTranslations } from "next-intl";
 import { MessageCircle, BarChart2, CreditCard, FileText, Check, Send, Sparkles, TrendingUp, BellRing, ChevronDown } from "lucide-react";
+import { Link } from "@/i18n/navigation";
+import LanguageSwitcher from "@/components/LanguageSwitcher";
 import styles from "./page.module.css";
 
-const FEATURES = [
-  {
-    icon: <MessageCircle size={20} strokeWidth={1.5} />,
-    title: "Chatbot AI su Telegram",
-    desc: "Invia spese via testo, foto scontrino o vocale. Nessuna app da aprire, nessun form da compilare.",
-  },
-  {
-    icon: <BarChart2 size={20} strokeWidth={1.5} />,
-    title: "Analytics & Dashboard",
-    desc: "Grafici chiari su categorie, trend mensili e andamento del capitale. Sempre aggiornati.",
-  },
-  {
-    icon: <CreditCard size={20} strokeWidth={1.5} />,
-    title: "Abbonamenti automatici",
-    desc: "Traccia Netflix, Spotify, palestra e tutti i ricorrenti. Ricevi notifiche prima di ogni addebito.",
-  },
-  {
-    icon: <FileText size={20} strokeWidth={1.5} />,
-    title: "Report mensili",
-    desc: "Ogni fine mese un riepilogo completo arriva direttamente su Telegram. Niente da fare.",
-  },
+const FEATURE_ICONS = [
+  <MessageCircle key="chat" size={20} strokeWidth={1.5} />,
+  <BarChart2 key="chart" size={20} strokeWidth={1.5} />,
+  <CreditCard key="card" size={20} strokeWidth={1.5} />,
+  <FileText key="file" size={20} strokeWidth={1.5} />,
 ];
 
-const HOW_STEPS = [
-  {
-    icon: <Send size={18} strokeWidth={1.5} />,
-    title: "Invia la spesa.",
-    desc: "Scrivila in chat, scatta una foto allo scontrino o manda un vocale. Expensum capisce tutto.",
-  },
-  {
-    icon: <Sparkles size={18} strokeWidth={1.5} />,
-    title: "L’AI la analizza.",
-    desc: "Il modello AI categorizza e struttura i dati in automatico. Zero errori, zero sforzo.",
-  },
-  {
-    icon: <TrendingUp size={18} strokeWidth={1.5} />,
-    title: "Dashboard aggiornata.",
-    desc: "Visualizza grafici, trend e budget in tempo reale dalla web app o direttamente su Telegram.",
-  },
-  {
-    icon: <BellRing size={18} strokeWidth={1.5} />,
-    title: "Report automatico.",
-    desc: "Ogni mese ricevi un riepilogo completo con analisi delle spese e consigli personalizzati.",
-  },
-];
-
-const FREE_FEATURES = [
-  "Registrazione spese illimitata",
-  "Categorie personalizzabili",
-  "Report mensile via Telegram",
-  "Sincronizzazione Notion",
-];
-
-const PREMIUM_FEATURES = [
-  "Tutto del piano Free",
-  "Analytics avanzati con grafici",
-  "Previsioni e trend mensili",
-  "Gestione abbonamenti automatica",
-  "Storico 24 mesi",
-  "Budget per categoria",
-];
-
-const FOR_WHO = [
-  {
-    title: "Studenti fuori sede",
-    desc: "Affitto, spesa, uscite — tante voci, zero chiarezza. Expensum ti mostra dove finiscono i soldi.",
-  },
-  {
-    title: "Giovani professionisti",
-    desc: "Stipendio fisso ma fine mese sempre uguale? Scopri dove ottimizzare senza rinunciare a nulla.",
-  },
-  {
-    title: "Chiunque voglia più controllo",
-    desc: "Non serve essere un esperto di finanza. Basta parlare con Expensum come faresti con un amico.",
-  },
+const HOW_ICONS = [
+  <Send key="send" size={18} strokeWidth={1.5} />,
+  <Sparkles key="sparkles" size={18} strokeWidth={1.5} />,
+  <TrendingUp key="trend" size={18} strokeWidth={1.5} />,
+  <BellRing key="bell" size={18} strokeWidth={1.5} />,
 ];
 
 export default function LandingPage() {
+  const t = useTranslations("Landing");
   const [scrolled, setScrolled] = useState(false);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
 
@@ -119,6 +60,12 @@ export default function LandingPage() {
     document.getElementById(id)?.scrollIntoView({ behavior: "smooth" });
   };
 
+  const forWhoItems = t.raw("perChi.items") as { title: string; desc: string }[];
+  const featureItems = t.raw("features.items") as { title: string; desc: string }[];
+  const howSteps = t.raw("comeFunziona.steps") as { title: string; desc: string }[];
+  const freeFeatures = t.raw("pricing.free.features") as string[];
+  const premiumFeatures = t.raw("pricing.premium.features") as string[];
+
   return (
     <>
       {/* ── Navbar ── */}
@@ -130,31 +77,19 @@ export default function LandingPage() {
           </div>
           <div className={styles.navLinks}>
             <button className={styles.navLink} onClick={() => scrollToSection("come-funziona")}>
-              Come funziona
+              {t("nav.comeFunziona")}
             </button>
             <button className={styles.navLink} onClick={() => scrollToSection("prezzi")}>
-              Prezzi
+              {t("nav.prezzi")}
             </button>
           </div>
           <div className={styles.navActions}>
-            {/* --- BOTTONI ORIGINALI (Nascosti temporaneamente per sponsorizzazione) ---
-            <Link href="/login" className={styles.btnGhost}>
-              Accedi alla web app
-            </Link>
-            <a
-              href="https://t.me/ExspensumBot"
-              target="_blank"
-              rel="noopener noreferrer"
-              className={styles.btnPrimary}
-            >
-              Accedi su Telegram
-            </a>
-            ---------------------------------------- */}
+            <LanguageSwitcher />
             {/* Hamburger — solo mobile */}
             <button
               className={styles.hamburger}
               onClick={() => setMobileMenuOpen((o) => !o)}
-              aria-label="Menu"
+              aria-label={t("nav.menu")}
             >
               <span className={`${styles.hamburgerLine} ${mobileMenuOpen ? styles.hamburgerLineOpen1 : ""}`} />
               <span className={`${styles.hamburgerLine} ${mobileMenuOpen ? styles.hamburgerLineOpen2 : ""}`} />
@@ -166,10 +101,10 @@ export default function LandingPage() {
         {mobileMenuOpen && (
           <div className={styles.mobileMenu}>
             <button className={styles.mobileMenuLink} onClick={() => scrollToSection("come-funziona")}>
-              Come funziona
+              {t("nav.comeFunziona")}
             </button>
             <button className={styles.mobileMenuLink} onClick={() => scrollToSection("prezzi")}>
-              Prezzi
+              {t("nav.prezzi")}
             </button>
           </div>
         )}
@@ -180,32 +115,15 @@ export default function LandingPage() {
         <section className={styles.hero}>
           <div className={styles.heroInner}>
             <div className={styles.heroLeft}>
-              <p className={styles.heroPill}>Powered by AI</p>
+              <p className={styles.heroPill}>{t("hero.pill")}</p>
               <h1 className={styles.heroHeadline}>
-                Non chiederti dove sono finiti i tuoi soldi.<br />Inizia a dirgli dove andare.
+                {t("hero.headlineLine1")}<br />{t("hero.headlineLine2")}
               </h1>
               <p className={styles.heroSub}>
-                Traccia le spese via Telegram. L’AI le analizza.<br />
-                Tu capisci i tuoi soldi.
+                {t("hero.subLine1")}<br />
+                {t("hero.subLine2")}
               </p>
               <div className={styles.heroActions}>
-                {/* --- BOTTONI ORIGINALI (Nascosti) ---
-                <a
-                  href="https://t.me/ExspensumBot"
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className={styles.btnPrimary}
-                >
-                  Accedi su Telegram →
-                </a>
-                <button
-                  className={styles.btnGhost}
-                  onClick={() => scrollToSection("come-funziona")}
-                >
-                  Come funziona
-                </button>
-                ---------------------------------------- */}
-
                 <div style={{ width: "100%", maxWidth: "450px", marginTop: "0.5rem" }}>
                   <iframe
                     data-tally-src="https://tally.so/embed/44pAAr?alignLeft=1&hideTitle=1&transparentBackground=1&dynamicHeight=1"
@@ -223,7 +141,7 @@ export default function LandingPage() {
               <div className={styles.heroMascotWrap} id="hero-mascot">
                 <Image
                   src="/moneo/Moneo-base.png"
-                  alt="Moneo, il tuo assistente finanziario"
+                  alt={t("hero.mascotAlt")}
                   className={styles.heroMascotImg}
                   width={800}
                   height={800}
@@ -238,7 +156,7 @@ export default function LandingPage() {
           <button
             className={styles.heroScroll}
             onClick={() => scrollToSection("per-chi")}
-            aria-label="Scorri in basso"
+            aria-label={t("hero.scrollDown")}
           >
             <ChevronDown size={20} strokeWidth={1.5} />
           </button>
@@ -249,11 +167,11 @@ export default function LandingPage() {
           <div className={styles.sectionInner}>
             <div className={styles.sectionHeadLeft}>
               <h2 className={styles.sectionH2} data-reveal>
-                Per chi è pensato<br />Expensum.
+                {t("perChi.titleLine1")}<br />{t("perChi.titleLine2")}
               </h2>
             </div>
             <div className={styles.forWhoList}>
-              {FOR_WHO.map((item, i) => (
+              {forWhoItems.map((item, i) => (
                 <div
                   key={i}
                   className={styles.forWhoItem}
@@ -275,15 +193,15 @@ export default function LandingPage() {
         <section id="features" className={styles.sectionAlt}>
           <div className={styles.sectionInner}>
             <h2 className={styles.sectionH2Full} data-reveal>
-              Cosa fa Expensum.{" "}
-              <span className={styles.h2Muted}>Tutto il necessario,</span>
+              {t("features.titlePart1")}{" "}
+              <span className={styles.h2Muted}>{t("features.titlePart2")}</span>
               <br />
-              <span className={styles.h2Muted}>niente di superfluo.</span>
+              <span className={styles.h2Muted}>{t("features.titlePart3")}</span>
             </h2>
             <div className={styles.featureIllustration} data-reveal-scale="">
               <Image
                 src="/moneo/Moneo-AI-powered.png"
-                alt="Moneo categorizza e analizza le tue spese con AI"
+                alt={t("features.illustrationAlt")}
                 className={styles.featureIllustrationImg}
                 width={1200}
                 height={800}
@@ -292,9 +210,9 @@ export default function LandingPage() {
               />
             </div>
             <div className={styles.featureGrid} data-reveal>
-              {FEATURES.map((f, i) => (
+              {featureItems.map((f, i) => (
                 <div key={i} className={styles.featureCard}>
-                  <div className={styles.featureIcon}>{f.icon}</div>
+                  <div className={styles.featureIcon}>{FEATURE_ICONS[i]}</div>
                   <h3 className={styles.featureTitle}>{f.title}</h3>
                   <p className={styles.featureDesc}>{f.desc}</p>
                 </div>
@@ -309,13 +227,13 @@ export default function LandingPage() {
         <section id="come-funziona" className={styles.section}>
           <div className={styles.sectionInner}>
             <h2 className={styles.sectionH2Center} data-reveal>
-              Come funziona.<br />Semplice e veloce.
+              {t("comeFunziona.titleLine1")}<br />{t("comeFunziona.titleLine2")}
             </h2>
 
             <div className={styles.useCaseVisual} data-reveal-scale="">
               <Image
                 src="/moneo/Expensum-use-case.png"
-                alt="Fotografa lo scontrino, Expensum lo registra in automatico"
+                alt={t("comeFunziona.useCaseAlt")}
                 className={styles.useCaseImg}
                 width={460}
                 height={600}
@@ -326,7 +244,7 @@ export default function LandingPage() {
 
             <div className={styles.timeline}>
               <div className={styles.timelineLine} />
-              {HOW_STEPS.map((step, i) => (
+              {howSteps.map((step, i) => (
                 <div
                   key={i}
                   className={`${styles.timelineRow} ${i % 2 === 1 ? styles.timelineRowRight : ""}`}
@@ -335,7 +253,7 @@ export default function LandingPage() {
                 >
                   <div className={styles.timelineCard}>
                     <div className={styles.timelineStep}>{i + 1}</div>
-                    <div className={styles.timelineIcon}>{step.icon}</div>
+                    <div className={styles.timelineIcon}>{HOW_ICONS[i]}</div>
                     <div>
                       <strong className={styles.timelineTitle}>{step.title}</strong>
                       <span className={styles.timelineDesc}> {step.desc}</span>
@@ -355,7 +273,7 @@ export default function LandingPage() {
                 <div className={styles.trustCardImgWrap}>
                   <Image
                     src="/moneo/Moneo-money-helper.png"
-                    alt="Analytics e portfolio growth"
+                    alt={t("trust.dashboardAlt")}
                     className={styles.trustCardImg}
                     width={600}
                     height={500}
@@ -364,15 +282,15 @@ export default function LandingPage() {
                   />
                 </div>
                 <div className={styles.trustCardText}>
-                  <strong>Dashboard sempre aggiornata</strong>
-                  <span>Grafici, trend e previsioni mensili. I tuoi dati finanziari in un colpo d&apos;occhio.</span>
+                  <strong>{t("trust.dashboardTitle")}</strong>
+                  <span>{t("trust.dashboardDesc")}</span>
                 </div>
               </div>
               <div className={styles.trustCard} data-reveal-right="">
                 <div className={styles.trustCardImgWrap}>
                   <Image
                     src="/moneo/Moneo-secure.png"
-                    alt="I tuoi dati sono al sicuro"
+                    alt={t("trust.secureAlt")}
                     className={styles.trustCardImg}
                     width={600}
                     height={500}
@@ -381,8 +299,8 @@ export default function LandingPage() {
                   />
                 </div>
                 <div className={styles.trustCardText}>
-                  <strong>I tuoi dati al sicuro</strong>
-                  <span>Sincronizzazione protetta su Notion. Nessun dato finanziario condiviso con terze parti.</span>
+                  <strong>{t("trust.secureTitle")}</strong>
+                  <span>{t("trust.secureDesc")}</span>
                 </div>
               </div>
             </div>
@@ -393,29 +311,19 @@ export default function LandingPage() {
         <section id="prezzi" className={styles.sectionAlt}>
           <div className={styles.sectionInner}>
             <h2 className={styles.sectionH2Full} data-reveal>
-              Scegli il tuo piano.
+              {t("pricing.title")}
             </h2>
 
             <div className={styles.pricingGrid}>
               {/* Free */}
               <div className={styles.pricingCard} data-reveal>
-                <p className={styles.pricingLabel}>Free</p>
+                <p className={styles.pricingLabel}>{t("pricing.free.label")}</p>
                 <div className={styles.pricingPrice}>
                   <span className={styles.pricingAmount}>€0</span>
-                  <span className={styles.pricingPeriod}>/mese</span>
+                  <span className={styles.pricingPeriod}>{t("pricing.perMonth")}</span>
                 </div>
-                {/* --- BOTTONE ORIGINALE (Nascosto temporaneamente per sponsorizzazione) ---
-                <a
-                  href="https://t.me/ExspensumBot"
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className={styles.btnOutline}
-                >
-                  Inizia gratis
-                </a>
-                ---------------------------------------- */}
                 <ul className={styles.featureList}>
-                  {FREE_FEATURES.map((feat) => (
+                  {freeFeatures.map((feat) => (
                     <li key={feat} className={styles.featureListItem}>
                       <Check size={14} className={styles.checkIcon} />
                       {feat}
@@ -423,29 +331,19 @@ export default function LandingPage() {
                   ))}
                 </ul>
                 <p className={styles.pricingNote}>
-                  Per chi vuole iniziare a tenere traccia senza impegno.
+                  {t("pricing.free.note")}
                 </p>
               </div>
 
               {/* Premium */}
               <div className={styles.pricingCard} data-reveal>
-                <p className={styles.pricingLabel}>Premium</p>
+                <p className={styles.pricingLabel}>{t("pricing.premium.label")}</p>
                 <div className={styles.pricingPrice}>
                   <span className={styles.pricingAmount}>€4.99</span>
-                  <span className={styles.pricingPeriod}>/mese</span>
+                  <span className={styles.pricingPeriod}>{t("pricing.perMonth")}</span>
                 </div>
-                {/* --- BOTTONE ORIGINALE (Nascosto temporaneamente per sponsorizzazione) ---
-                <a
-                  href="https://t.me/ExspensumBot"
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className={styles.btnOutline}
-                >
-                  Passa a Premium
-                </a>
-                ---------------------------------------- */}
                 <ul className={styles.featureList}>
-                  {PREMIUM_FEATURES.map((feat) => (
+                  {premiumFeatures.map((feat) => (
                     <li key={feat} className={styles.featureListItem}>
                       <Check size={14} className={styles.checkIcon} />
                       {feat}
@@ -453,26 +351,26 @@ export default function LandingPage() {
                   ))}
                 </ul>
                 <p className={styles.pricingNote}>
-                  Per chi vuole il massimo: grafici, budget, previsioni e storico completo.
+                  {t("pricing.premium.note")}
                 </p>
               </div>
 
               {/* Lifetime Founder */}
               <div className={`${styles.pricingCard} ${styles.pricingCardPremium}`} data-reveal>
-                <div className={styles.pricingBadge}>Compila il form, Solo 90 posti!</div>
-                <p className={styles.pricingLabel}>Lifetime Founder</p>
+                <div className={styles.pricingBadge}>{t("pricing.lifetime.badge")}</div>
+                <p className={styles.pricingLabel}>{t("pricing.lifetime.label")}</p>
                 <div className={styles.pricingPrice}>
                   <span className={styles.pricingAmount}>€89</span>
-                  <span className={styles.pricingPeriod}>/una tantum</span>
+                  <span className={styles.pricingPeriod}>{t("pricing.oneTime")}</span>
                 </div>
                 <button
                   onClick={() => window.scrollTo({ top: 0, behavior: 'smooth' })}
                   className={styles.btnPrimary}
                 >
-                  Prenota il tuo posto
+                  {t("pricing.lifetime.cta")}
                 </button>
                 <ul className={styles.featureList}>
-                  {PREMIUM_FEATURES.map((feat) => (
+                  {premiumFeatures.map((feat) => (
                     <li key={feat} className={styles.featureListItem}>
                       <Check size={14} className={styles.checkIcon} />
                       {feat}
@@ -480,19 +378,19 @@ export default function LandingPage() {
                   ))}
                   <li className={styles.featureListItem}>
                     <Check size={14} className={styles.checkIcon} />
-                    <strong>Accesso a vita, zero abbonamenti</strong>
+                    <strong>{t("pricing.lifetime.lifetimeAccess")}</strong>
                   </li>
                 </ul>
                 <p className={styles.pricingNote}>
-                  Lancio a settembre. Entra nella lista d'attesa per bloccare l'offerta.
+                  {t("pricing.lifetime.note")}
                 </p>
               </div>
             </div>
 
             <div className={styles.pricingCta} data-reveal>
-              <p>Hai domande sul piano giusto per te?</p>
+              <p>{t("pricing.ctaQuestion")}</p>
               <a href="mailto:expensum.finance@gmail.com" className={styles.ctaLink}>
-                Contattaci →
+                {t("pricing.ctaContact")}
               </a>
             </div>
           </div>
@@ -511,11 +409,6 @@ export default function LandingPage() {
             <a href="https://instagram.com/expensum.finance" target="_blank" rel="noopener noreferrer" className={styles.footerSocialIcon} aria-label="Instagram">
               <svg width="18" height="18" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.8}><rect x="2" y="2" width="20" height="20" rx="5" /><circle cx="12" cy="12" r="5" /><circle cx="17.5" cy="6.5" r="1" fill="currentColor" stroke="none" /></svg>
             </a>
-            {/* --- ICONA ORIGINALE (Nascosta temporaneamente per sponsorizzazione) ---
-            <a href="https://t.me/ExspensumBot" target="_blank" rel="noopener noreferrer" className={styles.footerSocialIcon} aria-label="Telegram">
-              <svg width="18" height="18" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.8}><path d="M21 5L2 12.5l7 1M21 5l-3 15-9-5.5M21 5L9 13.5m0 0V19l3-3" /></svg>
-            </a>
-            ---------------------------------------- */}
             <a href="https://acesse.one/ite4lxk" target="_blank" rel="noopener noreferrer" className={styles.footerSocialIcon} aria-label="Facebook">
               <svg width="18" height="18" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.8}><path d="M18 2h-3a5 5 0 0 0-5 5v3H7v4h3v8h4v-8h3l1-4h-4V7a1 1 0 0 1 1-1h3z" /></svg>
             </a>
@@ -528,46 +421,37 @@ export default function LandingPage() {
         {/* Link grid */}
         <div className={styles.footerGrid}>
           <div className={styles.footerCol}>
-            <p className={styles.footerColTitle}>Prodotto</p>
-            <a href="#come-funziona" className={styles.footerGridLink}>Come funziona</a>
-            <a href="#features" className={styles.footerGridLink}>Analytics</a>
-            <a href="#features" className={styles.footerGridLink}>Abbonamenti automatici</a>
-            <a href="#features" className={styles.footerGridLink}>Report mensili</a>
-            <a href="#prezzi" className={styles.footerGridLink}>Prezzi</a>
+            <p className={styles.footerColTitle}>{t("footer.prodotto")}</p>
+            <a href="#come-funziona" className={styles.footerGridLink}>{t("footer.comeFunziona")}</a>
+            <a href="#features" className={styles.footerGridLink}>{t("footer.analytics")}</a>
+            <a href="#features" className={styles.footerGridLink}>{t("footer.abbonamenti")}</a>
+            <a href="#features" className={styles.footerGridLink}>{t("footer.reportMensili")}</a>
+            <a href="#prezzi" className={styles.footerGridLink}>{t("footer.prezzi")}</a>
           </div>
           <div className={styles.footerCol}>
-            <p className={styles.footerColTitle}>Per iniziare</p>
-            {/* --- LINK ORIGINALI (Nascosti temporaneamente per sponsorizzazione) ---
-            <a href="https://t.me/ExspensumBot" target="_blank" rel="noopener noreferrer" className={styles.footerGridLink}>Accedi su Telegram</a>
-            ---------------------------------------- */}
-            <a href="#prezzi" className={styles.footerGridLink}>Piano Free</a>
-            <a href="#prezzi" className={styles.footerGridLink}>Piano Premium</a>
-            {/* --- LINK ORIGINALE (Nascosto temporaneamente per sponsorizzazione) ---
-            <a href="/login" className={styles.footerGridLink}>Accedi alla web app</a>
-            ---------------------------------------- */}
+            <p className={styles.footerColTitle}>{t("footer.perIniziare")}</p>
+            <a href="#prezzi" className={styles.footerGridLink}>{t("footer.pianoFree")}</a>
+            <a href="#prezzi" className={styles.footerGridLink}>{t("footer.pianoPremium")}</a>
           </div>
           <div className={styles.footerCol}>
-            <p className={styles.footerColTitle}>Azienda</p>
-            <a href="mailto:expensum.finance@gmail.com" className={styles.footerGridLink}>Chi siamo</a>
-            <a href="mailto:expensum.finance@gmail.com" className={styles.footerGridLink}>Contatti</a>
-            <a href="/come-funziona-moneo" className={styles.footerGridLink}>Come funziona l&apos;AI</a>
-            <a href="/privacy" className={styles.footerGridLink}>Privacy Policy</a>
-            <a href="/cookies" className={styles.footerGridLink}>Cookie Policy</a>
-            <a href="/terms" className={styles.footerGridLink}>Termini di servizio</a>
+            <p className={styles.footerColTitle}>{t("footer.azienda")}</p>
+            <a href="mailto:expensum.finance@gmail.com" className={styles.footerGridLink}>{t("footer.chiSiamo")}</a>
+            <a href="mailto:expensum.finance@gmail.com" className={styles.footerGridLink}>{t("footer.contatti")}</a>
+            <Link href="/come-funziona-moneo" className={styles.footerGridLink}>{t("footer.comeFunzionaAI")}</Link>
+            <Link href="/privacy" className={styles.footerGridLink}>{t("footer.privacyPolicy")}</Link>
+            <Link href="/cookies" className={styles.footerGridLink}>{t("footer.cookiePolicy")}</Link>
+            <Link href="/terms" className={styles.footerGridLink}>{t("footer.terminiServizio")}</Link>
           </div>
           <div className={styles.footerCol}>
-            <p className={styles.footerColTitle}>Seguici</p>
+            <p className={styles.footerColTitle}>{t("footer.seguici")}</p>
             <a href="https://instagram.com/expensum.finance" target="_blank" rel="noopener noreferrer" className={styles.footerGridLink}>Instagram</a>
-            {/* --- LINK ORIGINALE (Nascosto temporaneamente per sponsorizzazione) ---
-            <a href="https://t.me/ExspensumBot" target="_blank" rel="noopener noreferrer" className={styles.footerGridLink}>Telegram</a>
-            ---------------------------------------- */}
             <a href="https://acesse.one/ite4lxk" target="_blank" rel="noopener noreferrer" className={styles.footerGridLink}>Facebook</a>
             <a href="mailto:expensum.finance@gmail.com" className={styles.footerGridLink}>Email</a>
           </div>
         </div>
 
         <div className={styles.footerBottom}>
-          <p className={styles.footerCopy}>© {new Date().getFullYear()} Expensum — Il tuo compagno del risparmio.</p>
+          <p className={styles.footerCopy}>{t("footer.copy", { year: new Date().getFullYear() })}</p>
         </div>
       </footer>
     </>

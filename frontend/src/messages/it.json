@@ -1,0 +1,203 @@
+{
+  "Landing": {
+    "meta": {
+      "title": "Expensum — Il tuo compagno del risparmio",
+      "description": "Traccia le spese via Telegram, capisci i tuoi soldi, vivi meglio. Powered by Gemini AI."
+    },
+    "nav": {
+      "comeFunziona": "Come funziona",
+      "prezzi": "Prezzi",
+      "menu": "Menu"
+    },
+    "hero": {
+      "pill": "Powered by AI",
+      "headlineLine1": "Non chiederti dove sono finiti i tuoi soldi.",
+      "headlineLine2": "Inizia a dirgli dove andare.",
+      "subLine1": "Traccia le spese via Telegram. L'AI le analizza.",
+      "subLine2": "Tu capisci i tuoi soldi.",
+      "scrollDown": "Scorri in basso",
+      "mascotAlt": "Moneo, il tuo assistente finanziario"
+    },
+    "perChi": {
+      "titleLine1": "Per chi è pensato",
+      "titleLine2": "Expensum.",
+      "items": [
+        {
+          "title": "Studenti fuori sede",
+          "desc": "Affitto, spesa, uscite — tante voci, zero chiarezza. Expensum ti mostra dove finiscono i soldi."
+        },
+        {
+          "title": "Giovani professionisti",
+          "desc": "Stipendio fisso ma fine mese sempre uguale? Scopri dove ottimizzare senza rinunciare a nulla."
+        },
+        {
+          "title": "Chiunque voglia più controllo",
+          "desc": "Non serve essere un esperto di finanza. Basta parlare con Expensum come faresti con un amico."
+        }
+      ]
+    },
+    "features": {
+      "titlePart1": "Cosa fa Expensum.",
+      "titlePart2": "Tutto il necessario,",
+      "titlePart3": "niente di superfluo.",
+      "illustrationAlt": "Moneo categorizza e analizza le tue spese con AI",
+      "items": [
+        {
+          "title": "Chatbot AI su Telegram",
+          "desc": "Invia spese via testo, foto scontrino o vocale. Nessuna app da aprire, nessun form da compilare."
+        },
+        {
+          "title": "Analytics & Dashboard",
+          "desc": "Grafici chiari su categorie, trend mensili e andamento del capitale. Sempre aggiornati."
+        },
+        {
+          "title": "Abbonamenti automatici",
+          "desc": "Traccia Netflix, Spotify, palestra e tutti i ricorrenti. Ricevi notifiche prima di ogni addebito."
+        },
+        {
+          "title": "Report mensili",
+          "desc": "Ogni fine mese un riepilogo completo arriva direttamente su Telegram. Niente da fare."
+        }
+      ]
+    },
+    "comeFunziona": {
+      "titleLine1": "Come funziona.",
+      "titleLine2": "Semplice e veloce.",
+      "useCaseAlt": "Fotografa lo scontrino, Expensum lo registra in automatico",
+      "steps": [
+        {
+          "title": "Invia la spesa.",
+          "desc": "Scrivila in chat, scatta una foto allo scontrino o manda un vocale. Expensum capisce tutto."
+        },
+        {
+          "title": "L'AI la analizza.",
+          "desc": "Il modello AI categorizza e struttura i dati in automatico. Zero errori, zero sforzo."
+        },
+        {
+          "title": "Dashboard aggiornata.",
+          "desc": "Visualizza grafici, trend e budget in tempo reale dalla web app o direttamente su Telegram."
+        },
+        {
+          "title": "Report automatico.",
+          "desc": "Ogni mese ricevi un riepilogo completo con analisi delle spese e consigli personalizzati."
+        }
+      ]
+    },
+    "trust": {
+      "dashboardAlt": "Analytics e portfolio growth",
+      "dashboardTitle": "Dashboard sempre aggiornata",
+      "dashboardDesc": "Grafici, trend e previsioni mensili. I tuoi dati finanziari in un colpo d'occhio.",
+      "secureAlt": "I tuoi dati sono al sicuro",
+      "secureTitle": "I tuoi dati al sicuro",
+      "secureDesc": "Sincronizzazione protetta su Notion. Nessun dato finanziario condiviso con terze parti."
+    },
+    "pricing": {
+      "title": "Scegli il tuo piano.",
+      "perMonth": "/mese",
+      "oneTime": "/una tantum",
+      "free": {
+        "label": "Free",
+        "note": "Per chi vuole iniziare a tenere traccia senza impegno.",
+        "features": [
+          "Registrazione spese illimitata",
+          "Categorie personalizzabili",
+          "Report mensile via Telegram",
+          "Sincronizzazione Notion"
+        ]
+      },
+      "premium": {
+        "label": "Premium",
+        "note": "Per chi vuole il massimo: grafici, budget, previsioni e storico completo.",
+        "features": [
+          "Tutto del piano Free",
+          "Analytics avanzati con grafici",
+          "Previsioni e trend mensili",
+          "Gestione abbonamenti automatica",
+          "Storico 24 mesi",
+          "Budget per categoria"
+        ]
+      },
+      "lifetime": {
+        "badge": "Compila il form, Solo 90 posti!",
+        "label": "Lifetime Founder",
+        "cta": "Prenota il tuo posto",
+        "lifetimeAccess": "Accesso a vita, zero abbonamenti",
+        "note": "Lancio a settembre. Entra nella lista d'attesa per bloccare l'offerta."
+      },
+      "ctaQuestion": "Hai domande sul piano giusto per te?",
+      "ctaContact": "Contattaci →"
+    },
+    "footer": {
+      "prodotto": "Prodotto",
+      "comeFunziona": "Come funziona",
+      "analytics": "Analytics",
+      "abbonamenti": "Abbonamenti automatici",
+      "reportMensili": "Report mensili",
+      "prezzi": "Prezzi",
+      "perIniziare": "Per iniziare",
+      "pianoFree": "Piano Free",
+      "pianoPremium": "Piano Premium",
+      "azienda": "Azienda",
+      "chiSiamo": "Chi siamo",
+      "contatti": "Contatti",
+      "comeFunzionaAI": "Come funziona l'AI",
+      "privacyPolicy": "Privacy Policy",
+      "cookiePolicy": "Cookie Policy",
+      "terminiServizio": "Termini di servizio",
+      "seguici": "Seguici",
+      "copy": "© {year} Expensum — Il tuo compagno del risparmio."
+    }
+  },
+  "ComeFunzionaMoneo": {
+    "meta": {
+      "title": "Come funziona Moneo — Expensum",
+      "description": "Trasparenza sui modelli AI usati da Expensum, in linea con l'AI Act."
+    },
+    "title": "Come funziona Moneo",
+    "intro": "Moneo è l'assistente AI di Expensum 🤖. Qui trovi quali modelli usiamo, per cosa li usiamo e quali sono i loro limiti, in linea con gli obblighi di trasparenza dell'AI Act (Regolamento UE 2024/1689, Art. 50).",
+    "aiDisclosure": {
+      "title": "Stai parlando con un'intelligenza artificiale",
+      "desc": "Ogni risposta di Moneo — sul bot Telegram, nella chat web e nei report mensili e settimanali — è generata automaticamente da un modello linguistico (LLM), non da una persona. Te lo segnaliamo sempre alla prima interazione e in ogni report."
+    },
+    "models": {
+      "title": "I modelli AI che usiamo",
+      "items": [
+        {
+          "name": "Mistral Small 3.1",
+          "purpose": "Lettura e categorizzazione delle spese che scrivi o fotografi (scontrini).",
+          "scope": "Tutti gli utenti"
+        },
+        {
+          "name": "Mistral Large 3",
+          "purpose": "Conversazione con Moneo nella chat: risponde alle tue domande sulle tue finanze.",
+          "scope": "Tutti gli utenti"
+        },
+        {
+          "name": "Gemini 2.0 (Vertex AI)",
+          "purpose": "Trascrizione dei messaggi vocali in testo, prima dell'analisi della spesa.",
+          "scope": "Solo piano PRO"
+        }
+      ],
+      "footnote": "Tutti i modelli usati per l'analisi testo/foto sono forniti da Mistral AI, azienda europea conforme al GDPR. Gemini 2.0 (Vertex AI) è usato solo per la trascrizione vocale, esclusivamente per gli utenti PRO."
+    },
+    "limits": {
+      "title": "Limiti noti",
+      "desc": "Moneo può commettere errori: categorie sbagliate, importi letti male da uno scontrino poco leggibile, o trascrizioni vocali imprecise. Verifica sempre i dati finanziari importanti prima di prendere decisioni basate sui report o sulle risposte di Moneo. Puoi correggere qualsiasi spesa o entrata in qualsiasi momento."
+    },
+    "privacy": {
+      "title": "Dati personali e privacy",
+      "descBefore": "Per sapere come trattiamo i tuoi dati personali e come esercitare i tuoi diritti GDPR, consulta",
+      "link": "la pagina privacy e dati"
+    }
+  },
+  "Legal": {
+    "backToSite": "← Torna al sito",
+    "footerCopy": "© {year} Expensum — Michele Pinotti",
+    "privacyPolicy": "Privacy Policy",
+    "cookiePolicy": "Cookie Policy",
+    "termsOfService": "Termini di servizio"
+  },
+  "LanguageSwitcher": {
+    "label": "Lingua"
+  }
+}

@@ -1,6 +1,9 @@
 import type { NextConfig } from "next";
 import fs from "fs";
 import path from "path";
+import createNextIntlPlugin from "next-intl/plugin";
+
+const withNextIntl = createNextIntlPlugin("./src/i18n/request.ts");
 
 // Carica l'URL di ngrok dal .env della root
 const envPath = path.resolve(process.cwd(), "../.env");
@@ -59,4 +62,4 @@ const nextConfig: NextConfig = {
   },
 };
 
-export default nextConfig;
+export default withNextIntl(nextConfig);
