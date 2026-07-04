@@ -339,8 +339,9 @@ export default function LandingPage() {
               <div className={styles.pricingCard} data-reveal>
                 <p className={styles.pricingLabel}>{t("pricing.premium.label")}</p>
                 <div className={styles.pricingPrice}>
-                  <span className={styles.pricingAmount}>€4.99</span>
-                  <span className={styles.pricingPeriod}>{t("pricing.perMonth")}</span>
+                  <span className={`${styles.pricingAmount} ${styles.pricingAmountBlurred}`} aria-hidden="true">€4.99</span>
+                  <span className={`${styles.pricingPeriod} ${styles.pricingAmountBlurred}`} aria-hidden="true">{t("pricing.perMonth")}</span>
+                  <span className={styles.pricingComingSoon}>{t("pricing.premium.comingSoon")}</span>
                 </div>
                 <ul className={styles.featureList}>
                   {premiumFeatures.map((feat) => (

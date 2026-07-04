@@ -955,6 +955,7 @@
   display: flex;
   align-items: baseline;
   gap: 4px;
+  position: relative;
 }
 
 .pricingAmount {
@@ -968,6 +969,28 @@
 .pricingPeriod {
   font-size: 14px;
   color: var(--color-text-2);
+}
+
+.pricingAmountBlurred {
+  filter: blur(6px);
+  user-select: none;
+}
+
+.pricingComingSoon {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  color: var(--color-text-2);
+  background: var(--color-base);
+  border: 1px solid var(--color-border);
+  padding: 4px 12px;
+  border-radius: 100px;
+  white-space: nowrap;
+  pointer-events: none;
 }
 
 .featureList {

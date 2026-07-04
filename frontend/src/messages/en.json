@@ -107,6 +107,7 @@
       },
       "premium": {
         "label": "Premium",
+        "comingSoon": "Coming soon",
         "note": "For those who want it all: charts, budgets, forecasts and full history.",
         "features": [
           "Everything in the Free plan",

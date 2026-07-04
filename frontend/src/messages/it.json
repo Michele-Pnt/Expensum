@@ -107,6 +107,7 @@
       },
       "premium": {
         "label": "Premium",
+        "comingSoon": "Prossimamente",
         "note": "Per chi vuole il massimo: grafici, budget, previsioni e storico completo.",
         "features": [
           "Tutto del piano Free",
