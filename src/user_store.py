@@ -7,6 +7,7 @@ import base64
 import hashlib
 import logging
 import os
+import uuid
 from datetime import datetime, date, timedelta
 import secrets
 import string
@@ -380,6 +381,26 @@ class ChatMessage(Base):
     text          = Column(Text, nullable=False)
     metadata_json = Column(Text, nullable=True)      # JSON: dati transazione parsata
     created_at    = Column(DateTime, default=datetime.utcnow, index=True)
+
+
+class TallyLead(Base):
+    """Backup locale dei submit del form Tally (waitlist beta), per audit/debug.
+
+    Il sync verso Brevo (lista Beta Waitlist) è gestito da questo modulo
+    (src/dashboard/app.py::_sync_tally_lead_to_brevo). La creazione account +
+    invio credenziali (fase beta, automatica con tetto) è tracciata dai campi
+    beta_account_granted*.
+    """
+    __tablename__ = "tally_leads"
+
+    id                    = Column(Integer, primary_key=True, autoincrement=True)
+    tally_submission_id   = Column(String, nullable=False, unique=True, index=True)
+    email                 = Column(String, nullable=True)
+    raw_payload           = Column(Text, nullable=True)  # JSON grezzo del submit Tally
+    received_at           = Column(DateTime, default=datetime.utcnow)
+    synced_to_brevo       = Column(Boolean, default=False, nullable=False)
+    beta_account_granted    = Column(Boolean, default=False, nullable=False)
+    beta_account_granted_at = Column(DateTime, nullable=True)
 
 
 # 5. IL MANAGER DEL DATABASE
@@ -914,6 +935,27 @@ class UserStore:
                 ])
                 if not same_email and not target_is_placeholder:
                     raise ValueError(f"chat_id {new_chat_id} gia associato a un altro account")
+
+                if target_is_placeholder:
+                    # Un placeholder puo' comunque avere righe figlie (es. categorie di
+                    # default create al primo /start, o la riga UserPlan — chat_id e'
+                    # la sua primary key). Senza pulirle: su Postgres la FK blocca subito
+                    # `session.delete(target_user)`; su SQLite (FK non enforced di
+                    # default) l'errore emerge piu' avanti, sui vincoli UNIQUE, quando il
+                    # bulk update sposta old_chat_id -> new_chat_id. ChatMessage non ha
+                    # vincoli unique e puo' contenere cronologia reale: non la tocchiamo.
+                    session.query(Expense).filter(Expense.user_id == new_chat_id).delete()
+                    session.query(Income).filter(Income.user_id == new_chat_id).delete()
+                    session.query(Account).filter(Account.user_id == new_chat_id).delete()
+                    session.query(Subscription).filter(Subscription.user_id == new_chat_id).delete()
+                    session.query(UserCategory).filter(UserCategory.user_id == new_chat_id).delete()
+                    session.query(SavedReport).filter(SavedReport.user_id == new_chat_id).delete()
+                    session.query(Feedback).filter(Feedback.chat_id == new_chat_id).delete()
+                    session.query(DatabaseSchema).filter(DatabaseSchema.chat_id == new_chat_id).delete()
+                    session.query(OAuthSession).filter(OAuthSession.chat_id == new_chat_id).delete()
+                    session.query(UserPlan).filter(UserPlan.chat_id == new_chat_id).delete()
+                    session.query(PlanChange).filter(PlanChange.chat_id == new_chat_id).delete()
+
                 session.delete(target_user)
                 session.flush()
 
@@ -1038,6 +1080,19 @@ class UserStore:
             session.delete(oauth_sess)
             session.commit()
             return chat_id
+
+    def peek_oauth_session(self, state: str) -> str | None:
+        """Legge il chat_id associato a uno state senza consumare la sessione.
+
+        Usato quando l'operazione successiva puo' fallire (es. reassign_user_chat_id):
+        il token va consumato con get_and_delete_oauth_session solo a operazione riuscita,
+        cosi' un fallimento permette di ritentare con lo stesso link entro la scadenza.
+        """
+        with self.Session() as session:
+            oauth_sess = session.query(OAuthSession).filter_by(state=state).first()
+            if not oauth_sess or oauth_sess.expires_at < datetime.utcnow():
+                return None
+            return oauth_sess.chat_id
 
     def cleanup_expired_oauth_sessions(self) -> int:
         """Rimuove le sessioni OAuth scadute. Chiamata dal job APScheduler notturno."""
@@ -1451,6 +1506,104 @@ class UserStore:
                 .all()
             )
             return [(row[0], row[1]) for row in rows]
+
+    def save_tally_lead(
+        self,
+        tally_submission_id: str,
+        email: Optional[str],
+        raw_payload: str,
+    ) -> tuple["TallyLead", bool]:
+        """Salva un submit del form Tally in modo idempotente su tally_submission_id.
+
+        Ritorna (lead, is_new): is_new è False se il submission_id esisteva già
+        (retry del webhook Tally), utile al chiamante per evitare un secondo sync Brevo.
+        """
+        with self.Session() as session:
+            existing = (
+                session.query(TallyLead)
+                .filter(TallyLead.tally_submission_id == tally_submission_id)
+                .first()
+            )
+            if existing:
+                return existing, False
+
+            lead = TallyLead(
+                tally_submission_id=tally_submission_id,
+                email=email,
+                raw_payload=raw_payload,
+            )
+            session.add(lead)
+            session.commit()
+            session.refresh(lead)
+            return lead, True
+
+    def mark_tally_lead_synced(self, tally_submission_id: str) -> None:
+        """Marca un lead Tally come sincronizzato su Brevo."""
+        with self.Session() as session:
+            lead = (
+                session.query(TallyLead)
+                .filter(TallyLead.tally_submission_id == tally_submission_id)
+                .first()
+            )
+            if lead:
+                lead.synced_to_brevo = True
+                session.commit()
+
+    def count_beta_accounts_granted(self) -> int:
+        """Conta i lead Tally a cui è già stato creato un account beta automatico."""
+        with self.Session() as session:
+            return (
+                session.query(TallyLead)
+                .filter(TallyLead.beta_account_granted == True)
+                .count()
+            )
+
+    def mark_tally_lead_beta_access_granted(self, tally_submission_id: str) -> None:
+        """Marca un lead Tally come già dotato di account beta (evita doppie creazioni)."""
+        with self.Session() as session:
+            lead = (
+                session.query(TallyLead)
+                .filter(TallyLead.tally_submission_id == tally_submission_id)
+                .first()
+            )
+            if lead:
+                lead.beta_account_granted = True
+                lead.beta_account_granted_at = datetime.utcnow()
+                session.commit()
+
+    def create_beta_account(self, email: str, name: str = "") -> tuple[str, str] | None:
+        """Crea un account web per un beta tester con password casuale.
+
+        Ritorna (chat_id, password) oppure None se esiste già un account per
+        quell'email (a qualunque stato). Stessa logica usata sia dal comando
+        manuale (administrative provisioning) sia dalla creazione automatica
+        al submit del form Tally (src/dashboard/app.py).
+        """
+        from config import Config
+
+        email = email.strip().lower()
+        if self.get_user_by_email_any_status(email):
+            return None
+
+        password = "".join(secrets.choice(string.ascii_letters + string.digits) for _ in range(16))
+        chat_id = f"web_{uuid.uuid4().hex}"
+
+        self.add_user(
+            chat_id=chat_id,
+            storage_backend="postgres",
+            setup_status="COMPLETED",
+            setup_completed_at=datetime.utcnow(),
+            username=name or email,
+            is_active=True,
+        )
+        self.set_credentials(chat_id, email, password)
+        self.accept_privacy_policy(chat_id, Config.CURRENT_PRIVACY_POLICY_VERSION)
+        self.write_audit_log(
+            chat_id, actor="admin", action="consent_change",
+            metadata={"consent_type": "privacy_policy", "version": Config.CURRENT_PRIVACY_POLICY_VERSION},
+            ip_address=None, user_agent="create_beta_account",
+        )
+        return chat_id, password
 
     def delete_user_completely(self, chat_id: str) -> str:
         """Elimina l'account e tutti i dati locali dell'utente in modo atomico.

@@ -27,9 +27,9 @@ export default function PrivacyContentIt() {
       <section>
         <h2>2. Dati trattati e finalità</h2>
         <p>
-          Il servizio è riservato a utenti di età non inferiore a <strong>16 anni</strong>.
-          Non raccogliamo consapevolmente dati di minori di 16 anni (Art. 8 GDPR; Art. 2-quinquies
-          D.Lgs. 196/2003).
+          Il servizio è riservato a utenti <strong>maggiorenni (18 anni o più)</strong>, verificato
+          tramite attestazione esplicita richiesta alla registrazione. Non raccogliamo
+          consapevolmente dati di minori (Art. 8 GDPR; D.Lgs. 101/2018 — capacità contrattuale).
         </p>
 
         <h3>2.1 Dati forniti direttamente dall&apos;utente</h3>
@@ -88,11 +88,16 @@ export default function PrivacyContentIt() {
             Base giuridica: consenso (Art. 6(1)(a)).
           </li>
           <li>
-            <strong>Email lista d&apos;attesa early access</strong> (tramite form Tally.so):
-            raccolta su base consenso dell&apos;utente che compila il form, ai fini di
-            informarlo del lancio del servizio.
-            Base giuridica: consenso (Art. 6(1)(a)).
-            Il consenso può essere revocato in qualsiasi momento scrivendo a
+            <strong>Email lista d&apos;attesa beta</strong> (tramite form Tally.so): raccolta
+            su base consenso dell&apos;utente che compila il form, ai fini di informarlo del
+            lancio del servizio. <strong>Durante la fase beta</strong>, se i posti disponibili
+            lo consentono, la compilazione del form può comportare la creazione immediata di
+            un account Expensum attivo (email, password generata, accesso alla web app) e
+            l&apos;invio delle relative credenziali via email — in tal caso il trattamento dei
+            dati dell&apos;account segue le regole della Sezione 2.1 (base giuridica: esecuzione
+            del contratto, Art. 6(1)(b)) anziché quelle della lista d&apos;attesa.
+            Base giuridica per l&apos;iscrizione alla lista d&apos;attesa in sé: consenso
+            (Art. 6(1)(a)), revocabile in qualsiasi momento scrivendo a
             <a href="mailto:expensum.finance@gmail.com"> expensum.finance@gmail.com</a>.
           </li>
         </ul>
@@ -195,6 +200,15 @@ export default function PrivacyContentIt() {
               <td>Trattamento interno UE</td>
             </tr>
             <tr>
+              <td><strong>Brevo (Sendinblue SA)</strong></td>
+              <td>Invio email agli iscritti alla lista d&apos;attesa beta e, se viene creato un
+              account beta, email transazionale con le credenziali di accesso</td>
+              <td>Francia 🇫🇷 (UE)</td>
+              <td>Consenso (Art. 6(1)(a)) per l&apos;email di lista d&apos;attesa; Contratto
+              (Art. 6(1)(b)) per l&apos;email transazionale con le credenziali di accesso</td>
+              <td>Trattamento interno UE</td>
+            </tr>
+            <tr>
               <td><strong>Stripe Inc.</strong> (futuro)</td>
               <td>Gestione pagamenti piani disponibili sulla piattaforma — <em>non ancora attivo</em></td>
               <td>USA/IE 🇺🇸🇮🇪</td>
@@ -262,7 +276,7 @@ export default function PrivacyContentIt() {
           <li><strong>Log tecnici</strong> (inclusi IP): 90 giorni dall&apos;evento, poi eliminazione automatica.</li>
           <li><strong>Messaggi vocali originali</strong>: non conservati — eliminati immediatamente dopo la trascrizione.</li>
           <li><strong>Dati di consenso cookie</strong>: 6 mesi (durata del cookie di consenso).</li>
-          <li><strong>Email lista d&apos;attesa</strong> (Tally): fino al lancio del servizio o alla revoca del consenso, se precedente.</li>
+          <li><strong>Email lista d&apos;attesa</strong> (Tally): fino al lancio del servizio o alla revoca del consenso, se precedente — salvo che il form abbia generato la creazione di un account beta, nel qual caso si applica la regola &quot;Dati account e finanziari&quot; sopra.</li>
           <li><strong>Backup</strong>: i backup del database vengono eliminati entro 30 giorni dalla cancellazione dell&apos;account.</li>
         </ul>
         <p>

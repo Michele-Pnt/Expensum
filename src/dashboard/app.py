@@ -26,6 +26,8 @@ if str(ROOT_DIR) not in sys.path:
 from config import Config
 from src.user_store import UserStore, User, LlmUsageEvent, LlmPricing, DailyMetrics, Feedback, ChatMessage
 from src import analytics
+from src import brevo_client
+from src import beta_access
 from src.privacy_export import build_export_json, build_csv_rows, CSV_HEADER, NOTION_CSV_UNAVAILABLE_MESSAGE
 from src.notion_client import NotionFinanceClient
 from src.storage.notion_storage import NotionStorage
@@ -74,6 +76,10 @@ def enforce_csrf_on_forms():
     if request.path == "/auth/telegram-login":
         return
     if request.path.startswith("/api/") and request.headers.get("X-Telegram-Init-Data"):
+        return
+    if request.path.startswith("/webhooks/"):
+        # Chiamate server-to-server (Tally, ecc.), non autenticate via cookie di
+        # sessione browser: la protezione CSRF non si applica per definizione.
         return
     csrf.protect()
 
@@ -124,6 +130,122 @@ def api_track():
     if consent.get("marketing"):
         event_id = data.get("event_id") or str(uuid.uuid4())
         analytics.track_meta(event, event_id, properties)
+
+    return jsonify({"ok": True})
+
+
+# --- Webhooks marketing ---
+
+def _extract_tally_email(fields: list) -> str | None:
+    """Estrae l'email dai campi di un submit Tally (per tipo o label)."""
+    for field in fields:
+        if not isinstance(field, dict):
+            continue
+        if field.get("type") == "INPUT_EMAIL":
+            value = field.get("value")
+            if isinstance(value, str) and value.strip():
+                return value.strip().lower()
+    for field in fields:
+        if not isinstance(field, dict):
+            continue
+        label = (field.get("label") or "").strip().lower()
+        value = field.get("value")
+        if "email" in label and isinstance(value, str) and value.strip():
+            return value.strip().lower()
+    return None
+
+
+def _extract_tally_name(fields: list) -> str:
+    """Estrae il nome dai campi di un submit Tally (per label), stringa vuota se assente."""
+    for field in fields:
+        if not isinstance(field, dict):
+            continue
+        label = (field.get("label") or "").strip().lower()
+        value = field.get("value")
+        if "nome" in label and isinstance(value, str) and value.strip():
+            return value.strip()
+    return ""
+
+
+def _sync_tally_lead_to_brevo(tally_submission_id: str, email: str, name: str = "") -> None:
+    """Sincronizza un lead Tally su Brevo e, se sotto il tetto configurato,
+    crea subito l'account beta e invia le credenziali (in background: risponde
+    subito 200 a Tally, che ha timeout stretti sul webhook, senza far dipendere
+    l'ack dalla latenza di Brevo).
+    """
+    try:
+        brevo_client.upsert_contact(email, list_ids=[Config.BREVO_BETA_WAITLIST_LIST_ID])
+        store.mark_tally_lead_synced(tally_submission_id)
+    except Exception:
+        logger.exception(
+            "Errore sync lead Tally verso Brevo",
+            extra={"domain": "dashboard", "event": "tally_brevo_sync_failed"},
+        )
+
+    if not Config.AUTO_BETA_ACCESS_ENABLED:
+        return
+
+    try:
+        if store.count_beta_accounts_granted() >= Config.AUTO_BETA_ACCESS_MAX_ACCOUNTS:
+            logger.warning(
+                "Tetto account beta automatici raggiunto, nessuna creazione",
+                extra={"domain": "dashboard", "event": "beta_access_cap_reached"},
+            )
+            return
+        granted = beta_access.grant_beta_access(store, email, name)
+        if granted:
+            store.mark_tally_lead_beta_access_granted(tally_submission_id)
+            logger.info(
+                "Account beta creato automaticamente da lead Tally",
+                extra={"domain": "dashboard", "event": "beta_access_auto_granted"},
+            )
+    except Exception:
+        logger.exception(
+            "Errore creazione account beta automatica",
+            extra={"domain": "dashboard", "event": "beta_access_auto_failed"},
+        )
+
+
+@app.route("/webhooks/tally", methods=["POST"])
+@limiter.limit("60 per minute")
+def webhook_tally():
+    """Riceve i submit del form Tally (waitlist beta) e sincronizza il lead su Brevo.
+
+    Chiamata server-to-server da Tally, non autenticata via cookie di sessione
+    (vedi carve-out in enforce_csrf_on_forms). Idempotente su submissionId:
+    i retry del webhook Tally non generano doppie righe né doppi sync.
+    """
+    payload = request.get_json(silent=True) or {}
+    data = payload.get("data") or {}
+    submission_id = data.get("submissionId")
+    if not submission_id or not isinstance(submission_id, str):
+        return jsonify({"error": "missing submissionId"}), 400
+
+    fields = data.get("fields") or []
+    email = _extract_tally_email(fields) if isinstance(fields, list) else None
+    name = _extract_tally_name(fields) if isinstance(fields, list) else ""
+
+    lead, is_new = store.save_tally_lead(
+        tally_submission_id=submission_id,
+        email=email,
+        raw_payload=json.dumps(payload),
+    )
+
+    logger.info(
+        "Lead Tally ricevuto",
+        extra={
+            "domain": "dashboard",
+            "event": "tally_lead_received",
+            "meta": {"is_new": is_new, "has_email": bool(email)},
+        },
+    )
+
+    if is_new and email:
+        threading.Thread(
+            target=_sync_tally_lead_to_brevo,
+            args=(submission_id, email, name),
+            daemon=True,
+        ).start()
 
     return jsonify({"ok": True})
 
@@ -331,13 +453,27 @@ def web_login():
                        "meta": {"failed_attempts": failed_count, "ip": request.remote_addr}},
             )
 
-    return render_template("login.html", error=error)
+    return render_template(
+        "login.html", error=error, registration_enabled=Config.PUBLIC_REGISTRATION_ENABLED
+    )
 
 
 @app.route("/register", methods=["GET", "POST"])
 @limiter.limit("5 per minute")
 def web_register():
-    """Registrazione web: crea un account senza passare da Telegram."""
+    """Registrazione web: crea un account senza passare da Telegram.
+
+    Disattivata in fase beta (Config.PUBLIC_REGISTRATION_ENABLED=False): gli
+    account vengono creati manualmente via administrative provisioning e le
+    credenziali inviate via email, per limitare l'accesso ai soli beta tester.
+    """
+    if not Config.PUBLIC_REGISTRATION_ENABLED:
+        return render_template(
+            "login.html",
+            error="Le registrazioni sono chiuse: siamo in fase beta. "
+                  "Controlla la mail che ti abbiamo inviato con le credenziali di accesso.",
+        )
+
     chat_id = _get_session_chat_id()
     if chat_id:
         return redirect(_resolve_authenticated_redirect(chat_id))
@@ -395,8 +531,15 @@ def web_register():
 
 @app.route("/privacy")
 def privacy_policy():
-    """Informativa sulla privacy (GDPR Art. 13)."""
-    return render_template("privacy.html")
+    """Redirect all'unica Privacy Policy ufficiale (sito Next.js).
+
+    In passato questa route serviva un template Flask duplicato
+    (templates/privacy.html), disallineato dal contenuto reale del prodotto
+    (mancavano sub-processor come Tally/Brevo, età minima sbagliata, ecc.).
+    Mantenere due informative separate le fa inevitabilmente divergere:
+    un solo documento, aggiornato in un solo posto.
+    """
+    return redirect(f"{Config.WEBAPP_BASE_URL}/it/privacy")
 
 
 @app.route("/logout")
@@ -1167,7 +1310,7 @@ def auth_postgres_start():
         pass
 
     threading.Thread(target=_process_postgres_background, args=(chat_id,), daemon=True).start()
-    return redirect("https://t.me/NotionFinaceBot")
+    return redirect("https://t.me/ExpensumFinanceBot")
 
 
 @app.route("/auth/notion/callback")
@@ -1251,7 +1394,7 @@ def auth_notion_callback():
     )
     t.start()
 
-    return redirect("https://t.me/NotionFinaceBot")
+    return redirect("https://t.me/ExpensumFinanceBot")
 
 # --- LOGIN MINI APP (Telegram WebApp) ---
 
@@ -2821,6 +2964,24 @@ def api_settings_get():
             "alert": plan.get("alert"),
         },
     })
+
+
+@app.route("/api/telegram/link", methods=["POST"])
+def api_telegram_link():
+    """Genera un deep link per collegare l'account web corrente a Telegram."""
+    chat_id, _ = _resolve_request_chat_id()
+    if not chat_id:
+        return jsonify({"error": "Unauthorized"}), 401
+
+    if not str(chat_id).startswith("web_"):
+        return jsonify({"already_linked": True})
+
+    if not Config.TELEGRAM_BOT_USERNAME:
+        return jsonify({"error": "Telegram bot non configurato"}), 500
+
+    state = store.create_oauth_session(chat_id)
+    link = f"https://t.me/{Config.TELEGRAM_BOT_USERNAME}?start=link_{state}"
+    return jsonify({"already_linked": False, "link": link})
 
 
 @app.route("/api/settings/logout", methods=["POST"])

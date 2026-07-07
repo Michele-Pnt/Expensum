@@ -5,7 +5,7 @@ import os
 sys.path.append(os.getcwd())
 
 try:
-    from src.user_store import UserStore, User, DailyUsage, Feedback, OAuthSession
+    from src.user_store import UserStore, User, DailyMetrics, Feedback, OAuthSession
 except ImportError as e:
     print(f"Errore di importazione: {e}")
     sys.exit(1)
@@ -22,7 +22,7 @@ def clear_data():
             num_feedbacks = session.query(Feedback).delete()
             print(f"Feedback eliminati: {num_feedbacks}")
             
-            num_usage = session.query(DailyUsage).delete()
+            num_usage = session.query(DailyMetrics).delete()
             print(f"Log di utilizzo eliminati: {num_usage}")
             
             num_sessions = session.query(OAuthSession).delete()

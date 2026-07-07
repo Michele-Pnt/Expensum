@@ -3,6 +3,7 @@
 import React, { createContext, useCallback, useContext, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { getCsrfToken } from "@/lib/csrf";
+import TelegramLinkStep from "@/components/TelegramLinkStep";
 
 export interface TourStep {
   id: string;
@@ -125,6 +126,14 @@ export const TOUR_STEPS: TourStep[] = [
         btn?.click();
       }
     },
+  },
+  {
+    id: "connect-telegram",
+    page: "/chat",
+    selector: '[data-tour="tour-final"]',
+    title: "📲 Collega Telegram",
+    description: <TelegramLinkStep />,
+    position: "center",
   },
   {
     id: "tour-complete",

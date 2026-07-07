@@ -257,8 +257,9 @@ export default function TourOverlay() {
           {step.title}
         </Typography>
 
-        {/* Descrizione */}
-        <Typography variant="body2" color="text.secondary" sx={{ lineHeight: 1.55, mb: 2 }}>
+        {/* Descrizione — component="div" perché alcuni step (es. connect-telegram)
+            annidano elementi block-level (Box, Button); un <p> non può contenerli. */}
+        <Typography component="div" variant="body2" color="text.secondary" sx={{ lineHeight: 1.55, mb: 2 }}>
           {step.description}
         </Typography>
 

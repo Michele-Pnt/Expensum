@@ -1005,15 +1005,78 @@ async def cmd_piano(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         
     await update.message.reply_text(testo, parse_mode=ParseMode.MARKDOWN)
 
+_SOCIAL_KEYBOARD = InlineKeyboardMarkup([
+    [InlineKeyboardButton("🌐 Sito", url="https://expensum.it")],
+    [
+        InlineKeyboardButton("📸 Instagram", url="https://instagram.com/expensum.finance"),
+        InlineKeyboardButton("🎵 TikTok", url="https://www.tiktok.com/@expensum"),
+    ],
+    [
+        InlineKeyboardButton("💼 LinkedIn", url="https://www.linkedin.com/company/expensum/"),
+        InlineKeyboardButton("👍 Facebook", url="https://acesse.one/ite4lxk"),
+    ],
+])
+
+
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handler per /start — messaggio di benvenuto."""
+    """Handler per /start — messaggio di benvenuto. Gestisce anche il deep link
+    `?start=link_<state>` generato dalla webapp per collegare un account web a Telegram."""
+    args = context.args
+    if args and args[0].startswith("link_"):
+        state = args[0][len("link_"):]
+        chat_id = str(update.effective_chat.id)
+        old_chat_id = _user_store.peek_oauth_session(state)
+        if not old_chat_id:
+            # Il client Telegram invia talvolta lo stesso /start due volte quando si
+            # apre un deep link verso una chat non ancora avviata: se questo chat_id
+            # ha gia' un account attivo, il token e' stato consumato pochi istanti fa
+            # da un collegamento riuscito, non e' davvero scaduto.
+            if _user_store.get_user(chat_id):
+                await update.message.reply_text("✅ Il tuo account Telegram è già collegato a Expensum.")
+            else:
+                await update.message.reply_text(
+                    "⚠️ Il link di collegamento è scaduto o non è valido. "
+                    "Riprova dalle Impostazioni della webapp."
+                )
+            return
+        try:
+            _user_store.reassign_user_chat_id(old_chat_id, chat_id)
+        except ValueError:
+            logger.warning("[User %s] Collegamento Telegram fallito: chat_id già associato", chat_id)
+            await update.message.reply_text(
+                "⚠️ Questo account Telegram è già associato a un altro profilo Expensum."
+            )
+            return
+        except Exception:
+            logger.exception("[User %s] Collegamento Telegram fallito per errore imprevisto", chat_id)
+            await update.message.reply_text(
+                "⚠️ Si è verificato un errore durante il collegamento. Riprova tra qualche istante "
+                "riaprendo lo stesso link."
+            )
+            return
+        # Consuma il token solo ora che il collegamento è andato a buon fine: un
+        # fallimento sopra lascia lo state valido, cosi' l'utente puo' ritentare
+        # con lo stesso link entro la scadenza (15 minuti).
+        _user_store.get_and_delete_oauth_session(state)
+        logger.info("[User %s] Account web collegato a Telegram", chat_id)
+        await update.message.reply_text(
+            "✅ *Account collegato!*\n\n"
+            "Il tuo profilo Expensum è ora sincronizzato con Telegram: puoi registrare spese "
+            "da qui in qualsiasi momento.",
+            parse_mode=ParseMode.MARKDOWN,
+        )
+        return
+
     if not _is_authorized(update):
         await update.message.reply_text(
             "👋 *Benvenuto!*\n\n"
-            "Sono **Moneo** 🐷, l'assistente AI di Expensum.\n"
-            "Le mie risposte sono generate automaticamente con Mistral AI europea. Posso sbagliare: verifica sempre i dati finanziari importanti.\n\n"
-            "Digita /registrati per creare un account, o /login se ne hai già uno! 🚀",
-            parse_mode=ParseMode.MARKDOWN
+            "Sono l'assistente AI di Expensum.\n"
+            "Le mie risposte sono generate automaticamente con AI. Posso sbagliare: verifica sempre i dati finanziari importanti.\n\n"
+            "Digita /registrati per creare un account, o /login se ne hai già uno e inizia a migliorare la tua vita "
+            "aumentando la consapevolezza delle tue finanze! 🚀\n\n"
+            "Se vuoi farti un giro sui nostri social ti ho lasciato i link qui sotto 😉",
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=_SOCIAL_KEYBOARD,
         )
         return
 
@@ -1027,6 +1090,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "• _\"netflix 13.99\"_\n\n"
         "Ci penso io a fare i conti e salvarti tutto su Notion! 🚀",
         parse_mode=ParseMode.MARKDOWN,
+        reply_markup=_SOCIAL_KEYBOARD,
     )
 
 async def cmd_feedback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

@@ -179,7 +179,7 @@
                 <button type="submit">Accedi →</button>
             </form>
 
-            {% if not admin_mode %}
+            {% if not admin_mode and registration_enabled %}
             <a href="/register" class="register-link">Non hai un account? Registrati →</a>
             {% endif %}
         </div>

@@ -609,3 +609,51 @@ def test_telegram_init_data_api_exempt_from_csrf(client):
         assert response.status_code != 400
     finally:
         flask_app.config["WTF_CSRF_ENABLED"] = False
+
+
+def test_telegram_link_requires_auth(client):
+    csrf_token = client.get("/api/csrf-token").json["csrf_token"]
+    response = client.post("/api/telegram/link", headers={"X-CSRFToken": csrf_token})
+    assert response.status_code == 401
+
+
+def test_telegram_link_already_linked_for_telegram_chat_id(client):
+    from src.dashboard.app import store
+
+    _login_completed(client, store, "chat_already_telegram", "already-telegram@example.com")
+
+    csrf_token = client.get("/api/csrf-token").json["csrf_token"]
+    response = client.post("/api/telegram/link", headers={"X-CSRFToken": csrf_token})
+
+    assert response.status_code == 200
+    assert response.json == {"already_linked": True}
+
+
+def test_telegram_link_generates_deep_link_for_web_chat_id(client):
+    from src.dashboard.app import store, Config
+
+    _login_completed(client, store, "web_test123", "web-link@example.com")
+
+    csrf_token = client.get("/api/csrf-token").json["csrf_token"]
+    with patch.object(Config, "TELEGRAM_BOT_USERNAME", "expensum_test_bot"):
+        response = client.post("/api/telegram/link", headers={"X-CSRFToken": csrf_token})
+
+    assert response.status_code == 200
+    body = response.json
+    assert body["already_linked"] is False
+    assert body["link"].startswith("https://t.me/expensum_test_bot?start=link_")
+
+    state = body["link"].split("start=link_", 1)[1]
+    assert store.get_and_delete_oauth_session(state) == "web_test123"
+
+
+def test_telegram_link_returns_500_without_bot_username(client):
+    from src.dashboard.app import store, Config
+
+    _login_completed(client, store, "web_test456", "web-link-2@example.com")
+
+    csrf_token = client.get("/api/csrf-token").json["csrf_token"]
+    with patch.object(Config, "TELEGRAM_BOT_USERNAME", ""):
+        response = client.post("/api/telegram/link", headers={"X-CSRFToken": csrf_token})
+
+    assert response.status_code == 500

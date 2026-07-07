@@ -419,6 +419,49 @@ def test_reassign_user_chat_id_respects_foreign_keys(mock_db_session):
         assert s.query(User).filter_by(chat_id=old_chat_id).first() is None
 
 
+def test_reassign_user_chat_id_cleans_up_placeholder_target_children(mock_db_session):
+    """Regressione: collegare un web account a un chat_id Telegram che ha gia'
+    usato il bot (placeholder con categorie di default + riga user_plans gia'
+    seedate) falliva con UNIQUE/PK violation sul bulk update, perche' le righe
+    figlie del placeholder cancellato non venivano ripulite prima dello spostamento.
+    """
+    from src.storage.models import UserCategory
+
+    store = mock_db_session
+
+    old_chat_id, new_chat_id = "web_test", "telegram_real_user"
+
+    # old_chat_id: account web completo con la categoria di default "Cibo" e un piano
+    store.add_user(chat_id=old_chat_id, username="t", storage_backend="postgres")
+    store.set_credentials(old_chat_id, "webuser@example.com", "Password123")
+    store.get_user_plan(old_chat_id)
+    with store.Session() as s:
+        s.add(UserCategory(user_id=old_chat_id, name="Cibo"))
+        s.commit()
+
+    # new_chat_id: placeholder Telegram (nessuna email/password/token) che ha
+    # gia' seedato la stessa categoria di default e la propria riga user_plans
+    store.add_user(chat_id=new_chat_id, username="placeholder")
+    store.get_user_plan(new_chat_id)
+    with store.Session() as s:
+        s.add(UserCategory(user_id=new_chat_id, name="Cibo"))
+        s.commit()
+
+    result = store.reassign_user_chat_id(old_chat_id, new_chat_id)
+
+    assert result is True
+    with store.Session() as s:
+        categories = s.query(UserCategory).filter_by(user_id=new_chat_id).all()
+        assert [c.name for c in categories] == ["Cibo"]
+
+        plan = s.query(UserPlan).filter_by(chat_id=new_chat_id).one()
+        assert plan is not None
+
+        assert s.query(User).filter_by(chat_id=old_chat_id).first() is None
+        merged_user = s.query(User).filter_by(chat_id=new_chat_id).first()
+        assert merged_user.email == "webuser@example.com"
+
+
 # ---------------------------------------------------------------------------
 # Registro violazioni dati personali (Art. 33(5) GDPR)
 # ---------------------------------------------------------------------------

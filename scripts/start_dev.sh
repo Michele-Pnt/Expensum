@@ -22,6 +22,20 @@ if ! command -v ngrok &> /dev/null; then
     exit 1
 fi
 
+# Pulizia di processi residui da esecuzioni precedenti: se il terminale viene
+# chiuso senza Ctrl+C, ngrok/bot/dashboard e i `tail -f` dei log restano orfani
+# e il riavvio successivo (es. dopo una modifica a .env, letta solo all'avvio)
+# rischia di parlare col processo vecchio. Ci assicuriamo che ogni avvio parta
+# da uno stato pulito.
+echo "Pulizia processi residui..."
+pkill -f "ngrok http 3000" 2>/dev/null || true
+pkill -f "$VENV_PYTHON bot.py" 2>/dev/null || true
+pkill -f "$VENV_PYTHON src/dashboard/app.py" 2>/dev/null || true
+pkill -f "tail -f $LOG_DIR/ngrok.log" 2>/dev/null || true
+pkill -f "tail -f $LOG_DIR/bot.log" 2>/dev/null || true
+pkill -f "tail -f $LOG_DIR/dashboard.log" 2>/dev/null || true
+sleep 1
+
 echo "Avvio ambiente di sviluppo Finance-Agents..."
 echo "Project dir: $PROJECT_DIR"
 echo ""
@@ -31,6 +45,12 @@ cleanup() {
     echo "Arresto processi..."
     kill "$PID_NGROK" "$PID_BOT" "$PID_DASHBOARD" 2>/dev/null
     wait "$PID_NGROK" "$PID_BOT" "$PID_DASHBOARD" 2>/dev/null
+    # I `tail -f` dei log (avviati più sotto) non sono tra i PID attesi qui sopra:
+    # li terminiamo per pattern per evitare che restino orfani se il terminale
+    # viene chiuso direttamente invece di premere Ctrl+C.
+    pkill -f "tail -f $LOG_DIR/ngrok.log" 2>/dev/null || true
+    pkill -f "tail -f $LOG_DIR/bot.log" 2>/dev/null || true
+    pkill -f "tail -f $LOG_DIR/dashboard.log" 2>/dev/null || true
     echo "Tutti i processi terminati."
 }
 trap cleanup EXIT INT TERM

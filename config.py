@@ -84,8 +84,20 @@ class Config:
     # --- TELEGRAM ---
     TELEGRAM_BOT_TOKEN: str = os.getenv("TELEGRAM_BOT_TOKEN", "")
     TELEGRAM_CHAT_ID: str = os.getenv("TELEGRAM_CHAT_ID", "")
+    # Username del bot (senza @), usato per costruire deep link t.me/<username>?start=...
+    TELEGRAM_BOT_USERNAME: str = os.getenv("TELEGRAM_BOT_USERNAME", "")
     INVITE_CODE: str = os.getenv("INVITE_CODE", "")
     
+    # --- BREVO ---
+    # Email marketing (sede EU) — sync waitlist beta Tally e futuri contatti utenti.
+    BREVO_API_KEY: str = os.getenv("BREVO_API_KEY", "")
+    # ID della lista Brevo "Beta Waitlist" (Contacts → Lists → apri la lista → ID nell'URL)
+    BREVO_BETA_WAITLIST_LIST_ID: int = int(os.getenv("BREVO_BETA_WAITLIST_LIST_ID", "5"))
+    # Mittente delle email transazionali (deve essere un dominio verificato su Brevo:
+    # Settings → Senders & IP → Domains, con SPF/DKIM configurati)
+    BREVO_SENDER_EMAIL: str = os.getenv("BREVO_SENDER_EMAIL", "hello@expensum.it")
+    BREVO_SENDER_NAME: str = os.getenv("BREVO_SENDER_NAME", "Expensum")
+
     # --- DATABASE ---
     # Default: SQLite locale (sqlite:///users.db). 
     # Per PostgreSQL: "postgresql://utente:password@localhost:5432/financebot"
@@ -96,6 +108,19 @@ class Config:
     SUPPORT_EMAIL: str = os.getenv("SUPPORT_EMAIL", "support@expensum.app")
     # Password master per la web dashboard
     DASHBOARD_PASSWORD: str = os.getenv("DASHBOARD_PASSWORD", "admin")
+    # Fase beta: registrazione self-service disattivata, gli account vengono
+    # creati manualmente (administrative provisioning) e le credenziali inviate
+    # via email. Riattivare (true) solo al lancio pubblico.
+    PUBLIC_REGISTRATION_ENABLED: bool = os.getenv("PUBLIC_REGISTRATION_ENABLED", "false").lower() == "true"
+    # Accesso beta automatico al submit del form Tally: crea l'account e manda le
+    # credenziali subito, senza revisione manuale. Kill-switch rapido: mettere a
+    # false blocca le nuove creazioni automatiche senza toccare il resto del flusso
+    # (il lead resta comunque salvato/sincronizzato su Brevo).
+    AUTO_BETA_ACCESS_ENABLED: bool = os.getenv("AUTO_BETA_ACCESS_ENABLED", "true").lower() == "true"
+    # Tetto sul numero di account beta creati automaticamente (oltre, servono
+    # creazioni manuali via administrative provisioning). Protegge da un afflusso
+    # di submit non previsto in questa fase.
+    AUTO_BETA_ACCESS_MAX_ACCOUNTS: int = int(os.getenv("AUTO_BETA_ACCESS_MAX_ACCOUNTS", "50"))
     # Rate Limiting: max messaggi per utente per finestra di 60 secondi
     # Motivazione: un utente legittimo non inserisce più di 2-3 spese al minuto
     MAX_MESSAGES_PER_MINUTE: int = int(os.getenv("MAX_MESSAGES_PER_MINUTE", "10"))

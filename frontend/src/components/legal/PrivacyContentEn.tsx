@@ -26,9 +26,9 @@ export default function PrivacyContentEn() {
       <section>
         <h2>2. Data processed and purposes</h2>
         <p>
-          The service is reserved for users aged <strong>16 or older</strong>.
-          We do not knowingly collect data from minors under 16 (Art. 8 GDPR; Art. 2-quinquies
-          Italian Legislative Decree 196/2003).
+          The service is reserved for <strong>adult users (18 or older)</strong>, verified via
+          an explicit attestation required at registration. We do not knowingly collect data
+          from minors (Art. 8 GDPR; Italian Legislative Decree 101/2018 — contractual capacity).
         </p>
 
         <h3>2.1 Data provided directly by the user</h3>
@@ -87,11 +87,16 @@ export default function PrivacyContentEn() {
             Legal basis: consent (Art. 6(1)(a)).
           </li>
           <li>
-            <strong>Early access waitlist email</strong> (via Tally.so form): collected on the
-            basis of the consent of the user who fills in the form, in order to inform them
-            of the service launch.
-            Legal basis: consent (Art. 6(1)(a)).
-            Consent can be withdrawn at any time by writing to
+            <strong>Beta waitlist email</strong> (via Tally.so form): collected on the basis of
+            the consent of the user who fills in the form, in order to inform them of the
+            service launch. <strong>During the beta phase</strong>, if capacity allows, filling
+            in the form may result in the immediate creation of an active Expensum account
+            (email, generated password, web app access) and the corresponding credentials
+            being sent by email — in that case the account data is processed under the rules
+            in Section 2.1 (legal basis: contract performance, Art. 6(1)(b)) instead of the
+            waitlist rules.
+            Legal basis for the waitlist sign-up itself: consent (Art. 6(1)(a)), withdrawable
+            at any time by writing to
             <a href="mailto:expensum.finance@gmail.com"> expensum.finance@gmail.com</a>.
           </li>
         </ul>
@@ -194,6 +199,15 @@ export default function PrivacyContentEn() {
               <td>Internal EU processing</td>
             </tr>
             <tr>
+              <td><strong>Brevo (Sendinblue SA)</strong></td>
+              <td>Sends emails to beta waitlist subscribers and, if a beta account is
+              created, a transactional email with login credentials</td>
+              <td>France 🇫🇷 (EU)</td>
+              <td>Consent (Art. 6(1)(a)) for the waitlist email; Contract (Art. 6(1)(b)) for
+              the transactional login-credentials email</td>
+              <td>Internal EU processing</td>
+            </tr>
+            <tr>
               <td><strong>Stripe Inc.</strong> (future)</td>
               <td>Payment management for plans available on the platform — <em>not yet active</em></td>
               <td>USA/IE 🇺🇸🇮🇪</td>
@@ -260,7 +274,7 @@ export default function PrivacyContentEn() {
           <li><strong>Technical logs</strong> (including IPs): 90 days from the event, then automatically deleted.</li>
           <li><strong>Original voice messages</strong>: not retained — deleted immediately after transcription.</li>
           <li><strong>Cookie consent data</strong>: 6 months (duration of the consent cookie).</li>
-          <li><strong>Waitlist email</strong> (Tally): until the service launch or withdrawal of consent, whichever comes first.</li>
+          <li><strong>Waitlist email</strong> (Tally): until the service launch or withdrawal of consent, whichever comes first — unless the form resulted in the creation of a beta account, in which case the &quot;Account and financial data&quot; rule above applies.</li>
           <li><strong>Backups</strong>: database backups are deleted within 30 days of account deletion.</li>
         </ul>
         <p>
