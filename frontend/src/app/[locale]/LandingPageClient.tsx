@@ -84,6 +84,14 @@ export default function LandingPage() {
             </button>
           </div>
           <div className={styles.navActions}>
+            {/* /login e /register sono route Flask (proxate via next.config.ts rewrites),
+                non pagine Next.js localizzate: <a> semplice, niente Link con prefisso locale. */}
+            <a href="/login" className={styles.btnGhost}>
+              {t("nav.accedi")}
+            </a>
+            <a href="/register" className={styles.btnPrimary}>
+              {t("nav.registrati")}
+            </a>
             <LanguageSwitcher />
             {/* Hamburger — solo mobile */}
             <button

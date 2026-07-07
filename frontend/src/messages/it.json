@@ -7,7 +7,9 @@
     "nav": {
       "comeFunziona": "Come funziona",
       "prezzi": "Prezzi",
-      "menu": "Menu"
+      "menu": "Menu",
+      "accedi": "Accedi",
+      "registrati": "Registrati"
     },
     "hero": {
       "pill": "Powered by AI",
