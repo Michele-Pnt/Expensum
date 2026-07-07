@@ -27,6 +27,10 @@ const nextConfig: NextConfig = {
         destination: "http://localhost:5000/auth/:path*",
       },
       {
+        source: "/webhooks/:path*",
+        destination: "http://localhost:5000/webhooks/:path*",
+      },
+      {
         source: "/admin/:path*",
         destination: "http://localhost:5000/admin/:path*",
       },
