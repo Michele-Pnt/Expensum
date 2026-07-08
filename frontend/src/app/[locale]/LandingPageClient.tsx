@@ -123,7 +123,12 @@ export default function LandingPage() {
         <section className={styles.hero}>
           <div className={styles.heroInner}>
             <div className={styles.heroLeft}>
-              <p className={styles.heroPill}>{t("hero.pill")}</p>
+              <div className={styles.heroPillGroup} aria-label="Stato del servizio">
+                <p className={styles.heroPill}>{t("hero.pill")}</p>
+                <p className={`${styles.heroPill} ${styles.heroPillBeta}`}>
+                  Beta privata ad accesso esclusivo
+                </p>
+              </div>
               <h1 className={styles.heroHeadline}>
                 {t("hero.headlineLine1")}<br />{t("hero.headlineLine2")}
               </h1>
@@ -470,7 +475,7 @@ export default function LandingPage() {
             <a href="mailto:expensum.finance@gmail.com" className={styles.footerGridLink}>Email</a>
           </div>
         </div>
-
+        
         <div className={styles.footerBottom}>
           <p className={styles.footerCopy}>{t("footer.copy", { year: new Date().getFullYear() })}</p>
         </div>
