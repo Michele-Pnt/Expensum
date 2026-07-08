@@ -1821,7 +1821,7 @@ async def _save_to_notion(query, context, chat_id: str, account_id: str | None =
             )
             date_str = date.strftime("%d/%m/%Y")
             await query.edit_message_text(
-                f"✅ *Entrata salvata su Notion!*\n\n"
+                f"✅ *Entrata salvata!*\n\n"
                 f"📅 {date_str} — *€{data['amount']:.2f}* — {data['name']}",
                 parse_mode=ParseMode.MARKDOWN,
             )
@@ -1841,7 +1841,7 @@ async def _save_to_notion(query, context, chat_id: str, account_id: str | None =
             )
             date_str = date.strftime("%d/%m/%Y")
             await query.edit_message_text(
-                f"✅ *Spesa salvata su Notion!*\n\n"
+                f"✅ *Spesa salvata!*\n\n"
                 f"📅 {date_str} — *€{data['amount']:.2f}* — {data['name']}",
                 parse_mode=ParseMode.MARKDOWN,
             )
