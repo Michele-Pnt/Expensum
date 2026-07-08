@@ -103,7 +103,10 @@ def api_track():
     Il browser non parla mai direttamente con PostHog/GA4/Meta: questa rotta
     è same-origin, quindi la CSP non deve concedere script-src/connect-src a
     nessuno di quei domini. Il consenso cookie (letto lato client dal CMP)
-    decide quali vendor vengono effettivamente notificati.
+    decide quali vendor vengono effettivamente notificati. PostHog è nella
+    categoria "analytics" del banner esattamente come GA4 (vedi
+    CookieConsent.tsx) e va quindi gated allo stesso modo — non è esente dal
+    consenso solo perché la chiamata è server-side.
     """
     data = request.get_json(silent=True) or {}
     event = data.get("event", "")
@@ -120,12 +123,11 @@ def api_track():
         return jsonify({"error": "missing distinct id"}), 400
 
     consent = data.get("consent") or {}
-    if event == "identify":
-        analytics.identify(distinct_id, properties)
-        return jsonify({"ok": True})
-
-    analytics.track(distinct_id, event, properties)
     if consent.get("analytics"):
+        if event == "identify":
+            analytics.identify(distinct_id, properties)
+            return jsonify({"ok": True})
+        analytics.track(distinct_id, event, properties)
         analytics.track_ga4(distinct_id, event, properties)
     if consent.get("marketing"):
         event_id = data.get("event_id") or str(uuid.uuid4())

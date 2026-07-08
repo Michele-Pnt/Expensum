@@ -4,11 +4,15 @@
  * Il browser non carica mai script di PostHog/GA4/Meta né apre connessioni
  * verso i loro domini: la CSP resta chiusa a 'self'. Il backend Flask
  * (src/analytics.py) inoltra l'evento ai vendor abilitati in base al
- * consenso cookie corrente.
+ * consenso cookie corrente. PostHog è nella categoria "analytics" del banner
+ * (vedi CookieConsent.tsx) esattamente come GA4: nessun evento parte, e
+ * nessun identificatore viene scritto sul device, prima del consenso.
  *
  * Regole GDPR:
  * - distinct_id = chat_id Telegram (risolto server-side dalla sessione) o un
- *   id anonimo generato client-side, persistito in localStorage
+ *   id anonimo generato client-side, persistito in localStorage solo dopo
+ *   il consenso (ePrivacy Art. 5(3): il consenso copre la scrittura
+ *   dell'identificatore sul device, non solo il caricamento di script terzi)
  * - NON includere mai amount, category_name, merchant nelle properties
  * - NON includere mai contenuto di feedback o notifiche
  */
@@ -46,6 +50,10 @@ function getConsent(): { analytics: boolean; marketing: boolean } {
 
 async function sendEvent(event: string, properties?: Record<string, unknown>): Promise<void> {
   if (typeof window === "undefined") return;
+  const consent = getConsent();
+  // Fail-closed: senza consenso (analitico o marketing) non generiamo né
+  // persistiamo alcun identificatore, e non contattiamo neppure /api/track.
+  if (!consent.analytics && !consent.marketing) return;
   try {
     const csrfToken = await getCsrfToken();
     await fetch("/api/track", {
@@ -56,7 +64,7 @@ async function sendEvent(event: string, properties?: Record<string, unknown>): P
         event,
         properties: properties ?? {},
         anonymous_id: getAnonymousId(),
-        consent: getConsent(),
+        consent,
       }),
     });
   } catch {
