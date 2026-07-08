@@ -23,7 +23,7 @@ _api_key: str = os.environ.get("POSTHOG_API_KEY", "")
 _host: str = os.environ.get("POSTHOG_HOST", "https://eu.i.posthog.com")
 
 if _api_key:
-    _ph.project_api_key = _api_key
+    _ph.api_key = _api_key
     _ph.host = _host
 else:
     _ph.disabled = True

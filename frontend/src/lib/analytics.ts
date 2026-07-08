@@ -73,6 +73,27 @@ export function identifyUser(distinctId: string, properties?: Record<string, str
 }
 
 // ---------------------------------------------------------------------------
+// Pageview
+// ---------------------------------------------------------------------------
+
+// Segmenti dinamici che possono contenere token/id sensibili nell'URL: vanno
+// oscurati prima di inviare il path a PostHog/GA4.
+const SENSITIVE_PATH_PATTERNS: Array<[RegExp, string]> = [
+  [/^\/reports\/[^/]+/, "/reports/[token]"],
+];
+
+function sanitizePath(path: string): string {
+  for (const [pattern, replacement] of SENSITIVE_PATH_PATTERNS) {
+    if (pattern.test(path)) return path.replace(pattern, replacement);
+  }
+  return path;
+}
+
+export function trackPageView(path: string) {
+  void sendEvent("page_view", { path: sanitizePath(path) });
+}
+
+// ---------------------------------------------------------------------------
 // Registrazione e onboarding
 // ---------------------------------------------------------------------------
 

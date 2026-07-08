@@ -5,6 +5,7 @@ import "./globals.css";
 import ThemeRegistry from "@/theme/ThemeRegistry";
 import { AppRouterCacheProvider } from '@mui/material-nextjs/v15-appRouter';
 import CookieConsentBanner from "@/components/CookieConsent";
+import PageViewTracker from "@/components/PageViewTracker";
 
 const inter = Inter({
   subsets: ["latin"],
@@ -41,6 +42,7 @@ export default function RootLayout({
           </ThemeRegistry>
         </AppRouterCacheProvider>
         <CookieConsentBanner />
+        <PageViewTracker />
       </body>
     </html>
   );
