@@ -59,6 +59,13 @@ limiter = Limiter(app=app, key_func=get_remote_address, default_limits=[])
 # tutti gli utenti (vedi bandit B113).
 TELEGRAM_REQUEST_TIMEOUT = 10
 
+# Account lockout su /login: oltre questa soglia di fallimenti nella finestra,
+# l'account (per email) resta bloccato indipendentemente dall'IP di provenienza
+# — il rate limit di flask_limiter qui sotto è per-IP e da solo è bypassabile
+# semplicemente cambiando IP.
+ACCOUNT_LOCKOUT_THRESHOLD = 5
+ACCOUNT_LOCKOUT_WINDOW_SECONDS = 900
+
 
 @app.before_request
 def enforce_csrf_on_forms():
@@ -421,10 +428,25 @@ def web_login():
 
     error = None
     if request.method == "POST":
-        from src.rate_limiter import track_failed_login, reset_failed_logins
+        from src.rate_limiter import (
+            get_failed_login_count, track_failed_login, reset_failed_logins,
+        )
 
         email = (request.form.get("email") or "").strip()
         password = request.form.get("password") or ""
+
+        if get_failed_login_count(email, ACCOUNT_LOCKOUT_WINDOW_SECONDS) >= ACCOUNT_LOCKOUT_THRESHOLD:
+            logger.warning(
+                "login_locked_out",
+                extra={"domain": "security", "event": "login_locked_out",
+                       "meta": {"ip": request.remote_addr}},
+            )
+            return render_template(
+                "login.html",
+                error="Troppi tentativi falliti. Riprova tra qualche minuto.",
+                registration_enabled=Config.PUBLIC_REGISTRATION_ENABLED,
+            )
+
         user = store.verify_password(email, password)
         if not user:
             user = store.verify_password_any_status(email, password)

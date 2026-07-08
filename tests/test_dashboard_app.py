@@ -555,6 +555,50 @@ def test_login_breach_detection_after_repeated_failures(client):
         assert log is not None
 
 
+def test_login_lockout_persists_across_different_ips(client):
+    """OWASP A07: il lockout per-account non deve essere bypassabile ruotando IP.
+
+    Il rate limit di flask_limiter su /login è per-IP (5/min): un attaccante
+    che ruota IP ad ogni tentativo lo bypassa banalmente. Il lockout per-email
+    (ACCOUNT_LOCKOUT_THRESHOLD in app.py) deve invece contare i fallimenti
+    sull'account indipendentemente dall'IP di provenienza.
+    """
+    from src.dashboard.app import store
+    from src.rate_limiter import reset_failed_logins
+
+    _, email, password = _create_dashboard_user(
+        store, chat_id="chat_lockout", email="lockout@example.com"
+    )
+    reset_failed_logins(email)
+
+    csrf_token = client.get("/api/csrf-token").json["csrf_token"]
+
+    # 5 tentativi falliti, ognuno da un IP diverso: nessuno tocca il limite
+    # per-IP di flask_limiter, ma il lockout per-account deve comunque scattare.
+    for i in range(5):
+        response = client.post(
+            "/login",
+            data={"email": email, "password": "wrong"},
+            headers={"X-CSRFToken": csrf_token},
+            environ_overrides={"REMOTE_ADDR": f"10.0.0.{i}"},
+        )
+        assert response.status_code == 200
+
+    # Sesto tentativo, da un IP mai visto prima, con la password CORRETTA:
+    # deve comunque fallire per via del lockout sull'account.
+    response = client.post(
+        "/login",
+        data={"email": email, "password": password},
+        headers={"X-CSRFToken": csrf_token},
+        environ_overrides={"REMOTE_ADDR": "10.0.0.99"},
+    )
+    assert response.status_code == 200
+    assert b"Troppi tentativi falliti" in response.data
+
+    with client.session_transaction() as sess:
+        assert "user_logged_in" not in sess
+
+
 def test_session_authenticated_api_requires_csrf_token(app, client):
     """Verifica che le rotte /api/* autenticate via cookie di sessione siano protette da CSRF.
 
@@ -657,3 +701,77 @@ def test_telegram_link_returns_500_without_bot_username(client):
         response = client.post("/api/telegram/link", headers={"X-CSRFToken": csrf_token})
 
     assert response.status_code == 500
+
+
+def test_idor_account_and_expense_scoped_by_user(client):
+    """OWASP A01: un utente autenticato non deve poter leggere/modificare/cancellare
+    risorse (conti, spese) di un altro utente tramite /api/space/*, anche
+    conoscendone l'id — lo scoping deve avvenire lato server, non fidarsi del client.
+    """
+    from datetime import date
+    from src.dashboard.app import store
+    from src.storage.postgres_storage import PostgresStorage
+
+    store.add_user(chat_id="chat_user_a", username="user-a", storage_backend="postgres")
+    store.add_user(chat_id="chat_user_b", username="user-b", storage_backend="postgres")
+
+    # Seed diretto via storage layer: un conto e una spesa di proprietà di B.
+    with store.Session() as s:
+        pg_b = PostgresStorage(session=s, user_id="chat_user_b")
+        account_b = pg_b.create_account("Conto di B", initial_balance=100.0)
+        expense_b = pg_b.create_expense(
+            expense_date=date(2026, 1, 1), amount=42.0, name="Spesa di B",
+            category_name="", account_id=account_b["id"],
+        )
+
+    csrf_token = client.get("/api/csrf-token").json["csrf_token"]
+
+    # A si autentica (sessione browser)
+    with client.session_transaction() as sess:
+        sess["user_logged_in"] = True
+        sess["chat_id"] = "chat_user_a"
+
+    # A prova a modificare/cancellare il conto di B
+    resp = client.put(
+        f"/api/space/accounts/{account_b['id']}",
+        json={"name": "Hacked"},
+        headers={"X-CSRFToken": csrf_token},
+    )
+    assert resp.status_code == 404
+    resp = client.delete(
+        f"/api/space/accounts/{account_b['id']}",
+        headers={"X-CSRFToken": csrf_token},
+    )
+    assert resp.status_code == 404
+
+    # A prova a modificare/cancellare la spesa di B
+    resp = client.put(
+        f"/api/space/expenses/{expense_b['id']}",
+        json={"name": "Hacked expense"},
+        headers={"X-CSRFToken": csrf_token},
+    )
+    assert resp.status_code == 404
+    resp = client.delete(
+        f"/api/space/expenses/{expense_b['id']}",
+        headers={"X-CSRFToken": csrf_token},
+    )
+    assert resp.status_code == 404
+
+    # A elenca i propri conti: quello di B non deve comparire
+    resp = client.get("/api/space/accounts")
+    assert resp.status_code == 200
+    assert account_b["id"] not in [a["id"] for a in resp.json["accounts"]]
+
+    # Il conto e la spesa di B devono restare intatti nonostante i tentativi
+    from src.storage.models import Expense as ExpenseModel
+
+    with store.Session() as s:
+        pg_b = PostgresStorage(session=s, user_id="chat_user_b")
+        accounts_b = pg_b.fetch_accounts()
+        assert any(
+            a["id"] == account_b["id"] and a["name"] == "Conto di B" for a in accounts_b
+        )
+        expense_row = s.query(ExpenseModel).filter_by(id=expense_b["id"]).first()
+        assert expense_row is not None
+        assert expense_row.name == "Spesa di B"
+        assert expense_row.user_id == "chat_user_b"
