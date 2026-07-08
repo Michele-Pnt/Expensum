@@ -30,26 +30,58 @@ function getAnonymousId(): string {
   return id;
 }
 
+function getConsentApi(): { acceptedCategory: (c: string) => boolean } | undefined {
+  const w = window as unknown as {
+    __cookieConsentApi?: { acceptedCategory: (c: string) => boolean };
+  };
+  return w.__cookieConsentApi;
+}
+
 function getConsent(): { analytics: boolean; marketing: boolean } {
   if (typeof window === "undefined") return { analytics: false, marketing: false };
   try {
-    // vanilla-cookieconsent espone lo stato accettato via cookie dedicato;
-    // fallback a "non concesso" se non ancora inizializzato (fail-closed).
-    const w = window as unknown as {
-      __cookieConsentApi?: { acceptedCategory: (c: string) => boolean };
-    };
-    if (!w.__cookieConsentApi) return { analytics: false, marketing: false };
+    const api = getConsentApi();
+    if (!api) return { analytics: false, marketing: false };
     return {
-      analytics: w.__cookieConsentApi.acceptedCategory("analytics"),
-      marketing: w.__cookieConsentApi.acceptedCategory("marketing"),
+      analytics: api.acceptedCategory("analytics"),
+      marketing: api.acceptedCategory("marketing"),
     };
   } catch {
     return { analytics: false, marketing: false };
   }
 }
 
+// CookieConsent.run() inizializza in modo asincrono (dynamic import): al mount
+// dei componenti che tracciano un evento (es. PageViewTracker) __cookieConsentApi
+// spesso non esiste ancora. Senza coda quell'evento verrebbe scartato per sempre,
+// anche se l'utente ha già accettato in una visita precedente. Mettiamo in coda
+// gli eventi con esito di consenso ancora indeterminato e li ritentiamo quando
+// CookieConsent.tsx segnala che l'API è pronta (evento "cc:consent-changed").
+let pendingEvents: Array<{ event: string; properties?: Record<string, unknown> }> = [];
+let flushListenerAttached = false;
+
+function flushPendingEvents(): void {
+  const queued = pendingEvents;
+  pendingEvents = [];
+  for (const { event, properties } of queued) {
+    void sendEvent(event, properties);
+  }
+}
+
+function ensureFlushListener(): void {
+  if (flushListenerAttached) return;
+  flushListenerAttached = true;
+  window.addEventListener("cc:consent-changed", flushPendingEvents);
+}
+
 async function sendEvent(event: string, properties?: Record<string, unknown>): Promise<void> {
   if (typeof window === "undefined") return;
+  if (!getConsentApi()) {
+    // Consenso non ancora determinato: metti in coda invece di scartare.
+    ensureFlushListener();
+    pendingEvents.push({ event, properties });
+    return;
+  }
   const consent = getConsent();
   // Fail-closed: senza consenso (analitico o marketing) non generiamo né
   // persistiamo alcun identificatore, e non contattiamo neppure /api/track.

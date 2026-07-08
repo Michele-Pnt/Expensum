@@ -22,8 +22,15 @@ export default function CookieConsentBanner(): null {
       // ricevono gli eventi server-side (vedi src/lib/analytics.ts +
       // /api/track). Qui esponiamo solo lo stato di consenso, letto ad
       // ogni evento per decidere quali vendor notificare lato backend.
+      //
+      // CC.run() è dietro un import() dinamico: __cookieConsentApi non esiste
+      // ancora quando i componenti montati in root layout (es. PageViewTracker)
+      // fanno la loro prima chiamata di tracking, che quindi viene scartata
+      // fail-closed. L'evento "cc:consent-changed" permette a chi ha già
+      // provato a tracciare di ritentare non appena il consenso è disponibile.
       const exposeConsentApi = () => {
         window.__cookieConsentApi = CC;
+        window.dispatchEvent(new Event("cc:consent-changed"));
       };
 
       CC.run({
