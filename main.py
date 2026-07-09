@@ -180,11 +180,14 @@ async def run_agent(
     debug_data: bool = False,
     chat_id: str | None = None,
     shared_store: UserStore | None = None,
-) -> None:
+) -> str | None:
     """Esegue la pipeline completa dell'agente finanziario.
 
     `shared_store` è opzionale: se passato (es. dal bot o dalla webapp, già connessi
     al DB), viene riusato invece di aprire nuove connessioni Postgres per ogni chiamata.
+
+    Ritorna lo `share_token` del report salvato, o `None` se non è stato generato
+    nulla (nessuna transazione nel mese target, dry-run, debug-data).
     """
     logger = logging.getLogger("financial_agent.main")
     usage_store = shared_store or UserStore(db_url=(f"sqlite:///{Config.LOG_DIR / 'token_usage_measure.db'}" if dry_run else Config.DATABASE_URL))
@@ -285,7 +288,7 @@ async def run_agent(
 
     if not transactions:
         logger.error("Nessuna transazione trovata. Uscita.")
-        return
+        return None
 
     # 2. ELABORAZIONE DATI
     logger.info("▶ Step 2/7: Elaborazione dati (aggregazione, trend, anomalie)")
@@ -357,7 +360,7 @@ async def run_agent(
         for path in chart_paths:
             if os.path.exists(path):
                 os.remove(path)
-        return
+        return None
 
     total_accounts_balance = sum(acc.get("current_balance", 0.0) for acc in accounts)
 
@@ -454,7 +457,7 @@ async def run_agent(
         print(final_report)
         print("=" * 60 + "\n")
         logger.info("[DRY-RUN] Report mostrato a schermo. Nessun messaggio inviato.")
-        return
+        return None
 
     # 6. SALVATAGGIO + INVIO
     telegram_connected = bool(chat_id) and not str(chat_id).startswith("web_")
@@ -512,6 +515,8 @@ async def run_agent(
                 os.remove(path)
         except Exception as e:
             logger.warning(f"Impossibile eliminare file temporaneo {path}: {e}")
+
+    return report_share_token or None
 
 
 # ---------------------------------------------------------------------------

@@ -62,6 +62,10 @@ export default function ReportsPage() {
         setGenerateError("Token mensili insufficienti per generare il report mensile.");
         return;
       }
+      if (res.status === 422) {
+        setGenerateError("Nessuna transazione trovata per questo periodo: niente da analizzare.");
+        return;
+      }
       if (!res.ok) throw new Error("generate_failed");
       const data = await res.json();
       if (data.share_token) {

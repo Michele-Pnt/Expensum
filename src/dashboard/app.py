@@ -4201,7 +4201,7 @@ def api_generate_report():
             import bot as bot_module
 
             tg_bot = Bot(token=Config.TELEGRAM_BOT_TOKEN) if telegram_connected else None
-            asyncio.run(bot_module._build_and_send_weekly_plan(chat_id=chat_id, bot=tg_bot))
+            share_token = asyncio.run(bot_module._build_and_send_weekly_plan(chat_id=chat_id, bot=tg_bot))
         else:
             if store.get_user_plan(chat_id)["tokens_remaining"] < 5000:
                 return jsonify({"error": "Token mensili insufficienti per generare il report mensile."}), 402
@@ -4209,18 +4209,15 @@ def api_generate_report():
             import main as main_module
 
             target_year, target_month = main_module._resolve_default_target_month(date.today())
-            asyncio.run(main_module.run_agent(
+            share_token = asyncio.run(main_module.run_agent(
                 target_year, target_month, dry_run=False, chat_id=chat_id, shared_store=store,
             ))
     except Exception as e:
         logger.exception("Errore generazione report %s on-demand per %s: %s", report_type, chat_id, e)
         return jsonify({"error": "Generazione del report fallita. Riprova tra poco."}), 500
 
-    with store.Session() as s:
-        storage = PostgresStorage(session=s, user_id=chat_id)
-        reports = storage.get_reports_for_user(chat_id, limit=5)
-    latest = next((r for r in reports if r.get("report_type") == report_type), None)
-    share_token = latest.get("share_token") if latest else None
+    if not share_token:
+        return jsonify({"error": "Nessun dato disponibile per generare il report di questo periodo."}), 422
 
     return jsonify({"ok": True, "share_token": share_token})
 

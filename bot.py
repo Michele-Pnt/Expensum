@@ -442,10 +442,11 @@ async def _build_and_send_weekly_plan(
     chat_id: str,
     bot=None,
     message=None,
-) -> None:
+) -> str | None:
     """Costruisce e invia il piano settimanale intelligente per un utente.
 
-    Usata sia dal command handler che dal job APScheduler.
+    Usata sia dal command handler che dal job APScheduler. Ritorna lo `share_token`
+    del report salvato, o `None` se non è stato possibile generarlo.
     """
     storage = _get_storage(chat_id)
     builder = WeeklyPlanBuilder()
@@ -459,7 +460,7 @@ async def _build_and_send_weekly_plan(
             await message.reply_text(err_text)
         elif bot:
             await bot.send_message(chat_id=int(chat_id), text=err_text)
-        return
+        return None
 
     # Prova con AI, fallback su testo statistico
     plan_text = None
@@ -515,6 +516,7 @@ async def _build_and_send_weekly_plan(
         plan_text = builder.build_fallback_text(plan_data)
 
     # Salva report nel DB e notifica la chat webapp
+    share_token: str | None = None
     try:
         share_token = storage.save_report(
             user_id=str(chat_id),
@@ -559,16 +561,19 @@ async def _build_and_send_weekly_plan(
             except OSError:
                 pass
 
+    return share_token
+
 
 async def _build_and_send_monthly_plan(
     chat_id: str,
     bot=None,
     message=None,
     category_overrides: dict[str, float] | None = None,
-) -> None:
+) -> str | None:
     """Costruisce e invia il piano mensile intelligente per un utente.
 
-    Usata sia dal command handler che dal job APScheduler.
+    Usata dal command handler /monthly_plan. Ritorna lo `share_token` del report
+    salvato, o `None` se non è stato possibile generarlo.
     """
     storage = _get_storage(chat_id)
     builder = MonthlyPlanBuilder()
@@ -582,7 +587,7 @@ async def _build_and_send_monthly_plan(
             await message.reply_text(err_text)
         elif bot:
             await bot.send_message(chat_id=int(chat_id), text=err_text)
-        return
+        return None
 
     plan_text = None
     tm = plan_data.target_month
@@ -640,6 +645,7 @@ async def _build_and_send_monthly_plan(
         plan_text = builder.build_fallback_text(plan_data)
 
     # Salva report nel DB e notifica la chat webapp
+    share_token: str | None = None
     try:
         share_token = storage.save_report(
             user_id=str(chat_id),
@@ -664,6 +670,8 @@ async def _build_and_send_monthly_plan(
             )
     except Exception as e:
         logger.error(f"[User {chat_id}] Errore invio piano mensile: {e}")
+
+    return share_token
 
 
 def _has_notion_template_binding(user) -> bool:
