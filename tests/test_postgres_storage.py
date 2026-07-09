@@ -233,6 +233,38 @@ class TestFetchMonthlyBalances:
     def test_returns_empty_when_no_data(self, storage):
         assert storage.fetch_monthly_balances(date(2026, 1, 1), date(2026, 1, 31)) == []
 
+    def test_aggregates_income_only_no_expense(self, db_session, storage):
+        """Un mese con solo entrate (nessuna spesa) non deve esplodere su Decimal/float miste."""
+        db_session.add(Account(user_id="test_user_1", name="Conto", opening_balance=0.0))
+        db_session.commit()
+        acc = db_session.query(Account).filter_by(user_id="test_user_1").first()
+
+        db_session.add(Income(
+            user_id="test_user_1", income_date=date(2026, 5, 5),
+            amount=1500.0, name="Stipendio", account_id=acc.id
+        ))
+        db_session.commit()
+
+        results = storage.fetch_monthly_balances(date(2026, 5, 1), date(2026, 5, 31))
+        assert len(results) == 1
+        assert results[0]["net_savings"] == 1500.0
+
+    def test_aggregates_expense_only_no_income(self, db_session, storage):
+        """Un mese con sole spese (nessuna entrata) non deve esplodere su Decimal/float miste."""
+        db_session.add(Account(user_id="test_user_1", name="Conto", opening_balance=0.0))
+        db_session.commit()
+        acc = db_session.query(Account).filter_by(user_id="test_user_1").first()
+
+        db_session.add(Expense(
+            user_id="test_user_1", expense_date=date(2026, 6, 10),
+            amount=300.0, name="Affitto", category_name="Casa", account_id=acc.id
+        ))
+        db_session.commit()
+
+        results = storage.fetch_monthly_balances(date(2026, 6, 1), date(2026, 6, 30))
+        assert len(results) == 1
+        assert results[0]["net_savings"] == -300.0
+
     def test_get_or_create_monthly_balance_returns_none(self, storage):
         """Postgres non usa MonthlyBalance: ritorna sempre None."""
         assert storage.get_or_create_monthly_balance(date(2026, 4, 1)) is None

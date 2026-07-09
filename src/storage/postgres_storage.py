@@ -404,8 +404,8 @@ class PostgresStorage(FinancialStorage):
         all_months = sorted(set(income_by_month) | set(expense_by_month))
         result = []
         for month_str in all_months:
-            inc = income_by_month.get(month_str, 0.0)
-            exp = expense_by_month.get(month_str, 0.0)
+            inc = float(income_by_month.get(month_str) or 0.0)
+            exp = float(expense_by_month.get(month_str) or 0.0)
             d = datetime.strptime(month_str, "%Y-%m-%d").date()
             result.append({
                 "year": d.year,
