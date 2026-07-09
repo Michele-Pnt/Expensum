@@ -54,7 +54,7 @@ DRIP_TEMPLATES: dict[str, dict[str, str]] = {
         ),
         "email_subject": "Moneo ha contato {expense_count} spese per te 🎉",
         "email_html": (
-            "<p>Ciao,</p>"
+            "<p>Ciao{name},</p>"
             "<p>In una settimana Moneo ha già registrato e organizzato <strong>{expense_count} spese</strong> "
             "per te. Ottimo inizio!</p>"
             "<p>Apri i tuoi report per scoprire il primo riepilogo personalizzato che Moneo ha "
@@ -69,7 +69,7 @@ DRIP_TEMPLATES: dict[str, dict[str, str]] = {
         ),
         "email_subject": "Moneo ha preparato il tuo report dei 14 giorni",
         "email_html": (
-            "<p>Ciao,</p>"
+            "<p>Ciao{name},</p>"
             "<p>Sono passate due settimane: Moneo ha generato per te un riepilogo di come stai "
             "usando Expensum e dove potresti trarre ancora più valore con il piano Pro.</p>" + _EMAIL_CTA_BUTTON
         ),
@@ -83,7 +83,7 @@ DRIP_TEMPLATES: dict[str, dict[str, str]] = {
         ),
         "email_subject": "Il tuo trial Expensum Pro finisce tra {days_left} giorni",
         "email_html": (
-            "<p>Ciao,</p>"
+            "<p>Ciao{name},</p>"
             "<p>Moneo ti avvisa: il tuo trial Pro sta per finire (tra <strong>{days_left} giorni</strong>). "
             "Ecco cosa perderesti tornando al piano Free: foto scontrino, audio, conti "
             "illimitati, report AI mensile, chat conversazionale, analytics avanzata.</p>" + _EMAIL_CTA_BUTTON_UPGRADE
@@ -97,7 +97,7 @@ DRIP_TEMPLATES: dict[str, dict[str, str]] = {
         ),
         "email_subject": "Moneo ha preparato uno sconto speciale per te",
         "email_html": (
-            "<p>Ciao,</p>"
+            "<p>Ciao{name},</p>"
             "<p>Oggi è l'ultimo giorno del tuo trial Pro. Moneo ha preparato per te un codice "
             "sconto sul primo mese: usa <strong>{discount_code}</strong> e continua "
             "a usare tutte le funzionalità Pro senza interruzioni.</p>" + _EMAIL_CTA_BUTTON_UPGRADE

@@ -64,7 +64,7 @@ from src.dashboard_message import build_dashboard_text
 from src.llm_usage_tracker import build_request_key, estimate_reserved_tokens, normalize_usage_metadata
 from src.report_builder import WeeklyPlanBuilder, WeeklyPlanData, MonthlyPlanBuilder, MonthlyPlanData
 from src.mistral_client import MistralClient
-from src.report_notify import notify_webapp_report
+from src.report_notify import display_name, notify_webapp_report
 from src import analytics
 from src import brevo_client
 from src.unsubscribe_token import make_unsubscribe_token
@@ -1044,9 +1044,12 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         )
         return
 
+    first_name = (update.effective_user.first_name or "").strip()
+    name_suffix = f" {first_name}" if first_name else ""
+
     if not _is_authorized(update):
         await update.message.reply_text(
-            "👋 *Benvenuto!*\n\n"
+            f"👋 *Benvenuto{name_suffix}!*\n\n"
             "Sono l'assistente AI di Expensum.\n"
             "Le mie risposte sono generate automaticamente con AI. Posso sbagliare: verifica sempre i dati finanziari importanti.\n\n"
             "Digita /registrati per creare un account, o /login se ne hai già uno e inizia a migliorare la tua vita "
@@ -1057,8 +1060,11 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         )
         return
 
+    chat_id = str(update.effective_chat.id)
+    _user_store.update_telegram_identity(chat_id, update.effective_user.first_name, update.effective_user.last_name)
+
     await update.message.reply_text(
-        "👋 *Bentornato!* Sono **Moneo** 🐷, assistente AI di Expensum.\n"
+        f"👋 *Bentornato{name_suffix}!* Sono **Moneo** 🐷, assistente AI di Expensum.\n"
         "Le mie risposte sono generate automaticamente con Mistral AI europea. Posso sbagliare: verifica sempre i dati finanziari importanti.\n\n"
         "Dimmi, cosa hai comprato di bello?\n"
         "Scrivimi una spesa in modo naturale:\n"
@@ -1236,6 +1242,8 @@ async def process_accounts_db(update: Update, context: ContextTypes.DEFAULT_TYPE
     _user_store.add_user(
         chat_id=chat_id,
         username=username,
+        first_name=update.effective_user.first_name,
+        last_name=update.effective_user.last_name,
         notion_api_key=context.user_data["notion_api_key"],
         expense_db_id=context.user_data["expense_db_id"],
         income_db_id=context.user_data["income_db_id"],
@@ -1902,8 +1910,10 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         )
         backend = _user_store.delete_user_completely(chat_id)
         logger.info(f"[User {chat_id}] Account eliminato (backend: {backend})")
+        farewell_name = (update.effective_user.first_name or "").strip()
+        farewell = f"Ciao {farewell_name}! 👋" if farewell_name else "Ciao! 👋"
         await query.edit_message_text(
-            "✅ Account eliminato. Tutti i tuoi dati sono stati cancellati.\n\nCiao! 👋"
+            f"✅ Account eliminato. Tutti i tuoi dati sono stati cancellati.\n\n{farewell}"
         )
         return
 
@@ -2261,9 +2271,11 @@ def _build_drip_context(chat_id: str, step: str, trial_started_at: datetime, day
     bottone CTA nelle email: entrambi passano dal login web con redirect alla pagina
     autenticata giusta dopo l'autenticazione (src/dashboard/app.py::web_login).
     """
+    name = display_name(_user_store, chat_id)
     context = {
         "reports_url": f"{Config.WEBAPP_BASE_URL}/login?next=/reports",
         "piani_url": f"{Config.WEBAPP_BASE_URL}/login?next=/abbonamenti",
+        "name": f" {name}" if name != "👋" else "",
     }
     if step == "d7":
         storage = _get_storage(chat_id)

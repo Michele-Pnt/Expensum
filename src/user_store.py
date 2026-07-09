@@ -132,7 +132,9 @@ class User(Base):
     # chat_id è la chiave primaria (ID univoco di Telegram)
     chat_id = Column(String, primary_key=True)
     username = Column(String, nullable=True)
-    
+    first_name = Column(String, nullable=True)
+    last_name = Column(String, nullable=True)
+
     # Credenziali Notion — Opzionali nel nuovo sistema OAuth (Fase 2)
     expense_db_id = Column(String, nullable=True)
     income_db_id = Column(String, nullable=True)
@@ -708,6 +710,18 @@ class UserStore:
         chat_id = str(chat_id)
         with self.Session() as session:
             return session.query(User).filter(User.chat_id == chat_id).first()
+
+    def update_telegram_identity(self, chat_id: str, first_name: str | None, last_name: str | None) -> None:
+        """Aggiorna first_name/last_name da Telegram se cambiati (no-op se l'utente non esiste)."""
+        chat_id = str(chat_id)
+        with self.Session() as session:
+            user = session.query(User).filter(User.chat_id == chat_id).first()
+            if not user:
+                return
+            if user.first_name != first_name or user.last_name != last_name:
+                user.first_name = first_name
+                user.last_name = last_name
+                session.commit()
 
     def add_user(self, chat_id: str, notion_api_key: str = None, expense_db_id: str = None, income_db_id: str = None, **kwargs):
         """Aggiunge un nuovo utente o aggiorna uno esistente."""

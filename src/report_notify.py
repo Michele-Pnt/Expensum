@@ -9,11 +9,13 @@ from src.user_store import UserStore
 
 
 def display_name(store: UserStore, chat_id: str) -> str:
-    """Ritorna un nome utente amichevole (username, email o generico)."""
+    """Ritorna un nome utente amichevole (first_name, username, email o generico)."""
     try:
         user = store.get_user(chat_id)
     except Exception:
         user = None
+    if user and user.first_name:
+        return user.first_name
     if user and user.username:
         return user.username
     if user and user.email:

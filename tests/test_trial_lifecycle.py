@@ -64,7 +64,9 @@ def test_build_drip_message_missing_placeholder_logs_warning_and_returns_templat
 
 def test_build_drip_message_email_channel_uses_html_template():
     text = trial_lifecycle.build_drip_message(
-        "d29", "email", {"discount_code": "PRO30", "piani_url": "https://example.com/login?next=/abbonamenti"}
+        "d29", "email",
+        {"discount_code": "PRO30", "piani_url": "https://example.com/login?next=/abbonamenti", "name": " Michele"},
     )
     assert "PRO30" in text
     assert "https://example.com/login?next=/abbonamenti" in text
+    assert "Ciao Michele," in text
