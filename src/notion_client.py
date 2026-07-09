@@ -584,17 +584,17 @@ class NotionFinanceClient:
                  pay_transfer_db_id: Optional[str] = None,
                  db_schemas: Optional[dict[str, dict]] = None):
     
-        # Logica del "Fallback": 
-        # Se passo un ID (es. dal DB), uso quello. 
-        # Se passo None, vado a pescare quello di default nel .env (Config).
-        self.notion_api_key = api_key or Config.NOTION_API_KEY
-        self.expense_db_id = expense_db_id or Config.NOTION_EXPENSE_DATABASE_ID
-        self.income_db_id = income_db_id or Config.NOTION_INCOME_DATABASE_ID
-        self.categories_db_id = categories_db_id or Config.NOTION_CATEGORIES_DATABASE_ID
-        self.monthly_balance_db_id = monthly_balance_db_id or Config.NOTION_MONTHLY_BALANCE_DATABASE_ID
-        self.accounts_db_id = accounts_db_id or Config.NOTION_ACCOUNTS_DATABASE_ID
-        self.subscriptions_db_id = subscriptions_db_id or Config.NOTION_SUBSCRIPTIONS_DATABASE_ID
-        self.pay_transfer_db_id = pay_transfer_db_id or Config.NOTION_PAY_TRANSFER_DATABASE_ID
+        # Nessun fallback su credenziali globali: ogni istanza usa solo le credenziali
+        # dell'utente per cui è creata. Un utente senza credenziali proprie deve fallire
+        # in modo esplicito, non leggere/scrivere silenziosamente su un altro workspace.
+        self.notion_api_key = api_key
+        self.expense_db_id = expense_db_id
+        self.income_db_id = income_db_id
+        self.categories_db_id = categories_db_id
+        self.monthly_balance_db_id = monthly_balance_db_id
+        self.accounts_db_id = accounts_db_id
+        self.subscriptions_db_id = subscriptions_db_id
+        self.pay_transfer_db_id = pay_transfer_db_id
         self._db_schemas = dict(db_schemas or {})
 
         # Inizializziamo il client ufficiale Notion con la chiave specifica di QUESTA istanza

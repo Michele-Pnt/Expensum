@@ -66,6 +66,17 @@ from src.llm_usage_tracker import build_request_key, estimate_reserved_tokens, n
 from src.report_builder import WeeklyPlanBuilder, WeeklyPlanData, MonthlyPlanBuilder, MonthlyPlanData
 from src.mistral_client import MistralClient
 from src import analytics
+from src import brevo_client
+from src.unsubscribe_token import make_unsubscribe_token
+from src.trial_lifecycle import (
+    compute_days_since_trial_start,
+    steps_pending,
+    count_user_expenses_since_signup,
+    build_drip_message,
+    DRIP_TEMPLATES,
+    DRIP_STEPS,
+    UPGRADE_CTA_STEPS,
+)
 
 logger = logging.getLogger("financial_agent.bot")
 
@@ -283,6 +294,20 @@ def _get_dashboard_keyboard(is_premium: bool) -> InlineKeyboardMarkup | None:
         ]
     ])
 
+def _get_dashboard_button() -> InlineKeyboardMarkup:
+    """Bottone "Apri Dashboard" verso la webapp, usato nei messaggi drip trial (D7/D14)."""
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton(
+                text="📊 Apri Dashboard",
+                web_app=WebAppInfo(url=f"{Config.WEBAPP_BASE_URL}/dashboard"),
+            )
+        ]
+    ])
+
+
+
+
 def sanitize_letters_only(text: str) -> str:
     """Rimuove tutto tranne lettere Unicode e spazi, normalizzando gli spazi multipli."""
     cleaned = "".join(char if (char.isalpha() or char.isspace()) else " " for char in text)
@@ -345,6 +370,34 @@ def _build_weekly_report_text(chat_id: str, start_date: date, end_date: date) ->
         f"🏷️ *Top categorie*\n"
         f"{top_lines}"
     )
+
+
+def _display_name(chat_id: str) -> str:
+    """Ritorna un nome utente amichevole per i messaggi di notifica (username, email o generico)."""
+    try:
+        user = _user_store.get_user(chat_id)
+    except Exception:
+        user = None
+    if user and user.username:
+        return user.username
+    if user and user.email:
+        return user.email.split("@")[0]
+    return "👋"
+
+
+def _notify_webapp_report(chat_id: str, report_type: str, period_label: str, share_token: str) -> None:
+    """Notifica la chat webapp con un messaggio di saluto e link cliccabile al report."""
+    name = _display_name(chat_id)
+    greeting = "Ehi" if name == "👋" else f"Ehi {name}"
+    period_desc = "di questa settimana" if report_type == "weekly" else "del mese scorso"
+    text = f"{greeting}, ho analizzato le tue finanze {period_desc} ({period_label})! Clicca qui per vedere il report."
+    try:
+        _user_store.log_message(
+            str(chat_id), source="webapp", role="bot", text=text,
+            metadata={"report_type": report_type, "share_token": share_token},
+        )
+    except Exception as e:
+        logger.debug("[User %s] notifica webapp report fallita: %s", chat_id, e)
 
 
 def _serialize_weekly_data(data: "WeeklyPlanData") -> dict:
@@ -484,8 +537,7 @@ async def _build_and_send_weekly_plan(
                 pass
         plan_text = builder.build_fallback_text(plan_data)
 
-    # Salva report nel DB e costruisce bottone web
-    report_keyboard = None
+    # Salva report nel DB e notifica la chat webapp
     try:
         share_token = storage.save_report(
             user_id=str(chat_id),
@@ -495,18 +547,7 @@ async def _build_and_send_weekly_plan(
             report_data=_serialize_weekly_data(plan_data),
         )
         if share_token:
-            report_url = f"{Config.WEBAPP_BASE_URL}/reports/{share_token}"
-            report_keyboard = InlineKeyboardMarkup([[
-                InlineKeyboardButton("📊 Vedi sul web →", url=report_url)
-            ]])
-            try:
-                _user_store.log_message(
-                    str(chat_id), source="telegram", role="bot",
-                    text=plan_text[:500] + ("…" if len(plan_text) > 500 else ""),
-                    metadata={"report_type": "weekly", "share_token": share_token},
-                )
-            except Exception as _le:
-                logger.debug("[User %s] log_message weekly report fallito: %s", chat_id, _le)
+            _notify_webapp_report(chat_id, "weekly", week_label, share_token)
     except Exception as e:
         logger.warning(f"[User {chat_id}] Salvataggio report settimanale fallito: {e}")
 
@@ -519,9 +560,7 @@ async def _build_and_send_weekly_plan(
 
     try:
         if message:
-            await message.reply_text(
-                plan_text, parse_mode=ParseMode.MARKDOWN, reply_markup=report_keyboard
-            )
+            await message.reply_text(plan_text, parse_mode=ParseMode.MARKDOWN)
             if table_image_path:
                 with open(table_image_path, "rb") as img:
                     await message.reply_photo(img)
@@ -530,7 +569,6 @@ async def _build_and_send_weekly_plan(
                 chat_id=int(chat_id),
                 text=plan_text,
                 parse_mode=ParseMode.MARKDOWN,
-                reply_markup=report_keyboard,
             )
             if table_image_path:
                 with open(table_image_path, "rb") as img:
@@ -624,8 +662,7 @@ async def _build_and_send_monthly_plan(
                 pass
         plan_text = builder.build_fallback_text(plan_data)
 
-    # Salva report nel DB e costruisce bottone web
-    report_keyboard = None
+    # Salva report nel DB e notifica la chat webapp
     try:
         share_token = storage.save_report(
             user_id=str(chat_id),
@@ -635,32 +672,18 @@ async def _build_and_send_monthly_plan(
             report_data=_serialize_monthly_data(plan_data),
         )
         if share_token:
-            report_url = f"{Config.WEBAPP_BASE_URL}/reports/{share_token}"
-            report_keyboard = InlineKeyboardMarkup([[
-                InlineKeyboardButton("📊 Vedi sul web →", url=report_url)
-            ]])
-            try:
-                _user_store.log_message(
-                    str(chat_id), source="telegram", role="bot",
-                    text=plan_text[:500] + ("…" if len(plan_text) > 500 else ""),
-                    metadata={"report_type": "monthly", "share_token": share_token},
-                )
-            except Exception as _le:
-                logger.debug("[User %s] log_message monthly report fallito: %s", chat_id, _le)
+            _notify_webapp_report(chat_id, "monthly", month_label, share_token)
     except Exception as e:
         logger.warning(f"[User {chat_id}] Salvataggio report mensile fallito: {e}")
 
     try:
         if message:
-            await message.reply_text(
-                plan_text, parse_mode=ParseMode.MARKDOWN, reply_markup=report_keyboard
-            )
+            await message.reply_text(plan_text, parse_mode=ParseMode.MARKDOWN)
         elif bot:
             await bot.send_message(
                 chat_id=int(chat_id),
                 text=plan_text,
                 parse_mode=ParseMode.MARKDOWN,
-                reply_markup=report_keyboard,
             )
     except Exception as e:
         logger.error(f"[User {chat_id}] Errore invio piano mensile: {e}")
@@ -1061,8 +1084,10 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         logger.info("[User %s] Account web collegato a Telegram", chat_id)
         await update.message.reply_text(
             "✅ *Account collegato!*\n\n"
-            "Il tuo profilo Expensum è ora sincronizzato con Telegram: puoi registrare spese "
-            "da qui in qualsiasi momento.",
+            "Il tuo profilo Expensum è ora sincronizzato con Telegram: puoi registrare spese semplicemente scrivendo, mandando una foto o un audio in chat"
+            "da qui in qualsiasi momento.\n\n"
+            "Quando registrerai una spesa, scrivimi ad esempio:\n"
+            "• _\"pizza con gli amici 18€ oppure mandami un audio\"_",
             parse_mode=ParseMode.MARKDOWN,
         )
         return
@@ -1981,11 +2006,22 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             accounts = storage.fetch_accounts()
         except Exception as e:
             logger.error(f"[User {chat_id}] Errore fetch accounts: {e}")
-            accounts = []
-            
+            await query.edit_message_text(
+                "⚠️ Errore nel recupero dei tuoi conti. Riprova tra qualche istante."
+            )
+            return
+
         if not accounts:
-            # Fallback salva subito
-            await _save_to_notion(query, context, chat_id)
+            # Nessun conto configurato: non si può salvare senza sapere su quale conto
+            # accreditare/scalare la transazione. Blocca e indirizza l'utente a crearne uno.
+            input_method = context.user_data.pop("input_method", "text")
+            context.user_data.pop("pending_expense", None)
+            context.user_data.pop("waiting_for_amount", None)
+            analytics.track(chat_id, "expense_tracking_failed", {"reason": "no_account", "input_method": input_method})
+            await query.edit_message_text(
+                "🏦 Non hai ancora nessun conto su Expensum, quindi non posso registrare la spesa.\n\n"
+                "Usa /modify e vai nella tab \"Conti\" per aggiungerne uno, poi rimanda il messaggio della spesa."
+            )
             return
 
         # Disegna bottoni
@@ -2229,6 +2265,133 @@ def _monthly_plan_job(app: Application, loop: asyncio.AbstractEventLoop) -> None
         logger.error(f"[MonthlyPlan] Errore job: {e}")
 
 
+def _trial_expiry_job(app: Application, loop: asyncio.AbstractEventLoop) -> None:
+    """Job APScheduler alle 04:00 — downgrade automatico a Free per trial scaduti.
+
+    Spento durante la beta (Config.TRIAL_AUTOMATION_ENABLED=False): il trial è concesso
+    solo manualmente via scripts/grant_trial.py e nessun downgrade automatico deve
+    scattare finché il prodotto non è pubblico.
+    """
+    if not Config.TRIAL_AUTOMATION_ENABLED:
+        logger.info(
+            "[TrialExpiry] Automazione disabilitata (beta mode), skip.",
+            extra={"domain": "app", "event": "trial_automation_disabled_beta_mode"},
+        )
+        return
+
+    logger.info("[TrialExpiry] Avvio controllo trial scaduti.")
+    expired = _user_store.get_expired_trials(datetime.utcnow())
+    downgraded = 0
+    for user in expired:
+        try:
+            _user_store.set_user_plan(user.chat_id, "free", payment_reference="trial_expired")
+            analytics.track(user.chat_id, "trial_expired", {})
+            downgraded += 1
+        except Exception as e:
+            logger.error(f"[TrialExpiry] Errore downgrade per {user.chat_id}: {e}")
+
+    logger.info(f"[TrialExpiry] Completato: {downgraded}/{len(expired)} downgrade effettuati.")
+
+
+def _build_drip_context(chat_id: str, step: str, trial_started_at: datetime, days: int) -> dict:
+    """Costruisce i placeholder per il messaggio drip dello step richiesto.
+
+    `reports_url` (D7/D14) e `piani_url` (D25/D29) sono sempre presenti, usati dal
+    bottone CTA nelle email: entrambi passano dal login web con redirect alla pagina
+    autenticata giusta dopo l'autenticazione (src/dashboard/app.py::web_login).
+    """
+    context = {
+        "reports_url": f"{Config.WEBAPP_BASE_URL}/login?next=/reports",
+        "piani_url": f"{Config.WEBAPP_BASE_URL}/login?next=/abbonamenti",
+    }
+    if step == "d7":
+        storage = _get_storage(chat_id)
+        context["expense_count"] = count_user_expenses_since_signup(storage, trial_started_at)
+    elif step == "d25":
+        context["days_left"] = max(0, DRIP_STEPS["d29"] - days)
+    elif step == "d29":
+        context["discount_code"] = Config.TRIAL_DISCOUNT_CODE or "PRO30"
+    return context
+
+
+def _trial_lifecycle_job(app: Application, loop: asyncio.AbstractEventLoop) -> None:
+    """Job APScheduler alle 09:00 — drip trial→Pro D7/D14/D25/D29 via Telegram + email.
+
+    Spento durante la beta (Config.TRIAL_AUTOMATION_ENABLED=False): la logica è completa
+    e testata, ma nessun invio deve partire finché il prodotto non è pubblico.
+    """
+    if not Config.TRIAL_AUTOMATION_ENABLED:
+        logger.info(
+            "[TrialLifecycle] Automazione disabilitata (beta mode), skip.",
+            extra={"domain": "app", "event": "trial_automation_disabled_beta_mode"},
+        )
+        return
+
+    logger.info("[TrialLifecycle] Avvio drip lifecycle trial.")
+
+    async def _send_drip():
+        bot = app.bot
+        candidates = [u for u in _user_store.get_active_trial_users() if u.notifications_enabled]
+
+        sent_telegram = 0
+        sent_email = 0
+        for user in candidates:
+            chat_id = user.chat_id
+            plan = _user_store.get_user_plan(chat_id)
+            trial_started_at = plan["trial_started_at"]
+            if not trial_started_at:
+                continue
+            days = compute_days_since_trial_start(trial_started_at)
+
+            already_tg = _user_store.get_lifecycle_sent_steps(chat_id, "telegram")
+            for step in steps_pending(days, already_tg):
+                try:
+                    context = _build_drip_context(chat_id, step, trial_started_at, days)
+                    text = build_drip_message(step, "telegram", context)
+                    # D25/D29: nessun bottone webapp, il testo rimanda al comando /piano
+                    # (già esistente, gestito da cmd_piano) — più coerente col resto del bot.
+                    markup = None if step in UPGRADE_CTA_STEPS else _get_dashboard_button()
+                    await bot.send_message(
+                        chat_id=int(chat_id), text=text, parse_mode=ParseMode.MARKDOWN,
+                        reply_markup=markup,
+                    )
+                    _user_store.record_lifecycle_event(chat_id, step, "telegram")
+                    analytics.track(chat_id, "trial_drip_sent", {"step": step, "channel": "telegram"})
+                    sent_telegram += 1
+                except Exception as e:
+                    logger.error(f"[TrialLifecycle] Errore Telegram {step} per {chat_id}: {e}")
+                await asyncio.sleep(0.5)
+
+            if user.email:
+                already_email = _user_store.get_lifecycle_sent_steps(chat_id, "email")
+                for step in steps_pending(days, already_email):
+                    try:
+                        context = _build_drip_context(chat_id, step, trial_started_at, days)
+                        subject = DRIP_TEMPLATES[step]["email_subject"].format(**context)
+                        html = build_drip_message(step, "email", context)
+                        unsub_token = make_unsubscribe_token(chat_id, Config.FLASK_SECRET_KEY)
+                        unsub_url = f"{Config.WEBAPP_BASE_URL}/unsubscribe?chat_id={chat_id}&token={unsub_token}"
+                        email_headers = {
+                            "List-Unsubscribe": f"<{unsub_url}>",
+                            "List-Unsubscribe-Post": "List-Unsubscribe=One-Click",
+                        }
+                        brevo_client.send_transactional_email(user.email, subject, html, headers=email_headers)
+                        _user_store.record_lifecycle_event(chat_id, step, "email")
+                        analytics.track(chat_id, "trial_drip_sent", {"step": step, "channel": "email"})
+                        sent_email += 1
+                    except Exception as e:
+                        logger.error(f"[TrialLifecycle] Errore email {step} per {chat_id}: {e}")
+                    await asyncio.sleep(0.5)
+
+        logger.info(f"[TrialLifecycle] Completato: {sent_telegram} telegram, {sent_email} email.")
+
+    future = asyncio.run_coroutine_threadsafe(_send_drip(), loop)
+    try:
+        future.result(timeout=300)
+    except Exception as e:
+        logger.error(f"[TrialLifecycle] Errore job: {e}")
+
+
 def _nightly_subscription_job(app: Application, loop: asyncio.AbstractEventLoop) -> None:
     """Job APScheduler alle 03:00 — processa abbonamenti automatici per utenti Pro."""
     from datetime import date as _date
@@ -2391,16 +2554,18 @@ async def _start_scheduler(app: Application) -> None:
     scheduler.add_job(_nightly_category_sync, 'cron', hour=3, minute=0)
     scheduler.add_job(_nightly_subscription_job, 'cron', hour=3, minute=5, args=[app, loop])
     scheduler.add_job(_nightly_retention_cleanup, 'cron', hour=3, minute=10)
+    scheduler.add_job(_trial_expiry_job, 'cron', hour=4, minute=0, args=[app, loop])
     scheduler.add_job(_daily_dashboard_job, 'cron', hour=8, minute=0, args=[app, loop])
     scheduler.add_job(_weekly_plan_job, 'cron', day_of_week='mon', hour=8, minute=5, args=[app, loop])
     scheduler.add_job(_monthly_plan_job, 'cron', day=1, hour=8, minute=0, args=[app, loop])
+    scheduler.add_job(_trial_lifecycle_job, 'cron', hour=9, minute=0, args=[app, loop])
     scheduler.add_job(_health_check_job, 'interval', hours=4)
     scheduler.add_job(_disk_space_check_job, 'interval', hours=6)
     scheduler.start()
     logger.info(
         "⏰ Scheduler avviato (sync 03:00, subs 03:05, retention cleanup 03:10, "
-        "daily 08:00, weekly plan lun 08:05, monthly plan 1° 08:00, "
-        "health-check ogni 4h, disk-check ogni 6h)."
+        "trial expiry 04:00, daily 08:00, weekly plan lun 08:05, monthly plan 1° 08:00, "
+        "trial drip 09:00, health-check ogni 4h, disk-check ogni 6h)."
     )
 
 

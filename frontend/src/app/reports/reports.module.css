@@ -20,6 +20,34 @@
   color: var(--color-text-2);
 }
 
+.generateRow {
+  display: flex;
+  gap: 0.6rem;
+  margin-top: 1rem;
+}
+
+.generateBtn {
+  font-size: 0.82rem;
+  font-weight: 600;
+  padding: 0.5rem 0.9rem;
+  border-radius: 8px;
+  border: 1px solid var(--color-border);
+  background: var(--color-surface);
+  color: var(--color-text);
+  cursor: pointer;
+  transition: border-color 0.15s, background 0.15s;
+}
+
+.generateBtn:hover:not(:disabled) {
+  border-color: var(--color-primary);
+  background: rgba(26, 54, 115, 0.04);
+}
+
+.generateBtn:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
 /* Lista report */
 .list {
   display: flex;

@@ -103,17 +103,26 @@ def upsert_contact(
     before_sleep=before_sleep_log(logger, logging.WARNING),
     reraise=True,
 )
-def send_transactional_email(to_email: str, subject: str, html_content: str) -> None:
+def send_transactional_email(
+    to_email: str,
+    subject: str,
+    html_content: str,
+    headers: dict | None = None,
+) -> None:
     """Invia una email transazionale 1-a-1 tramite l'API Brevo (stessi server/dominio
     autenticato dell'automazione marketing, nessuna perdita di deliverability).
 
     Usata per l'invio delle credenziali di accesso ai beta tester
-    (administrative provisioning): contenuto dinamico per destinatario, quindi non
-    esprimibile con la sola automazione a trigger del pannello Brevo.
+    (administrative provisioning) e per il drip lifecycle trial (src/trial_lifecycle.py):
+    contenuto dinamico per destinatario, quindi non esprimibile con la sola automazione a
+    trigger del pannello Brevo.
 
     Args:
         html_content: corpo HTML già pronto (nessun dato finanziario dell'utente,
-            solo credenziali di accesso appena generate).
+            solo credenziali di accesso appena generate o contenuto lifecycle).
+        headers: header SMTP opzionali aggiuntivi (es. `List-Unsubscribe` /
+            `List-Unsubscribe-Post` per le comunicazioni di marketing/lifecycle,
+            RFC 8058 — mostra all'utente il bottone nativo di disiscrizione in Gmail/Outlook).
     """
     if not Config.BREVO_API_KEY:
         logger.warning(
@@ -122,7 +131,7 @@ def send_transactional_email(to_email: str, subject: str, html_content: str) -> 
         )
         return
 
-    headers = {
+    request_headers = {
         "api-key": Config.BREVO_API_KEY,
         "content-type": "application/json",
         "accept": "application/json",
@@ -133,10 +142,12 @@ def send_transactional_email(to_email: str, subject: str, html_content: str) -> 
         "subject": subject,
         "htmlContent": html_content,
     }
+    if headers:
+        payload["headers"] = headers
 
     response = requests.post(
         f"{_BASE_URL}/smtp/email",
-        headers=headers,
+        headers=request_headers,
         json=payload,
         timeout=_REQUEST_TIMEOUT,
     )

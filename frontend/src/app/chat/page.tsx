@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useRef, useEffect, useCallback } from "react";
+import { useRouter } from "next/navigation";
 import Image from "next/image";
 import styles from "./page.module.css";
 import MoneoWidget, { type MoneoState } from "@/components/MoneoWidget";
@@ -39,6 +40,7 @@ interface Message {
   parsed?: ParsedData;
   awaitingConfirm?: boolean;   // true = mostra bottoni ✅/❌
   transcription?: string;      // testo trascritto dal vocale
+  noAccountAction?: boolean;   // true = mostra bottone "Vai ai Conti" (nessun conto configurato)
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -119,6 +121,7 @@ const TOUR_DEMO_MESSAGES: Message[] = [
 export default function ChatPage() {
   const { isActive: isTourActive, currentStep: tourStep } = useTour();
   const isTourChatStep = isTourActive && tourStep === 1;
+  const router = useRouter();
 
   const [messages, setMessages] = useState<Message[]>([]);
   const [inputText, setInputText] = useState("");
@@ -254,7 +257,7 @@ export default function ChatPage() {
         trackExpenseTracked(inputMethod);
         if (data.is_first_expense) trackFirstExpenseTracked(inputMethod);
       } else {
-        trackExpenseTrackingFailed("save_error", inputMethod);
+        trackExpenseTrackingFailed(data.error === "no_account" ? "no_account" : "save_error", inputMethod);
       }
 
       const confirmMsg: Message = {
@@ -264,6 +267,7 @@ export default function ChatPage() {
         timestamp: new Date(),
         status: "sent",
         parsed: data.saved ? parsed : undefined,
+        noAccountAction: data.error === "no_account",
       };
       setMessages((prev) => [...prev, confirmMsg]);
       setMoneoState("happy");
@@ -567,6 +571,30 @@ export default function ChatPage() {
                         {msg.parsed.income_type && !msg.parsed.category && (
                           <span className={styles.pillCategory}>{msg.parsed.income_type}</span>
                         )}
+                      </div>
+                    )}
+
+                    {/* Report generato: link diretto alla tab Report */}
+                    {msg.parsed?.share_token && (
+                      <div className={styles.confirmRow}>
+                        <button
+                          className={`${styles.confirmBtn} ${styles.confirmBtnYes}`}
+                          onClick={() => router.push(`/reports/${msg.parsed!.share_token}`)}
+                        >
+                          📊 Vedi il report
+                        </button>
+                      </div>
+                    )}
+
+                    {/* Nessun conto configurato: link diretto alla tab Conti */}
+                    {msg.noAccountAction && (
+                      <div className={styles.confirmRow}>
+                        <button
+                          className={`${styles.confirmBtn} ${styles.confirmBtnYes}`}
+                          onClick={() => router.push("/spazio")}
+                        >
+                          🏦 Vai ai Conti
+                        </button>
                       </div>
                     )}
 

@@ -243,6 +243,11 @@ class UserPlan(Base):
     tokens_total = Column(Integer, default=150000, nullable=False)
     tokens_reset_at = Column(DateTime, nullable=False)
 
+    # Trial Pro (concesso manualmente in beta, vedi UserStore.start_trial)
+    is_trial = Column(Boolean, default=False, nullable=False)
+    trial_started_at = Column(DateTime, nullable=True)
+    trial_ends_at = Column(DateTime, nullable=True)
+
 
 class PlanChange(Base):
     """Storico cambi piano utente. Usato per metriche upgrade/churn."""
@@ -255,6 +260,26 @@ class PlanChange(Base):
     change_type = Column(String, nullable=False)  # 'upgrade', 'downgrade', 'trial_expired', ecc.
     changed_at = Column(DateTime, nullable=False, default=datetime.utcnow)
     reason = Column(String, nullable=True)  # payment_reference o motivo testuale
+
+
+class TrialLifecycleEvent(Base):
+    """Traccia gli invii del drip lifecycle trial (D7/D14/D25/D29) per evitare doppi invii.
+
+    Nessun contenuto libero salvato: solo step/canale/esito, coerente con le regole di
+    logging del progetto (mai dati liberi utente).
+    """
+    __tablename__ = "trial_lifecycle_events"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    chat_id = Column(String, ForeignKey("users.chat_id"), nullable=False)
+    step = Column(String, nullable=False)       # 'd7' | 'd14' | 'd25' | 'd29'
+    channel = Column(String, nullable=False)    # 'telegram' | 'email'
+    sent_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    status = Column(String, nullable=False, default="sent")  # 'sent' | 'failed'
+
+    __table_args__ = (
+        UniqueConstraint("chat_id", "step", "channel", name="uq_trial_lifecycle_chat_step_channel"),
+    )
 
 
 class AuditLog(Base):
@@ -410,6 +435,14 @@ class UserStore:
         engine_kwargs = {}
         if db_url.startswith("sqlite"):
             engine_kwargs["connect_args"] = {"check_same_thread": False}
+            if ":memory:" in db_url:
+                # SQLite :memory: crea un DB separato per ogni nuova connessione: senza
+                # StaticPool, i job schedulati che girano su un thread diverso (come fa
+                # davvero APScheduler in produzione) vedrebbero un DB vuoto. In produzione
+                # (Postgres) questo non serve, qui è solo per coerenza con l'uso reale
+                # multi-thread dei job.
+                from sqlalchemy.pool import StaticPool
+                engine_kwargs["poolclass"] = StaticPool
         self.engine = create_engine(db_url, **engine_kwargs)
         # sessionmaker crea le "sessioni" di lavoro (come aprire una transazione)
         self.Session = sessionmaker(bind=self.engine, expire_on_commit=False)
@@ -1769,6 +1802,9 @@ class UserStore:
                 "tokens_remaining": tokens_remaining,
                 "tokens_reset_at": plan.tokens_reset_at,
                 "alert": alert,
+                "is_trial": plan.is_trial,
+                "trial_started_at": plan.trial_started_at,
+                "trial_ends_at": plan.trial_ends_at,
             }
 
     def consume_tokens(self, chat_id: str, amount: int) -> dict:
@@ -1795,8 +1831,13 @@ class UserStore:
     ) -> None:
         """Aggiorna il piano dell'utente (es. 'pro'). Ricalcola subito il totale token.
 
+        Chiude sempre un eventuale trial in corso (`is_trial=False`): sia che si tratti di
+        un downgrade a scadenza trial, sia di un futuro upgrade a pagamento reale a metà
+        trial, lo stato trial va considerato concluso.
+
         Args:
-            payment_reference: Riferimento pagamento (Stripe event ID, ecc.).
+            payment_reference: Riferimento pagamento (Stripe event ID, ecc.) o
+                "trial_expired" per il downgrade automatico a fine trial.
                 La validazione del pagamento è responsabilità del caller.
         """
         chat_id = str(chat_id)
@@ -1812,8 +1853,12 @@ class UserStore:
             old_plan = plan.plan_type
             plan.plan_type = plan_type
             plan.tokens_total = 3000000 if plan_type == "pro" else 150000
+            plan.is_trial = False
 
-            change_type = "upgrade" if plan_type == "pro" else "downgrade"
+            if payment_reference == "trial_expired":
+                change_type = "trial_expired"
+            else:
+                change_type = "upgrade" if plan_type == "pro" else "downgrade"
             session.add(PlanChange(
                 chat_id=chat_id,
                 from_plan=old_plan,
@@ -1828,6 +1873,96 @@ class UserStore:
                 "[User %s] Piano aggiornato: %s → %s | payment_ref=%s",
                 chat_id, old_plan.upper(), plan_type.upper(), payment_reference or "N/A",
             )
+
+    def start_trial(self, chat_id: str, days: int = 30) -> None:
+        """Concede un trial Pro di N giorni (grant amministrativo manuale, beta).
+
+        Durante la beta il trial non è self-serve: viene attivato via
+        `scripts/grant_trial.py` per gli utenti indicati manualmente.
+        """
+        chat_id = str(chat_id)
+        now = datetime.utcnow()
+
+        with self.Session() as session:
+            plan = session.query(UserPlan).filter_by(chat_id=chat_id).first()
+            if not plan:
+                self.get_user_plan(chat_id)
+                plan = session.query(UserPlan).filter_by(chat_id=chat_id).first()
+
+            old_plan = plan.plan_type
+            plan.plan_type = "pro"
+            plan.is_trial = True
+            plan.trial_started_at = now
+            plan.trial_ends_at = now + timedelta(days=days)
+            plan.tokens_total = 3000000
+
+            session.add(PlanChange(
+                chat_id=chat_id,
+                from_plan=old_plan,
+                to_plan="pro",
+                change_type="trial_started",
+                changed_at=now,
+            ))
+
+            session.commit()
+            logger.info("[User %s] Trial Pro avviato (%d giorni).", chat_id, days)
+
+    def get_expired_trials(self, reference_time: datetime | None = None) -> list["User"]:
+        """Utenti con trial attivo la cui scadenza è già passata (o oggi)."""
+        reference_time = reference_time or datetime.utcnow()
+        with self.Session() as session:
+            return (
+                session.query(User)
+                .join(UserPlan, User.chat_id == UserPlan.chat_id)
+                .filter(
+                    UserPlan.is_trial == True,  # noqa: E712
+                    UserPlan.trial_ends_at <= reference_time,
+                )
+                .all()
+            )
+
+    def get_active_trial_users(self) -> list["User"]:
+        """Utenti con trial Pro attualmente in corso, candidati al drip lifecycle."""
+        with self.Session() as session:
+            return (
+                session.query(User)
+                .join(UserPlan, User.chat_id == UserPlan.chat_id)
+                .filter(UserPlan.is_trial == True)  # noqa: E712
+                .all()
+            )
+
+    def get_lifecycle_sent_steps(self, chat_id: str, channel: str) -> set[str]:
+        """Step del drip lifecycle già inviati con successo su un dato canale."""
+        chat_id = str(chat_id)
+        with self.Session() as session:
+            rows = (
+                session.query(TrialLifecycleEvent.step)
+                .filter(
+                    TrialLifecycleEvent.chat_id == chat_id,
+                    TrialLifecycleEvent.channel == channel,
+                    TrialLifecycleEvent.status == "sent",
+                )
+                .all()
+            )
+            return {row[0] for row in rows}
+
+    def record_lifecycle_event(
+        self, chat_id: str, step: str, channel: str, status: str = "sent"
+    ) -> None:
+        """Registra l'invio di uno step del drip lifecycle (dedup via vincolo unico)."""
+        chat_id = str(chat_id)
+        with self.Session() as session:
+            session.add(TrialLifecycleEvent(
+                chat_id=chat_id, step=step, channel=channel, status=status,
+            ))
+            try:
+                session.commit()
+            except Exception:
+                session.rollback()
+                logger.debug(
+                    "[TrialLifecycle] Evento già registrato (race/duplicato): %s/%s/%s",
+                    chat_id, step, channel,
+                )
 
     # --- METODI LEDGER TOKEN (Fase 2.2 — Token System Reale) ---
 
