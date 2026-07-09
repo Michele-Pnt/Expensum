@@ -475,7 +475,9 @@ async def run_agent(
                     report_share_token = _save_storage.save_report(
                         user_id=chat_id,
                         report_type="monthly",
-                        report_date=date(target_year, target_month, 1),
+                        # report_date = 1° del mese successivo a quello analizzato (es. analisi
+                        # di giugno -> datata 1 luglio, il giorno in cui diventa disponibile).
+                        report_date=date(next_year, next_month, 1),
                         text_content=final_report,
                         report_data=_build_monthly_report_payload(
                             report=report,
