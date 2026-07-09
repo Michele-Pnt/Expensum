@@ -10,6 +10,7 @@ from functools import wraps
 
 logger = logging.getLogger(__name__)
 from flask import Flask, render_template, request, redirect, url_for, session, flash, jsonify, Response
+from werkzeug.middleware.proxy_fix import ProxyFix
 from markupsafe import escape
 from flask_wtf.csrf import CSRFProtect, generate_csrf
 from flask_limiter import Limiter
@@ -38,6 +39,11 @@ from src.dashboard_message import build_dashboard_text
 
 # Inizializza l'app Flask
 app = Flask(__name__)
+# Dietro nginx: senza questo, Werkzeug costruisce URL assoluti di redirect
+# (es. lo strict-slash redirect di /admin -> /admin/) usando l'host visto
+# a livello di socket (127.0.0.1:5000) invece del dominio pubblico dietro
+# il reverse proxy, facendo puntare il browser a un indirizzo irraggiungibile.
+app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_port=1)
 _flask_secret = os.getenv("FLASK_SECRET_KEY")
 if not _flask_secret:
     raise RuntimeError(
@@ -691,7 +697,7 @@ def admin_logout():
     session.pop("admin_logged_in", None)
     return redirect(url_for("admin_login"))
 
-@app.route("/admin/")
+@app.route("/admin", strict_slashes=False)
 @admin_required
 def index():
     from sqlalchemy import func, text
@@ -953,7 +959,7 @@ def users_token_usage():
     return jsonify(rows)
 
 
-@app.route("/admin/users")
+@app.route("/admin/users", strict_slashes=False)
 @admin_required
 def users_list():
     with store.Session() as s:
@@ -971,7 +977,7 @@ def toggle_user(chat_id):
             return jsonify({"status": "ok", "new_state": user.is_active})
     return jsonify({"error": "User not found"}), 404
 
-@app.route("/admin/feedbacks")
+@app.route("/admin/feedbacks", strict_slashes=False)
 @admin_required
 def feedbacks_list():
     with store.Session() as s:
@@ -989,7 +995,7 @@ def resolve_feedback(fb_id):
             return jsonify({"status": "ok", "new_state": fb.status})
     return jsonify({"error": "Feedback not found"}), 404
 
-@app.route("/admin/logs")
+@app.route("/admin/logs", strict_slashes=False)
 @admin_required
 def logs_viewer():
     log_file = Config.LOG_DIR / "agent.log"
