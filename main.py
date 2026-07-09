@@ -39,6 +39,7 @@ from src.report_builder import ReportBuilder
 from src.chart_generator import ChartGenerator
 from src.llm_usage_tracker import build_request_key, estimate_reserved_tokens, normalize_usage_metadata
 from src.user_store import UserStore
+from src.report_notify import notify_webapp_report
 
 
 # ---------------------------------------------------------------------------
@@ -172,10 +173,21 @@ def _build_monthly_report_payload(report, target_year: int, target_month: int, t
 # Funzione principale
 # ---------------------------------------------------------------------------
 
-async def run_agent(target_year: int, target_month: int, dry_run: bool, debug_data: bool = False, chat_id: str | None = None) -> None:
-    """Esegue la pipeline completa dell'agente finanziario."""
+async def run_agent(
+    target_year: int,
+    target_month: int,
+    dry_run: bool,
+    debug_data: bool = False,
+    chat_id: str | None = None,
+    shared_store: UserStore | None = None,
+) -> None:
+    """Esegue la pipeline completa dell'agente finanziario.
+
+    `shared_store` è opzionale: se passato (es. dal bot o dalla webapp, già connessi
+    al DB), viene riusato invece di aprire nuove connessioni Postgres per ogni chiamata.
+    """
     logger = logging.getLogger("financial_agent.main")
-    usage_store = UserStore(db_url=(f"sqlite:///{Config.LOG_DIR / 'token_usage_measure.db'}" if dry_run else Config.DATABASE_URL))
+    usage_store = shared_store or UserStore(db_url=(f"sqlite:///{Config.LOG_DIR / 'token_usage_measure.db'}" if dry_run else Config.DATABASE_URL))
     usage_store.add_user("system")
     if not chat_id:
         chat_id = Config.TELEGRAM_CHAT_ID
@@ -200,7 +212,7 @@ async def run_agent(target_year: int, target_month: int, dry_run: bool, debug_da
         budget_by_cat: dict[str, float] = {}
         logger.info(f"  [DRY-RUN] Usando {len(transactions)} transazioni mock")
     else:
-        user_store = UserStore(db_url=Config.DATABASE_URL)
+        user_store = shared_store or UserStore(db_url=Config.DATABASE_URL)
         user = user_store.get_user(chat_id) if chat_id else None
 
         months_back = Config.HISTORY_MONTHS + 1
@@ -444,15 +456,14 @@ async def run_agent(target_year: int, target_month: int, dry_run: bool, debug_da
         logger.info("[DRY-RUN] Report mostrato a schermo. Nessun messaggio inviato.")
         return
 
-    # 6. INVIO TELEGRAM
-    logger.info("▶ Step 6/7: Invio report su Telegram")
-    telegram = TelegramClient(chat_id=chat_id)
+    # 6. SALVATAGGIO + INVIO
+    telegram_connected = bool(chat_id) and not str(chat_id).startswith("web_")
 
     # Salva report nel DB (sessione dedicata, indipendente dalla sessione di lettura)
     report_share_token: str = ""
     if chat_id and not dry_run:
         try:
-            _save_store = UserStore(db_url=Config.DATABASE_URL)
+            _save_store = shared_store or UserStore(db_url=Config.DATABASE_URL)
             _save_user = _save_store.get_user(chat_id)
             if _save_user and _save_user.storage_backend == "postgres":
                 _save_session = _save_store.Session()
@@ -476,23 +487,24 @@ async def run_agent(target_year: int, target_month: int, dry_run: bool, debug_da
         except Exception as e:
             logger.warning(f"Salvataggio report mensile nel DB fallito: {e}")
 
-    # Invia prima i grafici
-    for path in chart_paths:
-        try:
-            await telegram.send_photo(photo_path=path)
-        except Exception as e:
-            logger.error(f"Errore durante l'invio del grafico {path}: {e}")
+    if telegram_connected:
+        logger.info("▶ Step 6/7: Invio report su Telegram")
+        telegram = TelegramClient(chat_id=chat_id)
+        # Invia prima i grafici
+        for path in chart_paths:
+            try:
+                await telegram.send_photo(photo_path=path)
+            except Exception as e:
+                logger.error(f"Errore durante l'invio del grafico {path}: {e}")
+        # Poi invia il testo
+        await telegram.send_report(final_report)
+        logger.info("✅ Report inviato con successo su Telegram!")
+    else:
+        logger.info("▶ Step 6/7: Utente solo-webapp, invio Telegram saltato")
 
-    # Poi invia il testo
-    await telegram.send_report(final_report)
+    if report_share_token and chat_id:
+        notify_webapp_report(_save_store, chat_id, "monthly", report.current_month.label, report_share_token)
 
-    # Bottone link al report web (solo se salvato con successo)
-    if report_share_token:
-        report_url = f"{Config.WEBAPP_BASE_URL}/reports/{report_share_token}"
-        await telegram.send_link_button("📊 Vedi il report completo sul web →", url=report_url)
-
-    logger.info("✅ Report inviato con successo su Telegram!")
-    
     # Cleanup delle immagini temporanee
     for path in chart_paths:
         try:

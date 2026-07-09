@@ -27,7 +27,6 @@ import json
 import time
 import threading
 from datetime import date, datetime, timedelta
-from pathlib import Path
 from cachetools import TTLCache
 from apscheduler.schedulers.background import BackgroundScheduler
 import requests
@@ -65,6 +64,7 @@ from src.dashboard_message import build_dashboard_text
 from src.llm_usage_tracker import build_request_key, estimate_reserved_tokens, normalize_usage_metadata
 from src.report_builder import WeeklyPlanBuilder, WeeklyPlanData, MonthlyPlanBuilder, MonthlyPlanData
 from src.mistral_client import MistralClient
+from src.report_notify import notify_webapp_report
 from src import analytics
 from src import brevo_client
 from src.unsubscribe_token import make_unsubscribe_token
@@ -372,32 +372,9 @@ def _build_weekly_report_text(chat_id: str, start_date: date, end_date: date) ->
     )
 
 
-def _display_name(chat_id: str) -> str:
-    """Ritorna un nome utente amichevole per i messaggi di notifica (username, email o generico)."""
-    try:
-        user = _user_store.get_user(chat_id)
-    except Exception:
-        user = None
-    if user and user.username:
-        return user.username
-    if user and user.email:
-        return user.email.split("@")[0]
-    return "👋"
-
-
 def _notify_webapp_report(chat_id: str, report_type: str, period_label: str, share_token: str) -> None:
     """Notifica la chat webapp con un messaggio di saluto e link cliccabile al report."""
-    name = _display_name(chat_id)
-    greeting = "Ehi" if name == "👋" else f"Ehi {name}"
-    period_desc = "di questa settimana" if report_type == "weekly" else "del mese scorso"
-    text = f"{greeting}, ho analizzato le tue finanze {period_desc} ({period_label})! Clicca qui per vedere il report."
-    try:
-        _user_store.log_message(
-            str(chat_id), source="webapp", role="bot", text=text,
-            metadata={"report_type": report_type, "share_token": share_token},
-        )
-    except Exception as e:
-        logger.debug("[User %s] notifica webapp report fallita: %s", chat_id, e)
+    notify_webapp_report(_user_store, chat_id, report_type, period_label, share_token)
 
 
 def _serialize_weekly_data(data: "WeeklyPlanData") -> dict:
@@ -689,31 +666,6 @@ async def _build_and_send_monthly_plan(
         logger.error(f"[User {chat_id}] Errore invio piano mensile: {e}")
 
 
-async def _run_monthly_report_subprocess(chat_id: str, month_value: str | None = None) -> tuple[int, str]:
-    """Esegue main.py in subprocess forzando il chat_id target via env."""
-    cmd = [sys.executable, "main.py"]
-    if month_value:
-        cmd.extend(["--month", month_value])
-
-    env = os.environ.copy()
-    env["TELEGRAM_CHAT_ID"] = str(chat_id)
-
-    process = await asyncio.create_subprocess_exec(
-        *cmd,
-        cwd=str(Path(__file__).resolve().parent),
-        env=env,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.STDOUT,
-    )
-    try:
-        output_bytes, _ = await asyncio.wait_for(process.communicate(), timeout=300)
-    except asyncio.TimeoutError:
-        process.kill()
-        await process.communicate()
-        return -1, "timeout: il subprocess ha superato i 5 minuti"
-    output = output_bytes.decode("utf-8", errors="replace") if output_bytes else ""
-    return process.returncode, output
-
 def _has_notion_template_binding(user) -> bool:
     if not user:
         return False
@@ -868,43 +820,35 @@ async def cmd_monthly_report(update: Update, context: ContextTypes.DEFAULT_TYPE)
     month_value = context.args[0] if context.args else None
     if month_value:
         try:
-            datetime.strptime(month_value, "%Y-%m")
+            target_dt = datetime.strptime(month_value, "%Y-%m")
+            target_year, target_month = target_dt.year, target_dt.month
         except ValueError:
             await update.message.reply_text(
                 "Formato non valido. Usa /monthly_report oppure /monthly_report YYYY-MM (es. 2026-04)."
             )
             return
+    else:
+        import main as main_module
+        target_year, target_month = main_module._resolve_default_target_month(date.today())
 
     await update.message.reply_text(
-        "📈 Avvio report mensile in corso... può richiedere qualche secondo."
+        "📈 Sto analizzando il mese, un attimo..."
     )
 
     try:
-        return_code, output = await _run_monthly_report_subprocess(chat_id, month_value)
+        import main as main_module
+        await main_module.run_agent(
+            target_year, target_month, dry_run=False, chat_id=chat_id, shared_store=_user_store,
+        )
     except Exception as e:
-        logger.error(f"[User {chat_id}] Errore avvio monthly_report: {e}")
+        logger.exception("[User %s] Errore generazione monthly_report: %s", chat_id, e)
         await update.message.reply_text(
-            "⚠️ Errore tecnico nell'avvio del monthly report. Riprova più tardi."
+            "⚠️ Errore tecnico nella generazione del report mensile. Riprova più tardi."
         )
         return
 
-    if return_code == 0:
-        # Aggiorna la dashboard pinnata: i token sono cambiati dopo la chiamata AI
-        await _refresh_pinned_dashboard(context.bot, chat_id)
-        return
-
-    tail = "\n".join(output.splitlines()[-10:]) if output else "nessun dettaglio"
-    logger.error("[User %s] monthly_report fallito (rc=%s):\n%s", chat_id, return_code, tail)
-    if return_code == -1:
-        await update.message.reply_text(
-            "⏱️ Il report mensile ha impiegato troppo tempo (>5 min). Riprova più tardi — potrebbe essere un problema temporaneo con Notion o Mistral."
-        )
-    else:
-        await update.message.reply_text(
-            f"⚠️ Monthly report fallito (codice {return_code}). Controlla la configurazione e riprova.\n\n"
-            f"_Dettaglio:_ `{tail[-300:] if tail else 'nessun dettaglio'}`",
-            parse_mode=ParseMode.MARKDOWN,
-        )
+    # Aggiorna la dashboard pinnata: i token sono cambiati dopo la chiamata AI
+    await _refresh_pinned_dashboard(context.bot, chat_id)
 
 
 def _build_dashboard_for_user(chat_id: str) -> str:
@@ -2234,11 +2178,14 @@ def _weekly_plan_job(app: Application, loop: asyncio.AbstractEventLoop) -> None:
 
 
 def _monthly_plan_job(app: Application, loop: asyncio.AbstractEventLoop) -> None:
-    """Job APScheduler il 1° di ogni mese alle 08:00 — invia il piano mensile a tutti gli utenti attivi."""
-    logger.info("[MonthlyPlan] Avvio invio piani mensili.")
+    """Job APScheduler il 1° di ogni mese alle 08:00 — invia a tutti gli utenti attivi
+    l'analisi retrospettiva del mese appena concluso (stessa pipeline di /monthly_report)."""
+    logger.info("[MonthlyReport] Avvio invio report mensili.")
 
-    async def _send_plans():
-        bot = app.bot
+    async def _send_reports():
+        import main as main_module
+        target_year, target_month = main_module._resolve_default_target_month(date.today())
+
         # Esclude chi ha disattivato le notifiche (Art. 21 GDPR)
         notion_users = _user_store.get_active_notion_users()
         pg_users = _user_store.get_active_postgres_users()
@@ -2247,22 +2194,28 @@ def _monthly_plan_job(app: Application, loop: asyncio.AbstractEventLoop) -> None
         sent = 0
         for user in all_users:
             chat_id = user.chat_id
+            plan = _user_store.get_user_plan(chat_id)
+            if plan["tokens_remaining"] < 5000:
+                logger.info(f"[MonthlyReport] Salto {chat_id}: token insufficienti")
+                continue
             try:
-                await _build_and_send_monthly_plan(chat_id=chat_id, bot=bot)
-                analytics.track(chat_id, "notification_sent", {"notification_type": "monthly_plan"})
+                await main_module.run_agent(
+                    target_year, target_month, dry_run=False, chat_id=chat_id, shared_store=_user_store,
+                )
+                analytics.track(chat_id, "notification_sent", {"notification_type": "monthly_report"})
                 sent += 1
-                logger.info(f"[MonthlyPlan] Piano inviato a {chat_id}")
+                logger.info(f"[MonthlyReport] Report inviato a {chat_id}")
             except Exception as e:
-                logger.error(f"[MonthlyPlan] Errore per {chat_id}: {e}")
+                logger.error(f"[MonthlyReport] Errore per {chat_id}: {e}")
             await asyncio.sleep(0.5)
 
-        logger.info(f"[MonthlyPlan] Completato: {sent}/{len(all_users)} piani inviati.")
+        logger.info(f"[MonthlyReport] Completato: {sent}/{len(all_users)} report inviati.")
 
-    future = asyncio.run_coroutine_threadsafe(_send_plans(), loop)
+    future = asyncio.run_coroutine_threadsafe(_send_reports(), loop)
     try:
-        future.result(timeout=600)
+        future.result(timeout=1800)
     except Exception as e:
-        logger.error(f"[MonthlyPlan] Errore job: {e}")
+        logger.error(f"[MonthlyReport] Errore job: {e}")
 
 
 def _trial_expiry_job(app: Application, loop: asyncio.AbstractEventLoop) -> None:

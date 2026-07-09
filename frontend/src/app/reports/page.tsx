@@ -58,6 +58,10 @@ export default function ReportsPage() {
         headers,
         body: JSON.stringify({ type }),
       });
+      if (res.status === 402) {
+        setGenerateError("Token mensili insufficienti per generare il report mensile.");
+        return;
+      }
       if (!res.ok) throw new Error("generate_failed");
       const data = await res.json();
       if (data.share_token) {
