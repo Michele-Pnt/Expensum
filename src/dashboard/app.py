@@ -16,7 +16,7 @@ from flask_wtf.csrf import CSRFProtect, generate_csrf
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
 import psutil
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 import requests
 from notion_client import Client as NotionClient
 
@@ -38,7 +38,13 @@ from src.category_sync import refresh_category_averages
 from src.dashboard_message import build_dashboard_text
 
 # Inizializza l'app Flask
-app = Flask(__name__)
+# static_url_path sotto /admin: nginx proxya a Flask solo /admin, /auth e
+# /api (vedi deployment documentation) — lo static_url_path di default "/static" cade
+# fuori da questi prefissi e finisce sul frontend Next.js (404), lasciando
+# la dashboard admin senza CSS. Solo i template della dashboard (base.html)
+# referenziano static/, quindi spostarlo sotto /admin/static non tocca le
+# altre pagine Flask (login, register, ecc. sono self-contained).
+app = Flask(__name__, static_url_path="/admin/static")
 # Dietro nginx: senza questo, Werkzeug costruisce URL assoluti di redirect
 # (es. lo strict-slash redirect di /admin -> /admin/) usando l'host visto
 # a livello di socket (127.0.0.1:5000) invece del dominio pubblico dietro
@@ -4188,16 +4194,24 @@ def api_generate_report():
     telegram_connected = not str(chat_id).startswith("web_")
 
     import asyncio
-    from telegram import Bot
-    import bot as bot_module
-
-    tg_bot = Bot(token=Config.TELEGRAM_BOT_TOKEN) if telegram_connected else None
 
     try:
         if report_type == "weekly":
+            from telegram import Bot
+            import bot as bot_module
+
+            tg_bot = Bot(token=Config.TELEGRAM_BOT_TOKEN) if telegram_connected else None
             asyncio.run(bot_module._build_and_send_weekly_plan(chat_id=chat_id, bot=tg_bot))
         else:
-            asyncio.run(bot_module._build_and_send_monthly_plan(chat_id=chat_id, bot=tg_bot))
+            if store.get_user_plan(chat_id)["tokens_remaining"] < 5000:
+                return jsonify({"error": "Token mensili insufficienti per generare il report mensile."}), 402
+
+            import main as main_module
+
+            target_year, target_month = main_module._resolve_default_target_month(date.today())
+            asyncio.run(main_module.run_agent(
+                target_year, target_month, dry_run=False, chat_id=chat_id, shared_store=store,
+            ))
     except Exception as e:
         logger.exception("Errore generazione report %s on-demand per %s: %s", report_type, chat_id, e)
         return jsonify({"error": "Generazione del report fallita. Riprova tra poco."}), 500
