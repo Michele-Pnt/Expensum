@@ -324,6 +324,42 @@ class TestSubscriptionSchedulerDueThisMonth:
             assert result[0]["due_date"].month == next_m
             assert result[0]["due_date"].year == next_y
 
+    def test_bimestrale_sub_due_two_months_later(self):
+        # Sub bimestrale fatturato il 10 marzo → scade il 10 maggio
+        target = self._target_month(2026, 5)
+        sub = {"name": "Assicurazione", "amount": 30.0,
+               "last_billed": date(2026, 3, 10).isoformat(), "sub_type": "bimestrale"}
+        result = SubscriptionScheduler().due_this_month([sub], target)
+        assert len(result) == 1
+        assert result[0]["due_date"] == date(2026, 5, 10)
+
+    def test_trimestrale_sub_due_three_months_later(self):
+        # Sub trimestrale fatturato il 20 febbraio → scade il 20 maggio
+        target = self._target_month(2026, 5)
+        sub = {"name": "Cloud", "amount": 45.0,
+               "last_billed": date(2026, 2, 20).isoformat(), "sub_type": "trimestrale"}
+        result = SubscriptionScheduler().due_this_month([sub], target)
+        assert len(result) == 1
+        assert result[0]["due_date"] == date(2026, 5, 20)
+
+    def test_semestrale_sub_due_six_months_later(self):
+        # Sub semestrale fatturato il 5 novembre 2025 → scade il 5 maggio 2026
+        target = self._target_month(2026, 5)
+        sub = {"name": "Dominio", "amount": 12.0,
+               "last_billed": date(2025, 11, 5).isoformat(), "sub_type": "semestrale"}
+        result = SubscriptionScheduler().due_this_month([sub], target)
+        assert len(result) == 1
+        assert result[0]["due_date"] == date(2026, 5, 5)
+
+    def test_legacy_bi_mensile_treated_as_bimestrale(self):
+        # Valore legacy "bi-mensile" deve comportarsi come bimestrale (2 mesi)
+        target = self._target_month(2026, 5)
+        sub = {"name": "Legacy", "amount": 8.0,
+               "last_billed": date(2026, 3, 15).isoformat(), "sub_type": "bi-mensile"}
+        result = SubscriptionScheduler().due_this_month([sub], target)
+        assert len(result) == 1
+        assert result[0]["due_date"] == date(2026, 5, 15)
+
 
 # ---------------------------------------------------------------------------
 # MonthlyPlanBuilder — test con mock FinancialStorage

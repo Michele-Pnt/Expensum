@@ -195,6 +195,20 @@ class ReportBuilder:
 _DOW_IT = ["Lunedì", "Martedì", "Mercoledì", "Giovedì", "Venerdì", "Sabato", "Domenica"]
 
 
+def _add_months(base: date, months: int, anchor_day: int) -> date:
+    """Aggiunge `months` mesi a `base`, ancorando il giorno a `anchor_day`.
+
+    Il giorno viene limitato all'ultimo giorno del mese di destinazione
+    (es. 31 gennaio + 1 mese -> 28/29 febbraio).
+    """
+    import calendar
+    total = base.month - 1 + months
+    year = base.year + total // 12
+    month = total % 12 + 1
+    day = min(anchor_day, calendar.monthrange(year, month)[1])
+    return date(year, month, day)
+
+
 def _next_due(sub: dict, reference: date) -> date | None:
     """Calcola la prossima data di scadenza di un abbonamento."""
     last_billed_raw = sub.get("last_billed")
@@ -210,19 +224,21 @@ def _next_due(sub: dict, reference: date) -> date | None:
 
     sub_type = str(sub.get("sub_type") or "mensile").lower()
 
-    if sub_type in ("mensile", "monthly"):
-        # Stesso giorno del mese, mese successivo
-        import calendar
-        month = last_billed.month % 12 + 1
-        year = last_billed.year + (1 if last_billed.month == 12 else 0)
-        day = min(last_billed.day, calendar.monthrange(year, month)[1])
-        candidate = date(year, month, day)
-        # Se già passato rispetto a reference, avanza di un mese
+    # Frequenze basate su un passo in mesi (nome normalizzato -> numero di mesi)
+    monthly_steps = {
+        "mensile": 1, "monthly": 1,
+        "bimestrale": 2, "bi-mensile": 2, "bimensile": 2, "bimonthly": 2,
+        "trimestrale": 3, "quarterly": 3,
+        "semestrale": 6, "semi-annual": 6, "semiannual": 6, "biannual": 6,
+    }
+    if sub_type in monthly_steps:
+        step = monthly_steps[sub_type]
+        k = 1
+        candidate = _add_months(last_billed, step, last_billed.day)
+        # Avanza finché la scadenza non è >= reference
         while candidate < reference:
-            month = candidate.month % 12 + 1
-            year = candidate.year + (1 if candidate.month == 12 else 0)
-            day = min(last_billed.day, calendar.monthrange(year, month)[1])
-            candidate = date(year, month, day)
+            k += 1
+            candidate = _add_months(last_billed, step * k, last_billed.day)
         return candidate
 
     if sub_type in ("annuale", "annual", "yearly"):

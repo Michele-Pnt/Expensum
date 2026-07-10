@@ -424,7 +424,7 @@
                     properties: {
                         'Name': { type: 'title' },
                         '{{ col_sub_type }}': { type: 'select', options: [
-                            'Mensile','Annuale','Settimanale','Trimestrale','Bi-mensile'
+                            'Settimanale','Mensile','Bimestrale','Trimestrale','Semestrale','Annuale'
                         ]},
                         '{{ col_sub_amount }}': { type: 'number' },
                         '{{ col_sub_last_billed }}': { type: 'date' },
@@ -524,9 +524,12 @@
                     + '<div class="field"><label>Tipo conto</label>'
                     + '<select class="edit-account-type"><option value="">-- Seleziona --</option>' + typeSelHtml + '</select></div>';
             } else if (entityType === 'subscription') {
-                var subTypeOpts = ['Mensile','Annuale','Settimanale','Trimestrale','Bi-mensile'];
+                var subTypeOpts = ['Settimanale','Mensile','Bimestrale','Trimestrale','Semestrale','Annuale'];
+                // Normalizza eventuali valori legacy verso le nuove etichette
+                var legacySubType = { 'Bi-mensile': 'Bimestrale', 'Bimensile': 'Bimestrale' };
+                var currentSubType = legacySubType[item.sub_type] || item.sub_type;
                 var subTypeSelHtml = subTypeOpts.map(function(t) {
-                    var sel = (item.sub_type === t) ? ' selected' : '';
+                    var sel = (currentSubType === t) ? ' selected' : '';
                     return '<option value="' + t + '"' + sel + '>' + t + '</option>';
                 }).join('');
                 form.innerHTML = '<div class="field"><label>Nome</label>'

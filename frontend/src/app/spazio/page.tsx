@@ -58,7 +58,7 @@ const ENTITY_PATH: Record<EntityType, string> = {
 };
 
 const ACCOUNT_TYPES = ["Conto corrente", "Carta di credito", "Risparmio", "Contanti", "Investimento"];
-const SUB_TYPES = ["streaming", "software", "utility", "altro"];
+const SUB_TYPES = ["Settimanale", "Mensile", "Bimestrale", "Trimestrale", "Semestrale", "Annuale"];
 const INCOME_TYPES = ["stipendio", "freelance", "investimento", "regalo", "rimborso", "altro"];
 
 // ---------------------------------------------------------------------------
@@ -593,7 +593,7 @@ export default function SpazioPage() {
         <TabToolbar label="Abbonamenti" onAdd={() => openAdd("subscription")} loading={loading.subscriptions}>
           <SearchInput value={subSearch} onChange={setSubSearch} placeholder="Cerca abbonamento..." />
           <FilterSelect
-            label="Tipo"
+            label="Frequenza"
             value={subType}
             onChange={setSubType}
             options={SUB_TYPES.map(t => ({ value: t, label: t }))}
@@ -605,7 +605,7 @@ export default function SpazioPage() {
               <TableRow>
                 <SortableHead label="Nome" field="name" sortBy={subSortBy} sortDir={subSortDir} onSort={handleSubSort} />
                 <SortableHead label="Importo" field="amount" sortBy={subSortBy} sortDir={subSortDir} onSort={handleSubSort} sx={{ textAlign: "right" }} />
-                <TableCell sx={HEAD_SX}>Tipo</TableCell>
+                <TableCell sx={HEAD_SX}>Frequenza</TableCell>
                 <TableCell sx={HEAD_SX}>Ultima fattura</TableCell>
                 <TableCell sx={HEAD_SX}>Conto</TableCell>
                 <TableCell sx={{ ...HEAD_SX, width: 80 }} />
@@ -867,11 +867,11 @@ export default function SpazioPage() {
           value={data.amount ?? ""}
           onChange={e => setField("amount", e.target.value)} />
         <FormControl fullWidth size="small" margin="dense">
-          <InputLabel>Tipo</InputLabel>
-          <Select label="Tipo" value={data.sub_type ?? ""}
+          <InputLabel>Frequenza</InputLabel>
+          <Select label="Frequenza" value={data.sub_type ?? ""}
             onChange={e => setField("sub_type", e.target.value)}>
             <MenuItem value=""><em>Nessuno</em></MenuItem>
-            {SUB_TYPES.map(t => <MenuItem key={t} value={t} sx={{ textTransform: "capitalize" }}>{t}</MenuItem>)}
+            {SUB_TYPES.map(t => <MenuItem key={t} value={t}>{t}</MenuItem>)}
           </Select>
         </FormControl>
         <TextField label="Ultima fattura" fullWidth size="small" margin="dense" type="date"
