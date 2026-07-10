@@ -460,7 +460,7 @@ export default function LandingPage() {
           <div className={styles.footerCol}>
             <p className={styles.footerColTitle}>{t("footer.azienda")}</p>
             <a href="mailto:expensum.finance@gmail.com" className={styles.footerGridLink}>{t("footer.chiSiamo")}</a>
-            <a href="mailto:expensum.finance@gmail.com" className={styles.footerGridLink}>{t("footer.contatti")}</a>
+            <Link href="/contatti" className={styles.footerGridLink}>{t("footer.contatti")}</Link>
             <Link href="/come-funziona-moneo" className={styles.footerGridLink}>{t("footer.comeFunzionaAI")}</Link>
             <Link href="/privacy" className={styles.footerGridLink}>{t("footer.privacyPolicy")}</Link>
             <Link href="/cookies" className={styles.footerGridLink}>{t("footer.cookiePolicy")}</Link>

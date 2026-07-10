@@ -14,7 +14,7 @@ interface Rect {
 
 const PADDING = 8;
 const TOOLTIP_WIDTH = 320;
-const TOOLTIP_HEIGHT = 240; // stima per il posizionamento (include padding + bottoni)
+const TOOLTIP_HEIGHT_FALLBACK = 240; // stima usata solo prima della prima misurazione reale
 const BOTTOM_PAD = 80;      // spazio libero dal basso per input bar e altri elementi fissi
 const TRANSITION = "all 0.35s cubic-bezier(0.4, 0, 0.2, 1)";
 
@@ -22,7 +22,8 @@ function getTooltipPosition(
   rect: Rect,
   position: string,
   vh: number,
-  vw: number
+  vw: number,
+  tooltipHeight: number
 ): { top: number; left: number } {
   const spotTop = rect.top - PADDING;
   const spotBottom = rect.top + rect.height + PADDING;
@@ -33,26 +34,26 @@ function getTooltipPosition(
   let top = 0;
   let left = 0;
 
-  if (position === "bottom" || (position !== "top" && spotBottom + TOOLTIP_HEIGHT + 16 < vh)) {
+  if (position === "bottom" || (position !== "top" && spotBottom + tooltipHeight + 16 < vh)) {
     top = spotBottom + 12;
-  } else if (position === "top" || spotTop - TOOLTIP_HEIGHT - 16 > 0) {
-    top = spotTop - TOOLTIP_HEIGHT - 12;
+  } else if (position === "top" || spotTop - tooltipHeight - 16 > 0) {
+    top = spotTop - tooltipHeight - 12;
   } else {
     top = spotBottom + 12;
   }
 
   if (position === "right") {
     left = spotRight + 12;
-    top = rect.top + rect.height / 2 - TOOLTIP_HEIGHT / 2;
+    top = rect.top + rect.height / 2 - tooltipHeight / 2;
   } else if (position === "left") {
     left = spotLeft - TOOLTIP_WIDTH - 12;
-    top = rect.top + rect.height / 2 - TOOLTIP_HEIGHT / 2;
+    top = rect.top + rect.height / 2 - tooltipHeight / 2;
   } else {
     left = Math.max(12, Math.min(centerX - TOOLTIP_WIDTH / 2, vw - TOOLTIP_WIDTH - 12));
   }
 
   // Clamp dentro viewport, tenendo conto di elementi fissi in basso (input bar, ecc.)
-  top = Math.max(12, Math.min(top, vh - TOOLTIP_HEIGHT - BOTTOM_PAD));
+  top = Math.max(12, Math.min(top, vh - tooltipHeight - BOTTOM_PAD));
   left = Math.max(12, Math.min(left, vw - TOOLTIP_WIDTH - 12));
 
   return { top, left };
@@ -62,9 +63,29 @@ export default function TourOverlay() {
   const { isActive, currentStep, steps, nextStep, prevStep, skipTour } = useTour();
   const [targetRect, setTargetRect] = useState<Rect | null>(null);
   const [visible, setVisible] = useState(false);
+  const [tooltipHeight, setTooltipHeight] = useState(TOOLTIP_HEIGHT_FALLBACK);
   const observerRef = useRef<ResizeObserver | null>(null);
   const retryRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const tooltipRef = useRef<HTMLDivElement | null>(null);
+  const tooltipObserverRef = useRef<ResizeObserver | null>(null);
   const step = steps[currentStep];
+
+  // Misura l'altezza reale del tooltip (il contenuto varia per step, es. TelegramLinkStep
+  // è molto più alto della stima di default) per posizionarlo correttamente nel viewport.
+  const tooltipRefCallback = useCallback((node: HTMLDivElement | null) => {
+    tooltipRef.current = node;
+    if (tooltipObserverRef.current) {
+      tooltipObserverRef.current.disconnect();
+      tooltipObserverRef.current = null;
+    }
+    if (!node) return;
+    setTooltipHeight(node.getBoundingClientRect().height);
+    tooltipObserverRef.current = new ResizeObserver((entries) => {
+      const h = entries[0]?.contentRect.height;
+      if (h) setTooltipHeight(h);
+    });
+    tooltipObserverRef.current.observe(node);
+  }, []);
 
   const measureTarget = useCallback(() => {
     if (!step) return;
@@ -129,11 +150,13 @@ export default function TourOverlay() {
       setVisible(false);
       setTargetRect(null);
       if (observerRef.current) observerRef.current.disconnect();
+      if (tooltipObserverRef.current) tooltipObserverRef.current.disconnect();
       if (retryRef.current) clearTimeout(retryRef.current);
       return;
     }
     cleanupPrevElement();
     setVisible(false);
+    setTooltipHeight(TOOLTIP_HEIGHT_FALLBACK);
     // Esegue setup (es. click su tab) poi attende il render prima di misurare
     step.setup?.();
     const t = setTimeout(measureTarget, 200);
@@ -175,7 +198,8 @@ export default function TourOverlay() {
     { top: spoTop, left: spoLeft, width: spoRight - spoLeft, height: spoBottom - spoTop },
     step.position,
     vh,
-    vw
+    vw,
+    tooltipHeight
   );
 
   const isFirst = currentStep === 0;
@@ -212,6 +236,7 @@ export default function TourOverlay() {
 
       {/* ── Tooltip card ───────────────────────────────────────────────────── */}
       <Box
+        ref={tooltipRefCallback}
         sx={{
           position: "fixed",
           zIndex: 10001,

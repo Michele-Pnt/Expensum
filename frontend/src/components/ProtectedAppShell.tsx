@@ -157,14 +157,24 @@ export default function ProtectedAppShell({ children }: { children: React.ReactN
             overflow: "hidden",
           }}
         >
-          {(!desktopOpen || isMobile) && (
-            <Box sx={{ p: 2, pb: 0, display: "flex", alignItems: "center", flexShrink: 0 }}>
-              <IconButton onClick={handleDrawerToggle} data-action="sidebar-open" sx={{ bgcolor: "background.paper", boxShadow: 1, border: "1px solid var(--color-border)" }}>
+          <Box sx={{ flexGrow: 1, overflowY: "auto", minHeight: 0, display: "flex", flexDirection: "column", position: "relative" }}>
+            {(!desktopOpen || isMobile) && (
+              <IconButton
+                onClick={handleDrawerToggle}
+                data-action="sidebar-open"
+                sx={{
+                  position: "absolute",
+                  top: 16,
+                  left: 16,
+                  zIndex: 30,
+                  bgcolor: "background.paper",
+                  boxShadow: 1,
+                  border: "1px solid var(--color-border)",
+                }}
+              >
                 <MenuIcon size={20} />
               </IconButton>
-            </Box>
-          )}
-          <Box sx={{ flexGrow: 1, overflowY: "auto", minHeight: 0, display: "flex", flexDirection: "column" }}>
+            )}
             {children}
           </Box>
         </Box>
