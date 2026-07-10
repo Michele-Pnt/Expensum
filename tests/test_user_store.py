@@ -3,6 +3,7 @@ from datetime import date, datetime, timedelta
 from src.user_store import (
     User, DailyMetrics, Feedback, OAuthSession, PlanChange, UserPlan, ChatMessage,
     LlmUsageEvent, LlmTokenReservation, DatabaseSchema, AuditLog, DataBreach,
+    TrialLifecycleEvent,
 )
 from src.storage.models import (
     Expense, Income, Account, UserCategory, UserCategoryNotionLink,
@@ -623,3 +624,102 @@ def test_legacy_bcrypt_hash_is_verified_and_rehashed(mock_db_session):
     # La password continua a funzionare col nuovo hash; quella sbagliata no.
     assert store.verify_password("legacy@example.com", "old-pass") is not None
     assert store.verify_password("legacy@example.com", "old-pass-sbagliata") is None
+
+
+# --- Trial lifecycle ---
+
+def test_start_trial_sets_fields(mock_db_session):
+    store = mock_db_session
+    store.add_user(chat_id="trial1")
+
+    store.start_trial("trial1", days=30)
+
+    plan = store.get_user_plan("trial1")
+    assert plan["plan_type"] == "pro"
+    assert plan["is_trial"] is True
+    assert plan["trial_started_at"] is not None
+    assert plan["trial_ends_at"] is not None
+    assert (plan["trial_ends_at"] - plan["trial_started_at"]).days == 30
+
+    with store.Session() as s:
+        change = s.query(PlanChange).filter_by(chat_id="trial1").first()
+        assert change.change_type == "trial_started"
+
+
+def test_set_user_plan_clears_is_trial_on_expiry(mock_db_session):
+    store = mock_db_session
+    store.add_user(chat_id="trial2")
+    store.start_trial("trial2", days=30)
+
+    store.set_user_plan("trial2", "free", payment_reference="trial_expired")
+
+    plan = store.get_user_plan("trial2")
+    assert plan["plan_type"] == "free"
+    assert plan["is_trial"] is False
+
+    with store.Session() as s:
+        change = (
+            s.query(PlanChange)
+            .filter_by(chat_id="trial2", change_type="trial_expired")
+            .first()
+        )
+        assert change is not None
+
+
+def test_set_user_plan_clears_is_trial_on_real_upgrade_mid_trial(mock_db_session):
+    """Un pagamento reale a metà trial chiude comunque lo stato trial."""
+    store = mock_db_session
+    store.add_user(chat_id="trial3")
+    store.start_trial("trial3", days=30)
+
+    store.set_user_plan("trial3", "pro", payment_reference="stripe_evt_123")
+
+    plan = store.get_user_plan("trial3")
+    assert plan["plan_type"] == "pro"
+    assert plan["is_trial"] is False
+
+
+def test_get_expired_trials(mock_db_session):
+    store = mock_db_session
+    store.add_user(chat_id="expired1")
+    store.add_user(chat_id="active1")
+    store.start_trial("expired1", days=30)
+    store.start_trial("active1", days=30)
+
+    with store.Session() as s:
+        plan = s.query(UserPlan).filter_by(chat_id="expired1").first()
+        plan.trial_ends_at = datetime.utcnow() - timedelta(days=1)
+        s.commit()
+
+    expired = store.get_expired_trials(datetime.utcnow())
+    assert [u.chat_id for u in expired] == ["expired1"]
+
+
+def test_get_active_trial_users(mock_db_session):
+    store = mock_db_session
+    store.add_user(chat_id="trial_active")
+    store.add_user(chat_id="never_trial")
+    store.start_trial("trial_active", days=30)
+    store.get_user_plan("never_trial")  # crea piano free di default
+
+    active = store.get_active_trial_users()
+    assert [u.chat_id for u in active] == ["trial_active"]
+
+
+def test_lifecycle_sent_steps_and_record_dedup(mock_db_session):
+    store = mock_db_session
+    store.add_user(chat_id="lc1")
+
+    assert store.get_lifecycle_sent_steps("lc1", "telegram") == set()
+
+    store.record_lifecycle_event("lc1", "d7", "telegram")
+    assert store.get_lifecycle_sent_steps("lc1", "telegram") == {"d7"}
+    assert store.get_lifecycle_sent_steps("lc1", "email") == set()
+
+    # Doppio invio dello stesso step/canale: non deve sollevare eccezioni né duplicare.
+    store.record_lifecycle_event("lc1", "d7", "telegram")
+    with store.Session() as s:
+        count = s.query(TrialLifecycleEvent).filter_by(
+            chat_id="lc1", step="d7", channel="telegram"
+        ).count()
+        assert count == 1

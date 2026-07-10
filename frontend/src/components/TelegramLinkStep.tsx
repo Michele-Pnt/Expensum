@@ -98,7 +98,14 @@ export default function TelegramLinkStep() {
   return (
     <Box sx={{ display: "flex", flexDirection: "column", gap: 1.5, py: 0.5 }}>
       <Typography variant="body2" color="text.secondary">
-        Collega il tuo account Telegram per registrare spese anche in chat, ovunque ti trovi.
+        Telegram è il modo più veloce per registrare le spese: scrivi un messaggio, invia un
+        vocale o fai una foto dello scontrino e l&apos;AI la analizza e la aggiunge da sola,
+        senza aprire la web app.
+      </Typography>
+      <Typography variant="body2" color="text.secondary">
+        È lo stesso account: tutto quello che registri dal bot appare subito qui nella chat,
+        e viceversa. Telegram è comodo per l&apos;inserimento al volo, la web app resta il posto
+        dove analizzare i dati, vedere i grafici e gestire categorie e budget. Che fai... ancora aspetti? Collega Telegram e inizia a registrare le spese in un attimo!
       </Typography>
       <Button
         variant="contained"

@@ -10,12 +10,13 @@ from functools import wraps
 
 logger = logging.getLogger(__name__)
 from flask import Flask, render_template, request, redirect, url_for, session, flash, jsonify, Response
+from werkzeug.middleware.proxy_fix import ProxyFix
 from markupsafe import escape
 from flask_wtf.csrf import CSRFProtect, generate_csrf
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
 import psutil
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 import requests
 from notion_client import Client as NotionClient
 
@@ -37,7 +38,18 @@ from src.category_sync import refresh_category_averages
 from src.dashboard_message import build_dashboard_text
 
 # Inizializza l'app Flask
-app = Flask(__name__)
+# static_url_path sotto /admin: nginx proxya a Flask solo /admin, /auth e
+# /api (vedi deployment documentation) — lo static_url_path di default "/static" cade
+# fuori da questi prefissi e finisce sul frontend Next.js (404), lasciando
+# la dashboard admin senza CSS. Solo i template della dashboard (base.html)
+# referenziano static/, quindi spostarlo sotto /admin/static non tocca le
+# altre pagine Flask (login, register, ecc. sono self-contained).
+app = Flask(__name__, static_url_path="/admin/static")
+# Dietro nginx: senza questo, Werkzeug costruisce URL assoluti di redirect
+# (es. lo strict-slash redirect di /admin -> /admin/) usando l'host visto
+# a livello di socket (127.0.0.1:5000) invece del dominio pubblico dietro
+# il reverse proxy, facendo puntare il browser a un indirizzo irraggiungibile.
+app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_port=1)
 _flask_secret = os.getenv("FLASK_SECRET_KEY")
 if not _flask_secret:
     raise RuntimeError(
@@ -268,6 +280,61 @@ def skip_ngrok_interstitial(response):
 store = UserStore(db_url=Config.DATABASE_URL)
 
 
+@app.route("/unsubscribe", methods=["GET"])
+def unsubscribe():
+    """Disattiva le notifiche (Telegram + email) senza richiedere login.
+
+    Il link viene inviato nelle email di lifecycle/marketing (drip trial) con un token
+    firmato sul chat_id, verificabile da chiunque riceva l'email ma non falsificabile.
+    """
+    from src.unsubscribe_token import verify_unsubscribe_token
+
+    chat_id = request.args.get("chat_id", "").strip()
+    token = request.args.get("token", "").strip()
+    if not chat_id or not token:
+        return jsonify({"error": "missing chat_id or token"}), 400
+
+    if not verify_unsubscribe_token(chat_id, token, app.secret_key):
+        return jsonify({"error": "invalid token"}), 403
+
+    _set_notifications_enabled(chat_id, False)
+
+    logger.info(
+        "Utente disiscritto dalle notifiche via link email",
+        extra={"domain": "dashboard", "event": "unsubscribe_via_email_link"},
+    )
+    return "Notifiche disattivate. Puoi riattivarle in qualsiasi momento dalle impostazioni.", 200
+
+
+def _set_notifications_enabled(chat_id: str, enabled: bool) -> None:
+    """Aggiorna il flag notifications_enabled per chat_id (usato da /unsubscribe)."""
+    with store.Session() as session:
+        user = session.query(User).filter(User.chat_id == str(chat_id)).first()
+        if not user:
+            return
+        user.notifications_enabled = enabled
+        session.commit()
+
+
+@app.route("/webhooks/stripe", methods=["POST"])
+def webhook_stripe():
+    """Stub webhook Stripe — scaffolding inerte finché non si esce dalla beta.
+
+    Nessuna verifica firma né logica di business qui: risponde 503 finché
+    STRIPE_API_KEY non è configurata. La vera integrazione (Checkout Session,
+    verifica firma webhook, wiring set_user_plan) è tracciata come task separato.
+    """
+    if not Config.STRIPE_API_KEY:
+        logger.info(
+            "Webhook Stripe ricevuto ma non ancora attivo (beta mode)",
+            extra={"domain": "dashboard", "event": "stripe_webhook_disabled"},
+        )
+        return jsonify({"error": "not_available_yet"}), 503
+
+    # TODO: verifica firma webhook + gestione eventi (post-beta, task pagamenti Stripe)
+    return jsonify({"error": "not_implemented"}), 501
+
+
 def _get_session_chat_id() -> str | None:
     """Ritorna il chat_id della sessione browser se valida."""
     if not session.get("user_logged_in"):
@@ -418,13 +485,33 @@ def web_app_entry():
     return redirect(url_for("web_login"))
 
 
+def _safe_next_url(raw_next: str | None) -> str | None:
+    """Valida il parametro `next` per evitare open redirect.
+
+    Accetta solo path relativi interni (`/reports`, non URL assoluti né
+    protocol-relative `//host/...`, che un attaccante potrebbe usare per
+    reindirizzare l'utente autenticato verso un sito esterno).
+    """
+    if not raw_next:
+        return None
+    if raw_next.startswith("/") and not raw_next.startswith("//"):
+        return raw_next
+    return None
+
+
 @app.route("/login", methods=["GET", "POST"])
 @limiter.limit("5 per minute")
 def web_login():
-    """Login web con email e password."""
+    """Login web con email e password.
+
+    Supporta `?next=/percorso` per riportare l'utente a una pagina specifica dopo il
+    login (es. il link "Vai ai report" nelle email di lifecycle trial).
+    """
+    next_url = _safe_next_url(request.args.get("next") or request.form.get("next"))
+
     chat_id = _get_session_chat_id()
     if chat_id:
-        return redirect(_resolve_authenticated_redirect(chat_id))
+        return redirect(next_url or _resolve_authenticated_redirect(chat_id))
 
     error = None
     if request.method == "POST":
@@ -456,7 +543,7 @@ def web_login():
             reset_failed_logins(email)
             session["user_logged_in"] = True
             session["chat_id"] = user.chat_id
-            return redirect(_resolve_authenticated_redirect(user.chat_id))
+            return redirect(next_url or _resolve_authenticated_redirect(user.chat_id))
 
         error = "Email o password errati."
         failed_count = track_failed_login(email)
@@ -478,7 +565,8 @@ def web_login():
             )
 
     return render_template(
-        "login.html", error=error, registration_enabled=Config.PUBLIC_REGISTRATION_ENABLED
+        "login.html", error=error, registration_enabled=Config.PUBLIC_REGISTRATION_ENABLED,
+        next_url=next_url,
     )
 
 
@@ -637,7 +725,7 @@ def admin_logout():
     session.pop("admin_logged_in", None)
     return redirect(url_for("admin_login"))
 
-@app.route("/")
+@app.route("/admin", strict_slashes=False)
 @admin_required
 def index():
     from sqlalchemy import func, text
@@ -899,7 +987,7 @@ def users_token_usage():
     return jsonify(rows)
 
 
-@app.route("/users")
+@app.route("/admin/users", strict_slashes=False)
 @admin_required
 def users_list():
     with store.Session() as s:
@@ -917,7 +1005,7 @@ def toggle_user(chat_id):
             return jsonify({"status": "ok", "new_state": user.is_active})
     return jsonify({"error": "User not found"}), 404
 
-@app.route("/feedbacks")
+@app.route("/admin/feedbacks", strict_slashes=False)
 @admin_required
 def feedbacks_list():
     with store.Session() as s:
@@ -935,7 +1023,7 @@ def resolve_feedback(fb_id):
             return jsonify({"status": "ok", "new_state": fb.status})
     return jsonify({"error": "Feedback not found"}), 404
 
-@app.route("/logs")
+@app.route("/admin/logs", strict_slashes=False)
 @admin_required
 def logs_viewer():
     log_file = Config.LOG_DIR / "agent.log"
@@ -2524,12 +2612,39 @@ def api_chat_confirm():
         pass
 
     saved = False
+    no_account = False
     try:
         if user.storage_backend == "postgres":
             with store.Session() as s:
                 storage = _build_financial_storage(user, pg_session=s)
                 accounts = storage.fetch_accounts()
-                default_account_id = accounts[0]["id"] if accounts else None
+                if not accounts:
+                    no_account = True
+                else:
+                    default_account_id = accounts[0]["id"]
+                    if parsed_type == "expense":
+                        storage.create_expense(
+                            expense_date=tx_date,
+                            amount=float(parsed.get("amount") or 0),
+                            category_name=parsed.get("category") or "Altro",
+                            name=parsed.get("name") or "Spesa",
+                            account_id=default_account_id,
+                        )
+                    else:
+                        storage.create_income(
+                            income_date=tx_date,
+                            amount=float(parsed.get("amount") or 0),
+                            income_type=parsed.get("income_type") or "Stipendio",
+                            name=parsed.get("name") or "Entrata",
+                            account_id=default_account_id,
+                        )
+        else:
+            storage = _build_financial_storage(user)
+            accounts = storage.fetch_accounts()
+            if not accounts:
+                no_account = True
+            else:
+                default_account_id = accounts[0]["id"]
                 if parsed_type == "expense":
                     storage.create_expense(
                         expense_date=tx_date,
@@ -2546,29 +2661,27 @@ def api_chat_confirm():
                         name=parsed.get("name") or "Entrata",
                         account_id=default_account_id,
                     )
-        else:
-            storage = _build_financial_storage(user)
-            accounts = storage.fetch_accounts()
-            default_account_id = accounts[0]["id"] if accounts else None
-            if parsed_type == "expense":
-                storage.create_expense(
-                    expense_date=tx_date,
-                    amount=float(parsed.get("amount") or 0),
-                    category_name=parsed.get("category") or "Altro",
-                    name=parsed.get("name") or "Spesa",
-                    account_id=default_account_id,
-                )
-            else:
-                storage.create_income(
-                    income_date=tx_date,
-                    amount=float(parsed.get("amount") or 0),
-                    income_type=parsed.get("income_type") or "Stipendio",
-                    name=parsed.get("name") or "Entrata",
-                    account_id=default_account_id,
-                )
-        saved = True
+        saved = not no_account
     except Exception as e:
         logger.exception("Errore salvataggio transazione confermata: %s", e)
+
+    if no_account:
+        analytics.track(chat_id, "expense_tracking_failed", {"reason": "no_account", "input_method": data.get("input_method", "text")})
+        reply = (
+            "🏦 Non hai ancora nessun conto su Expensum, quindi non posso registrare la transazione. "
+            "Aggiungine uno nella tab \"Conti\" del tuo spazio."
+        )
+        try:
+            store.log_message(chat_id, source="webapp", role="bot", text=reply, metadata=None)
+        except Exception:
+            pass
+        return jsonify({
+            "ok": False,
+            "saved": False,
+            "error": "no_account",
+            "reply": reply,
+            "setup_path": "/spazio",
+        })
 
     if saved:
         input_method = data.get("input_method", "text")
@@ -2817,8 +2930,15 @@ def api_chat_history():
     try:
         messages = store.get_chat_history(chat_id, limit=limit)
 
-        # Arricchisce con i report salvati (appaiono inline come messaggi bot)
+        # Arricchisce con i report salvati (appaiono inline come messaggi bot), evitando
+        # doppioni per i report che hanno già un messaggio esplicito di notifica in chat
+        # (weekly/monthly plan loggano un saluto con lo stesso share_token in metadata).
         try:
+            already_notified_tokens = {
+                m.get("metadata", {}).get("share_token")
+                for m in messages
+                if m.get("metadata", {}).get("share_token")
+            }
             user = _get_user_by_chat_id(chat_id)
             if user:
                 if user.storage_backend == "postgres":
@@ -2830,6 +2950,8 @@ def api_chat_history():
                     reports = storage.get_reports_for_user(chat_id, limit=10)
 
                 for r in reports:
+                    if r.get("share_token") in already_notified_tokens:
+                        continue
                     messages.append({
                         "id": f"report-{r.get('share_token', '')}",
                         "source": "telegram",
@@ -4074,6 +4196,52 @@ def api_get_report_by_token(share_token: str):
     if not report:
         return jsonify({"error": "Report non trovato"}), 404
     return jsonify(report)
+
+
+@app.route("/api/reports/generate", methods=["POST"])
+@_tg_webapp_auth
+@limiter.limit("5 per minute")
+def api_generate_report():
+    """Endpoint autenticato: genera on-demand il report weekly o monthly per l'utente
+    corrente, riusando la stessa logica della routine automatica (bot.py). Se l'utente
+    ha anche Telegram collegato, il messaggio viene inviato anche lì."""
+    from flask import g
+
+    body = request.get_json(silent=True) or {}
+    report_type = body.get("type")
+    if report_type not in ("weekly", "monthly"):
+        return jsonify({"error": "type deve essere 'weekly' o 'monthly'"}), 400
+
+    chat_id = g.chat_id
+    telegram_connected = not str(chat_id).startswith("web_")
+
+    import asyncio
+
+    try:
+        if report_type == "weekly":
+            from telegram import Bot
+            import bot as bot_module
+
+            tg_bot = Bot(token=Config.TELEGRAM_BOT_TOKEN) if telegram_connected else None
+            share_token = asyncio.run(bot_module._build_and_send_weekly_plan(chat_id=chat_id, bot=tg_bot))
+        else:
+            if store.get_user_plan(chat_id)["tokens_remaining"] < 5000:
+                return jsonify({"error": "Token mensili insufficienti per generare il report mensile."}), 402
+
+            import main as main_module
+
+            target_year, target_month = main_module._resolve_default_target_month(date.today())
+            share_token = asyncio.run(main_module.run_agent(
+                target_year, target_month, dry_run=False, chat_id=chat_id, shared_store=store,
+            ))
+    except Exception as e:
+        logger.exception("Errore generazione report %s on-demand per %s: %s", report_type, chat_id, e)
+        return jsonify({"error": "Generazione del report fallita. Riprova tra poco."}), 500
+
+    if not share_token:
+        return jsonify({"error": "Nessun dato disponibile per generare il report di questo periodo."}), 422
+
+    return jsonify({"ok": True, "share_token": share_token})
 
 
 @app.route("/api/reports", methods=["GET"])

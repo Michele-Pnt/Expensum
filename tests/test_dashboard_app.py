@@ -251,8 +251,8 @@ def test_telegram_login_reassigns_account_to_new_chat_id(client):
     assert store.get_and_delete_oauth_session(state) is None
 
 def test_dashboard_home_page_redirects(client):
-    """Verifica che la home (/) ridiriga al login se l'utente non è autenticato."""
-    response = client.get("/")
+    """Verifica che la home admin (/admin/) ridiriga al login se non autenticato."""
+    response = client.get("/admin/")
     assert response.status_code == 302
     assert "/login" in response.headers["Location"]
 

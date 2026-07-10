@@ -80,6 +80,27 @@ def test_send_transactional_email_calls_brevo_api(monkeypatch):
     assert kwargs["json"]["htmlContent"] == "<p>ciao</p>"
 
 
+def test_send_transactional_email_passes_headers(monkeypatch):
+    monkeypatch.setattr(brevo_client.Config, "BREVO_API_KEY", "test-key")
+    with patch("src.brevo_client.requests.post", return_value=_mock_response(201)) as mock_post:
+        brevo_client.send_transactional_email(
+            "lead@example.com", "Subject", "<p>x</p>",
+            headers={"List-Unsubscribe": "<https://example.com/unsubscribe>"},
+        )
+
+    assert mock_post.call_args.kwargs["json"]["headers"] == {
+        "List-Unsubscribe": "<https://example.com/unsubscribe>"
+    }
+
+
+def test_send_transactional_email_omits_headers_when_not_passed(monkeypatch):
+    monkeypatch.setattr(brevo_client.Config, "BREVO_API_KEY", "test-key")
+    with patch("src.brevo_client.requests.post", return_value=_mock_response(201)) as mock_post:
+        brevo_client.send_transactional_email("lead@example.com", "Subject", "<p>x</p>")
+
+    assert "headers" not in mock_post.call_args.kwargs["json"]
+
+
 def test_send_transactional_email_skips_without_api_key(monkeypatch):
     monkeypatch.setattr(brevo_client.Config, "BREVO_API_KEY", "")
     with patch("src.brevo_client.requests.post") as mock_post:

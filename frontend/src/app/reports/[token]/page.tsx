@@ -56,8 +56,20 @@ function buildReportSubtitle(report: ReportDetail): string {
   if (report.report_type === "weekly") {
     return formatDate(report.report_date);
   }
-  const d = new Date(report.report_date);
-  const monthLabel = d.toLocaleDateString("it-IT", { month: "long" });
+  // report_date rappresenta la data di pubblicazione (1° del mese successivo a
+  // quello analizzato), non il mese analizzato: quello va letto da report_data
+  // quando disponibile, altrimenti si ricade su report_date per compatibilità
+  // con i vecchi report salvati prima di questa distinzione.
+  const rd = report.report_data;
+  let analyzedMonth: Date;
+  if (rd && typeof rd.target_month === "number" && typeof rd.target_year === "number") {
+    analyzedMonth = new Date(rd.target_year, rd.target_month - 1, 1);
+  } else if (rd && typeof rd.target_month === "string") {
+    analyzedMonth = new Date(rd.target_month);
+  } else {
+    analyzedMonth = new Date(report.report_date);
+  }
+  const monthLabel = analyzedMonth.toLocaleDateString("it-IT", { month: "long" });
   const monthTitle = monthLabel ? monthLabel.charAt(0).toUpperCase() + monthLabel.slice(1) : "";
   return `Analaisi del mese chiuso: ${monthTitle}`;
 }

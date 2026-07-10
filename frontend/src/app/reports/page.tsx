@@ -2,9 +2,11 @@
 
 import { useEffect, useState } from "react";
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { CircularProgress } from "@mui/material";
 import styles from "./reports.module.css";
 import { trackReportViewed, trackReportShared } from "@/lib/analytics";
+import { getCsrfToken } from "@/lib/csrf";
 
 interface ReportSummary {
   id: number;
@@ -31,9 +33,52 @@ function formatDate(iso: string): string {
 }
 
 export default function ReportsPage() {
+  const router = useRouter();
   const [reports, setReports] = useState<ReportSummary[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [generating, setGenerating] = useState<"weekly" | "monthly" | null>(null);
+  const [generateError, setGenerateError] = useState<string | null>(null);
+
+  async function handleGenerate(type: "weekly" | "monthly") {
+    setGenerating(type);
+    setGenerateError(null);
+    try {
+      const telegramWindow = window as TelegramWindow;
+      const initData = telegramWindow.Telegram?.WebApp?.initData ?? "";
+      const csrfToken = await getCsrfToken();
+      const headers: HeadersInit = {
+        "Content-Type": "application/json",
+        "X-CSRFToken": csrfToken,
+      };
+      if (initData) headers["X-Telegram-Init-Data"] = initData;
+
+      const res = await fetch(`${API_BASE}/api/reports/generate`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({ type }),
+      });
+      if (res.status === 402) {
+        setGenerateError("Token mensili insufficienti per generare il report mensile.");
+        return;
+      }
+      if (res.status === 422) {
+        setGenerateError("Nessuna transazione trovata per questo periodo: niente da analizzare.");
+        return;
+      }
+      if (!res.ok) throw new Error("generate_failed");
+      const data = await res.json();
+      if (data.share_token) {
+        router.push(`/reports/${data.share_token}`);
+      } else {
+        throw new Error("generate_failed");
+      }
+    } catch {
+      setGenerateError("Generazione non riuscita. Riprova tra poco.");
+    } finally {
+      setGenerating(null);
+    }
+  }
 
   useEffect(() => {
     trackReportViewed("list");
@@ -67,6 +112,23 @@ export default function ReportsPage() {
       <div className={styles.header}>
         <h1 className={styles.title}>Storico Report</h1>
         <p className={styles.subtitle}>Report settimanali e mensili generati automaticamente</p>
+        <div className={styles.generateRow}>
+          <button
+            className={styles.generateBtn}
+            disabled={generating !== null}
+            onClick={() => handleGenerate("weekly")}
+          >
+            {generating === "weekly" ? "Generazione..." : "📅 Genera report settimanale"}
+          </button>
+          <button
+            className={styles.generateBtn}
+            disabled={generating !== null}
+            onClick={() => handleGenerate("monthly")}
+          >
+            {generating === "monthly" ? "Generazione..." : "📆 Genera report mensile"}
+          </button>
+        </div>
+        {generateError && <p className={styles.subtitle}>{generateError}</p>}
       </div>
 
       {error && (

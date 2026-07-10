@@ -46,6 +46,14 @@ def get_next_billing_date(last_billed: date | str | None, sub_type: str | None) 
             year += 1
         day = min(last_date.day, 28)
         next_date = last_date.replace(year=year, month=month, day=day)
+    elif sub_type_lower in ("semestrale", "semi-annual", "semiannual", "biannual"):
+        month = last_date.month + 6
+        year = last_date.year
+        while month > 12:
+            month -= 12
+            year += 1
+        day = min(last_date.day, 28)
+        next_date = last_date.replace(year=year, month=month, day=day)
     else:
         # Default: mensile
         month = last_date.month + 1

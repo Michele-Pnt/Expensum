@@ -36,6 +36,21 @@ class PostgresStorage(FinancialStorage):
 
     # ------------------------------------------------------------------ helpers
 
+    def _commit(self) -> None:
+        """Commit con rollback automatico in caso di errore.
+
+        Senza il rollback, un errore (es. IntegrityError su un vincolo unique)
+        lascia la transazione in stato "aborted": ogni query successiva sulla
+        stessa sessione fallisce finché non arriva un rollback esplicito. Dato
+        che la sessione viene riusata tra richieste (cache in bot.py), questo
+        "avvelenava" silenziosamente tutte le operazioni successive dell'utente.
+        """
+        try:
+            self._session.commit()
+        except Exception:
+            self._session.rollback()
+            raise
+
     def _resolve_category_id(self, category_name: str) -> int | None:
         """Risolve category_name -> category_id per l'utente corrente.
 
@@ -51,7 +66,11 @@ class PostgresStorage(FinancialStorage):
         # Crea la categoria al volo per non perdere la spesa
         new_cat = UserCategory(user_id=self._user_id, name=category_name)
         self._session.add(new_cat)
-        self._session.flush()
+        try:
+            self._session.flush()
+        except Exception:
+            self._session.rollback()
+            raise
         return new_cat.id
 
     def _compute_balance(self, account: Account) -> Decimal:
@@ -86,7 +105,7 @@ class PostgresStorage(FinancialStorage):
         """Crea una nuova categoria per l'utente."""
         category = UserCategory(user_id=self._user_id, name=name, monthly_budget=monthly_budget)
         self._session.add(category)
-        self._session.commit()
+        self._commit()
         return {"id": category.id, "name": category.name, "monthly_budget": category.monthly_budget}
 
     def get_categories(self) -> list[dict]:
@@ -120,7 +139,7 @@ class PostgresStorage(FinancialStorage):
             row.name = name
         if monthly_budget is not None:
             row.monthly_budget = monthly_budget
-        self._session.commit()
+        self._commit()
         return {"id": row.id, "name": row.name, "monthly_budget": row.monthly_budget}
 
     def delete_category(self, cat_id: int) -> bool:
@@ -136,7 +155,7 @@ class PostgresStorage(FinancialStorage):
         if link:
             self._session.delete(link)
         self._session.delete(row)
-        self._session.commit()
+        self._commit()
         return True
 
     # ------------------------------------------------------------------ expenses
@@ -174,7 +193,7 @@ class PostgresStorage(FinancialStorage):
             account_id=acc_id_int,
         )
         self._session.add(expense)
-        self._session.commit()
+        self._commit()
         return {
             "id": expense.id,
             "date": expense.expense_date,
@@ -231,7 +250,7 @@ class PostgresStorage(FinancialStorage):
             income_type=income_type,
         )
         self._session.add(income)
-        self._session.commit()
+        self._commit()
         return {
             "id": income.id,
             "date": income.income_date,
@@ -289,7 +308,7 @@ class PostgresStorage(FinancialStorage):
             account_type=account_type,
         )
         self._session.add(account)
-        self._session.commit()
+        self._commit()
         return {
             "id": account.id,
             "name": account.name,
@@ -315,7 +334,7 @@ class PostgresStorage(FinancialStorage):
             row.opening_balance = balance
         if account_type is not None:
             row.account_type = account_type
-        self._session.commit()
+        self._commit()
         return {
             "id": row.id,
             "name": row.name,
@@ -332,7 +351,7 @@ class PostgresStorage(FinancialStorage):
         if not row:
             return False
         self._session.delete(row)
-        self._session.commit()
+        self._commit()
         return True
 
     # ------------------------------------------------------------------ monthly balances
@@ -385,8 +404,8 @@ class PostgresStorage(FinancialStorage):
         all_months = sorted(set(income_by_month) | set(expense_by_month))
         result = []
         for month_str in all_months:
-            inc = income_by_month.get(month_str, 0.0)
-            exp = expense_by_month.get(month_str, 0.0)
+            inc = float(income_by_month.get(month_str) or 0.0)
+            exp = float(expense_by_month.get(month_str) or 0.0)
             d = datetime.strptime(month_str, "%Y-%m-%d").date()
             result.append({
                 "year": d.year,
@@ -439,7 +458,7 @@ class PostgresStorage(FinancialStorage):
             category_id=category_id,
         )
         self._session.add(subscription)
-        self._session.commit()
+        self._commit()
         return {
             "id": subscription.id,
             "name": subscription.name,
@@ -479,7 +498,7 @@ class PostgresStorage(FinancialStorage):
             row.account_id = account_id
         if category_id is not None:
             row.category_id = category_id
-        self._session.commit()
+        self._commit()
         return {
             "id": row.id,
             "name": row.name,
@@ -499,7 +518,7 @@ class PostgresStorage(FinancialStorage):
         if not row:
             return False
         self._session.delete(row)
-        self._session.commit()
+        self._commit()
         return True
 
     # ------------------------------------------------------------------ expense CRUD
@@ -574,7 +593,7 @@ class PostgresStorage(FinancialStorage):
             row.category_id = kwargs["category_id"]
         if "account_id" in kwargs:
             row.account_id = kwargs["account_id"]
-        self._session.commit()
+        self._commit()
         return {"id": row.id, "name": row.name, "amount": float(row.amount)}
 
     def delete_expense(self, expense_id: int) -> bool:
@@ -586,7 +605,7 @@ class PostgresStorage(FinancialStorage):
         if not row:
             return False
         self._session.delete(row)
-        self._session.commit()
+        self._commit()
         return True
 
     # ------------------------------------------------------------------ income CRUD
@@ -656,7 +675,7 @@ class PostgresStorage(FinancialStorage):
             row.income_type = kwargs["income_type"]
         if "account_id" in kwargs:
             row.account_id = kwargs["account_id"]
-        self._session.commit()
+        self._commit()
         return {"id": row.id, "name": row.name, "amount": float(row.amount)}
 
     def delete_income(self, income_id: int) -> bool:
@@ -668,7 +687,7 @@ class PostgresStorage(FinancialStorage):
         if not row:
             return False
         self._session.delete(row)
-        self._session.commit()
+        self._commit()
         return True
 
     def delete_expenses_by_prefix(self, prefix: str) -> int:
@@ -681,7 +700,7 @@ class PostgresStorage(FinancialStorage):
         for row in rows:
             self._session.delete(row)
         if count:
-            self._session.commit()
+            self._commit()
         return count
 
     def fetch_subscriptions_with_account_name(self) -> list[dict]:
@@ -762,7 +781,7 @@ class PostgresStorage(FinancialStorage):
         if existing:
             existing.text_content = text_content
             existing.report_data = report_data
-            self._session.commit()
+            self._commit()
             return existing.share_token
 
         token = str(uuid.uuid4())
@@ -775,7 +794,7 @@ class PostgresStorage(FinancialStorage):
             report_data=report_data,
         )
         self._session.add(row)
-        self._session.commit()
+        self._commit()
         return token
 
     def get_report_by_token(self, share_token: str) -> dict | None:

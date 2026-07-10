@@ -166,6 +166,7 @@
 
             <form method="POST" action="{% if admin_mode %}{{ url_for('admin_login') }}{% else %}{{ url_for('web_login') }}{% endif %}">
                 <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                {% if next_url %}<input type="hidden" name="next" value="{{ next_url }}">{% endif %}
                 {% if not admin_mode %}
                 <div class="field">
                     <label>Email</label>

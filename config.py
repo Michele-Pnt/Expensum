@@ -24,16 +24,9 @@ class Config:
     CURRENT_PRIVACY_POLICY_VERSION: str = "2026-06-30"
 
     # --- NOTION ---
-    NOTION_API_KEY: str = os.getenv("NOTION_API_KEY", "")
-    # Database IDs
-    NOTION_EXPENSE_DATABASE_ID: str = os.getenv("NOTION_EXPENSE_DATABASE_ID", "")
-    NOTION_CATEGORIES_DATABASE_ID: str = os.getenv("NOTION_CATEGORIES_DATABASE_ID", "")
-    NOTION_MONTHLY_BALANCE_DATABASE_ID: str = os.getenv("NOTION_MONTHLY_BALANCE_DATABASE_ID", "")
-    NOTION_INCOME_DATABASE_ID: str = os.getenv("NOTION_INCOME_DATABASE_ID", "")
-    NOTION_ACCOUNTS_DATABASE_ID: str = os.getenv("NOTION_ACCOUNTS_DATABASE_ID", "")
-    NOTION_SUBSCRIPTIONS_DATABASE_ID: str = os.getenv("NOTION_SUBSCRIPTIONS_DATABASE_ID", "")
-    NOTION_PAY_TRANSFER_DATABASE_ID: str = os.getenv("NOTION_PAY_TRANSFER_DATABASE_ID", "")
-    
+    # Nessuna credenziale/DB ID di default globale: ogni utente usa solo le proprie
+    # (src/notion_client.py non ha più fallback su credenziali condivise).
+
     # URL pubblica della webapp Flask (ngrok in dev, dominio reale in prod)
     WEBAPP_BASE_URL: str = os.getenv("WEBAPP_BASE_URL", "http://localhost:5000")
 
@@ -97,6 +90,21 @@ class Config:
     # Settings → Senders & IP → Domains, con SPF/DKIM configurati)
     BREVO_SENDER_EMAIL: str = os.getenv("BREVO_SENDER_EMAIL", "hello@expensum.it")
     BREVO_SENDER_NAME: str = os.getenv("BREVO_SENDER_NAME", "Expensum")
+
+    # --- TRIAL LIFECYCLE ---
+    # Automazione drip (Telegram+email) e downgrade a scadenza trial. Costruita e testata,
+    # ma tenuta spenta finché il prodotto è in beta (trial concesso solo manualmente via
+    # scripts/grant_trial.py). Va abilitata al passaggio da beta a pubblico.
+    TRIAL_AUTOMATION_ENABLED: bool = os.getenv("TRIAL_AUTOMATION_ENABLED", "false").lower() == "true"
+    TRIAL_DISCOUNT_CODE: str = os.getenv("TRIAL_DISCOUNT_CODE", "")
+
+    # --- STRIPE (scaffolding, non ancora attivo — vedi task ClickUp pagamenti post-beta) ---
+    STRIPE_API_KEY: str = os.getenv("STRIPE_API_KEY", "")
+    STRIPE_WEBHOOK_SECRET: str = os.getenv("STRIPE_WEBHOOK_SECRET", "")
+
+    # Secret key Flask, riusata per firmare i token di unsubscribe nelle email lifecycle
+    # (src/unsubscribe_token.py) — stessa variabile usata da src/dashboard/app.py.
+    FLASK_SECRET_KEY: str = os.getenv("FLASK_SECRET_KEY", "")
 
     # --- DATABASE ---
     # Default: SQLite locale (sqlite:///users.db). 
