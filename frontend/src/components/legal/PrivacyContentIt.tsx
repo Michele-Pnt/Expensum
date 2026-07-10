@@ -372,7 +372,7 @@ export default function PrivacyContentIt() {
         <p>
           Il Titolare si riserva il diritto di modificare la presente informativa per riflettere
           variazioni normative, tecnologiche o del servizio. Le modifiche saranno comunicate
-          tramite notifica Telegram o email almeno <strong>15 giorni prima</strong>
+          tramite notifica Telegram o email almeno <strong>15 giorni prima </strong>
           dell&apos;entrata in vigore.
         </p>
         <p>
