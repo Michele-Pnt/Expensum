@@ -599,6 +599,135 @@ def test_login_lockout_persists_across_different_ips(client):
         assert "user_logged_in" not in sess
 
 
+def test_admin_login_locks_out_after_threshold_failures(client):
+    """OWASP A07: /admin/login usa una password singola condivisa senza lockout
+    dedicato prima di questo fix — un attaccante poteva tentare brute force
+    illimitato oltre il rate limit generico. Verifica che dopo 5 fallimenti
+    anche la password corretta venga rifiutata.
+    """
+    from config import Config
+    from src.rate_limiter import reset_failed_logins
+    from src.dashboard.app import ADMIN_LOCKOUT_KEY
+
+    reset_failed_logins(ADMIN_LOCKOUT_KEY)
+    csrf_token = client.get("/api/csrf-token").json["csrf_token"]
+
+    with patch.object(Config, "DASHBOARD_PASSWORD", "correct-admin-password"):
+        for _ in range(5):
+            client.post(
+                "/admin/login", data={"password": "wrong"},
+                headers={"X-CSRFToken": csrf_token},
+            )
+
+        response = client.post(
+            "/admin/login", data={"password": "correct-admin-password"},
+            headers={"X-CSRFToken": csrf_token},
+        )
+
+    assert response.status_code == 200
+    assert b"Troppi tentativi falliti" in response.data
+    with client.session_transaction() as sess:
+        assert "admin_logged_in" not in sess
+
+
+def test_admin_login_lockout_persists_across_different_ips(client):
+    """Come test_login_lockout_persists_across_different_ips ma per /admin/login:
+    il lockout non deve essere per-IP (bypassabile ruotando IP), ma sull'unico
+    account admin.
+    """
+    from config import Config
+    from src.rate_limiter import reset_failed_logins
+    from src.dashboard.app import ADMIN_LOCKOUT_KEY
+
+    reset_failed_logins(ADMIN_LOCKOUT_KEY)
+    csrf_token = client.get("/api/csrf-token").json["csrf_token"]
+
+    with patch.object(Config, "DASHBOARD_PASSWORD", "correct-admin-password"):
+        for i in range(5):
+            response = client.post(
+                "/admin/login",
+                data={"password": "wrong"},
+                headers={"X-CSRFToken": csrf_token},
+                environ_overrides={"REMOTE_ADDR": f"10.0.1.{i}"},
+            )
+            assert response.status_code == 200
+
+        response = client.post(
+            "/admin/login",
+            data={"password": "correct-admin-password"},
+            headers={"X-CSRFToken": csrf_token},
+            environ_overrides={"REMOTE_ADDR": "10.0.1.99"},
+        )
+
+    assert response.status_code == 200
+    assert b"Troppi tentativi falliti" in response.data
+    with client.session_transaction() as sess:
+        assert "admin_logged_in" not in sess
+
+
+def test_safe_next_url_rejects_external_and_protocol_relative_urls():
+    """OWASP A10: _safe_next_url e' l'unico punto della dashboard dove un valore
+    quasi-URL arriva da querystring/form. Deve accettare solo path relativi
+    interni, mai host esterni (open redirect, imparentato con SSRF).
+    """
+    from src.dashboard.app import _safe_next_url
+
+    assert _safe_next_url("/reports") == "/reports"
+    assert _safe_next_url(None) is None
+    assert _safe_next_url("") is None
+    assert _safe_next_url("https://evil.com") is None
+    assert _safe_next_url("http://evil.com/phish") is None
+    assert _safe_next_url("//evil.com") is None
+    assert _safe_next_url("//evil.com/path") is None
+    assert _safe_next_url("javascript:alert(1)") is None
+
+
+def test_login_redirect_ignores_external_next_param(client):
+    """Full-stack: /login?next=<host esterno> non deve reindirizzare l'utente
+    autenticato fuori dal dominio, nonostante il redirect a valle di un login
+    riuscito."""
+    from src.dashboard.app import store
+
+    _, email, password = _create_dashboard_user(
+        store, chat_id="chat_next_ssrf", email="next-ssrf@example.com"
+    )
+    csrf_token = client.get("/api/csrf-token").json["csrf_token"]
+
+    response = client.post(
+        "/login?next=https://evil.com/steal",
+        data={"email": email, "password": password},
+        headers={"X-CSRFToken": csrf_token},
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 302
+    assert "evil.com" not in response.headers["Location"]
+
+
+def test_brevo_contact_request_target_is_fixed_host_regardless_of_payload():
+    """OWASP A10: l'unica chiamata outbound che incorpora dati esterni (il lead
+    Tally) deve sempre puntare all'host Brevo fisso, mai a un host derivato
+    dal payload attaccante-controllato (es. un'email che assomiglia a un URL
+    interno/gopher usata per tentare SSRF verso rete interna)."""
+    from src import brevo_client
+
+    malicious_emails = [
+        "attacker@evil.com#@internal-service:8080/",
+        "http://169.254.169.254/latest/meta-data/@example.com",
+        "gopher://127.0.0.1:6379/_INFO@example.com",
+    ]
+
+    with patch("src.brevo_client.requests.post") as mock_post:
+        mock_post.return_value = MagicMock(status_code=201)
+        with patch.object(brevo_client.Config, "BREVO_API_KEY", "test-key"):
+            for email in malicious_emails:
+                brevo_client.upsert_contact(email, list_ids=[1])
+
+    assert mock_post.call_count == len(malicious_emails)
+    for call in mock_post.call_args_list:
+        assert call.args[0] == "https://api.brevo.com/v3/contacts"
+
+
 def test_session_authenticated_api_requires_csrf_token(app, client):
     """Verifica che le rotte /api/* autenticate via cookie di sessione siano protette da CSRF.
 
