@@ -23,7 +23,8 @@ function getTooltipPosition(
   position: string,
   vh: number,
   vw: number,
-  tooltipHeight: number
+  tooltipHeight: number,
+  tooltipWidth: number
 ): { top: number; left: number } {
   const spotTop = rect.top - PADDING;
   const spotBottom = rect.top + rect.height + PADDING;
@@ -46,15 +47,15 @@ function getTooltipPosition(
     left = spotRight + 12;
     top = rect.top + rect.height / 2 - tooltipHeight / 2;
   } else if (position === "left") {
-    left = spotLeft - TOOLTIP_WIDTH - 12;
+    left = spotLeft - tooltipWidth - 12;
     top = rect.top + rect.height / 2 - tooltipHeight / 2;
   } else {
-    left = Math.max(12, Math.min(centerX - TOOLTIP_WIDTH / 2, vw - TOOLTIP_WIDTH - 12));
+    left = Math.max(12, Math.min(centerX - tooltipWidth / 2, vw - tooltipWidth - 12));
   }
 
   // Clamp dentro viewport, tenendo conto di elementi fissi in basso (input bar, ecc.)
   top = Math.max(12, Math.min(top, vh - tooltipHeight - BOTTOM_PAD));
-  left = Math.max(12, Math.min(left, vw - TOOLTIP_WIDTH - 12));
+  left = Math.max(12, Math.min(left, vw - tooltipWidth - 12));
 
   return { top, left };
 }
@@ -179,6 +180,10 @@ export default function TourOverlay() {
 
   const vw = typeof window !== "undefined" ? window.innerWidth : 1280;
   const vh = typeof window !== "undefined" ? window.innerHeight : 800;
+  const tooltipWidth = Math.min(TOOLTIP_WIDTH, vw - 24);
+  // Spazio verticale disponibile per il tooltip: se il contenuto non ci sta, scrolla al suo interno
+  // invece di sporgere fuori dallo schermo (importante su telefono, specie in orizzontale).
+  const tooltipMaxHeight = vh - BOTTOM_PAD - 24;
 
   const rect = targetRect ?? { top: vh / 2 - 60, left: vw / 2 - 100, width: 200, height: 120 };
   const scrollTop = typeof window !== "undefined" ? window.scrollY : 0;
@@ -199,7 +204,8 @@ export default function TourOverlay() {
     step.position,
     vh,
     vw,
-    tooltipHeight
+    Math.min(tooltipHeight, tooltipMaxHeight),
+    tooltipWidth
   );
 
   const isFirst = currentStep === 0;
@@ -242,7 +248,9 @@ export default function TourOverlay() {
           zIndex: 10001,
           top: tooltipPos.top,
           left: tooltipPos.left,
-          width: TOOLTIP_WIDTH,
+          width: tooltipWidth,
+          maxHeight: tooltipMaxHeight,
+          overflowY: "auto",
           bgcolor: "background.paper",
           borderRadius: "14px",
           boxShadow: "0 8px 40px rgba(0,0,0,0.28), 0 2px 8px rgba(0,0,0,0.12)",
