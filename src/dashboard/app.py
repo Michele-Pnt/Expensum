@@ -4418,6 +4418,12 @@ def api_get_reports_for_user():
 def _pg_or_401(s, chat_id):
     """Restituisce (PostgresStorage, None) o (None, response 400) se backend != postgres."""
     from src.user_store import User
+    from src.storage import rls
+    # La RLS si applica al primo statement della transazione (listener after_begin):
+    # va impostata PRIMA di qualunque query su questa sessione, altrimenti la query
+    # su User qui sotto apre la transazione senza app.user_id e ogni successivo
+    # INSERT/UPDATE sulle tabelle protette da RLS viene rifiutato dal database.
+    rls.bind_user(s, chat_id)
     user = s.query(User).filter_by(chat_id=chat_id).first()
     if not user or user.storage_backend != "postgres":
         return None, (jsonify({"error": "Solo backend PostgreSQL supportato"}), 400)
