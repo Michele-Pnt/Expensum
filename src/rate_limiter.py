@@ -90,3 +90,18 @@ def track_failed_login(key: str, window_seconds: int = 900) -> int:
 def reset_failed_logins(key: str) -> None:
     """Azzera il contatore di fallimenti di login per `key` (es. dopo un login riuscito)."""
     _failed_logins.pop(str(key).lower(), None)
+
+
+def get_failed_login_count(key: str, window_seconds: int = 900) -> int:
+    """
+    Ritorna il numero di tentativi di login falliti per `key` nella finestra
+    temporale, senza registrarne uno nuovo.
+
+    Usato per verificare se un account è in lockout PRIMA di processare un
+    nuovo tentativo di login (a differenza di track_failed_login, che
+    registra sempre un nuovo fallimento).
+    """
+    now = time()
+    key = str(key).lower()
+    _failed_logins[key] = [t for t in _failed_logins[key] if now - t < window_seconds]
+    return len(_failed_logins[key])

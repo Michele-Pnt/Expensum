@@ -78,6 +78,13 @@ limiter = Limiter(app=app, key_func=get_remote_address, default_limits=[])
 # tutti gli utenti (vedi bandit B113).
 TELEGRAM_REQUEST_TIMEOUT = 10
 
+# Account lockout su /login: oltre questa soglia di fallimenti nella finestra,
+# l'account (per email) resta bloccato indipendentemente dall'IP di provenienza
+# — il rate limit di flask_limiter qui sotto è per-IP e da solo è bypassabile
+# semplicemente cambiando IP.
+ACCOUNT_LOCKOUT_THRESHOLD = 5
+ACCOUNT_LOCKOUT_WINDOW_SECONDS = 900
+
 
 @app.before_request
 def enforce_csrf_on_forms():
@@ -90,6 +97,12 @@ def enforce_csrf_on_forms():
     Telegram), l'header manca e l'autenticazione ricade sul cookie di sessione,
     che torna vulnerabile esattamente come le rotte protette dai form HTML.
     """
+    if not app.config.get("WTF_CSRF_ENABLED", True):
+        # Rispetta il flag standard Flask-WTF: protect() chiamato manualmente
+        # (come qui sotto) non lo controlla di suo, a differenza dell'hook
+        # automatico di CSRFProtect. Senza questo check, WTF_CSRF_ENABLED=False
+        # nei test è inerte e ogni POST richiede comunque un token valido.
+        return
     if request.method in ("GET", "HEAD", "OPTIONS", "TRACE"):
         return
     if request.path == "/auth/telegram-login":
@@ -573,10 +586,25 @@ def web_login():
 
     error = None
     if request.method == "POST":
-        from src.rate_limiter import track_failed_login, reset_failed_logins
+        from src.rate_limiter import (
+            get_failed_login_count, track_failed_login, reset_failed_logins,
+        )
 
         email = (request.form.get("email") or "").strip()
         password = request.form.get("password") or ""
+
+        if get_failed_login_count(email, ACCOUNT_LOCKOUT_WINDOW_SECONDS) >= ACCOUNT_LOCKOUT_THRESHOLD:
+            logger.warning(
+                "login_locked_out",
+                extra={"domain": "security", "event": "login_locked_out",
+                       "meta": {"ip": request.remote_addr}},
+            )
+            return render_template(
+                "login.html",
+                error="Troppi tentativi falliti. Riprova tra qualche minuto.",
+                registration_enabled=Config.PUBLIC_REGISTRATION_ENABLED,
+            )
+
         user = store.verify_password(email, password)
         if not user:
             user = store.verify_password_any_status(email, password)
@@ -744,6 +772,9 @@ def get_system_metrics():
 
 # --- Rotte Web (UI) ---
 
+ADMIN_LOCKOUT_KEY = "admin_login"
+
+
 @app.route("/admin/login", methods=["GET", "POST"])
 def admin_login():
     if session.get("admin_logged_in"):
@@ -751,8 +782,24 @@ def admin_login():
 
     error = None
     if request.method == "POST":
+        from src.rate_limiter import (
+            get_failed_login_count, track_failed_login, reset_failed_logins,
+        )
+
+        if get_failed_login_count(ADMIN_LOCKOUT_KEY, ACCOUNT_LOCKOUT_WINDOW_SECONDS) >= ACCOUNT_LOCKOUT_THRESHOLD:
+            logger.warning(
+                "admin_login_locked_out",
+                extra={"domain": "security", "event": "admin_login_locked_out",
+                       "meta": {"ip": request.remote_addr}},
+            )
+            return render_template(
+                "login.html", admin_mode=True,
+                error="Troppi tentativi falliti. Riprova tra qualche minuto.",
+            )
+
         password = request.form.get("password")
         if password == Config.DASHBOARD_PASSWORD:
+            reset_failed_logins(ADMIN_LOCKOUT_KEY)
             session["admin_logged_in"] = True
             store.write_audit_log(
                 user_id="admin", actor="admin", action="admin_login",
@@ -767,6 +814,7 @@ def admin_login():
             return redirect(url_for("index"))
         else:
             error = "Password amministratore errata!"
+            track_failed_login(ADMIN_LOCKOUT_KEY, ACCOUNT_LOCKOUT_WINDOW_SECONDS)
             store.write_audit_log(
                 user_id="admin", actor="admin", action="admin_login",
                 metadata={"result": "failure"},

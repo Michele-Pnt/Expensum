@@ -720,6 +720,179 @@ def test_login_breach_detection_after_repeated_failures(client):
         assert log is not None
 
 
+def test_login_lockout_persists_across_different_ips(client):
+    """OWASP A07: il lockout per-account non deve essere bypassabile ruotando IP.
+
+    Il rate limit di flask_limiter su /login è per-IP (5/min): un attaccante
+    che ruota IP ad ogni tentativo lo bypassa banalmente. Il lockout per-email
+    (ACCOUNT_LOCKOUT_THRESHOLD in app.py) deve invece contare i fallimenti
+    sull'account indipendentemente dall'IP di provenienza.
+    """
+    from src.dashboard.app import store
+    from src.rate_limiter import reset_failed_logins
+
+    _, email, password = _create_dashboard_user(
+        store, chat_id="chat_lockout", email="lockout@example.com"
+    )
+    reset_failed_logins(email)
+
+    csrf_token = client.get("/api/csrf-token").json["csrf_token"]
+
+    # 5 tentativi falliti, ognuno da un IP diverso: nessuno tocca il limite
+    # per-IP di flask_limiter, ma il lockout per-account deve comunque scattare.
+    for i in range(5):
+        response = client.post(
+            "/login",
+            data={"email": email, "password": "wrong"},
+            headers={"X-CSRFToken": csrf_token},
+            environ_overrides={"REMOTE_ADDR": f"10.0.0.{i}"},
+        )
+        assert response.status_code == 200
+
+    # Sesto tentativo, da un IP mai visto prima, con la password CORRETTA:
+    # deve comunque fallire per via del lockout sull'account.
+    response = client.post(
+        "/login",
+        data={"email": email, "password": password},
+        headers={"X-CSRFToken": csrf_token},
+        environ_overrides={"REMOTE_ADDR": "10.0.0.99"},
+    )
+    assert response.status_code == 200
+    assert b"Troppi tentativi falliti" in response.data
+
+    with client.session_transaction() as sess:
+        assert "user_logged_in" not in sess
+
+
+def test_admin_login_locks_out_after_threshold_failures(client):
+    """OWASP A07: /admin/login usa una password singola condivisa senza lockout
+    dedicato prima di questo fix — un attaccante poteva tentare brute force
+    illimitato oltre il rate limit generico. Verifica che dopo 5 fallimenti
+    anche la password corretta venga rifiutata.
+    """
+    from config import Config
+    from src.rate_limiter import reset_failed_logins
+    from src.dashboard.app import ADMIN_LOCKOUT_KEY
+
+    reset_failed_logins(ADMIN_LOCKOUT_KEY)
+    csrf_token = client.get("/api/csrf-token").json["csrf_token"]
+
+    with patch.object(Config, "DASHBOARD_PASSWORD", "correct-admin-password"):
+        for _ in range(5):
+            client.post(
+                "/admin/login", data={"password": "wrong"},
+                headers={"X-CSRFToken": csrf_token},
+            )
+
+        response = client.post(
+            "/admin/login", data={"password": "correct-admin-password"},
+            headers={"X-CSRFToken": csrf_token},
+        )
+
+    assert response.status_code == 200
+    assert b"Troppi tentativi falliti" in response.data
+    with client.session_transaction() as sess:
+        assert "admin_logged_in" not in sess
+
+
+def test_admin_login_lockout_persists_across_different_ips(client):
+    """Come test_login_lockout_persists_across_different_ips ma per /admin/login:
+    il lockout non deve essere per-IP (bypassabile ruotando IP), ma sull'unico
+    account admin.
+    """
+    from config import Config
+    from src.rate_limiter import reset_failed_logins
+    from src.dashboard.app import ADMIN_LOCKOUT_KEY
+
+    reset_failed_logins(ADMIN_LOCKOUT_KEY)
+    csrf_token = client.get("/api/csrf-token").json["csrf_token"]
+
+    with patch.object(Config, "DASHBOARD_PASSWORD", "correct-admin-password"):
+        for i in range(5):
+            response = client.post(
+                "/admin/login",
+                data={"password": "wrong"},
+                headers={"X-CSRFToken": csrf_token},
+                environ_overrides={"REMOTE_ADDR": f"10.0.1.{i}"},
+            )
+            assert response.status_code == 200
+
+        response = client.post(
+            "/admin/login",
+            data={"password": "correct-admin-password"},
+            headers={"X-CSRFToken": csrf_token},
+            environ_overrides={"REMOTE_ADDR": "10.0.1.99"},
+        )
+
+    assert response.status_code == 200
+    assert b"Troppi tentativi falliti" in response.data
+    with client.session_transaction() as sess:
+        assert "admin_logged_in" not in sess
+
+
+def test_safe_next_url_rejects_external_and_protocol_relative_urls():
+    """OWASP A10: _safe_next_url e' l'unico punto della dashboard dove un valore
+    quasi-URL arriva da querystring/form. Deve accettare solo path relativi
+    interni, mai host esterni (open redirect, imparentato con SSRF).
+    """
+    from src.dashboard.app import _safe_next_url
+
+    assert _safe_next_url("/reports") == "/reports"
+    assert _safe_next_url(None) is None
+    assert _safe_next_url("") is None
+    assert _safe_next_url("https://evil.com") is None
+    assert _safe_next_url("http://evil.com/phish") is None
+    assert _safe_next_url("//evil.com") is None
+    assert _safe_next_url("//evil.com/path") is None
+    assert _safe_next_url("javascript:alert(1)") is None
+
+
+def test_login_redirect_ignores_external_next_param(client):
+    """Full-stack: /login?next=<host esterno> non deve reindirizzare l'utente
+    autenticato fuori dal dominio, nonostante il redirect a valle di un login
+    riuscito."""
+    from src.dashboard.app import store
+
+    _, email, password = _create_dashboard_user(
+        store, chat_id="chat_next_ssrf", email="next-ssrf@example.com"
+    )
+    csrf_token = client.get("/api/csrf-token").json["csrf_token"]
+
+    response = client.post(
+        "/login?next=https://evil.com/steal",
+        data={"email": email, "password": password},
+        headers={"X-CSRFToken": csrf_token},
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 302
+    assert "evil.com" not in response.headers["Location"]
+
+
+def test_brevo_contact_request_target_is_fixed_host_regardless_of_payload():
+    """OWASP A10: l'unica chiamata outbound che incorpora dati esterni (il lead
+    Tally) deve sempre puntare all'host Brevo fisso, mai a un host derivato
+    dal payload attaccante-controllato (es. un'email che assomiglia a un URL
+    interno/gopher usata per tentare SSRF verso rete interna)."""
+    from src import brevo_client
+
+    malicious_emails = [
+        "attacker@evil.com#@internal-service:8080/",
+        "http://169.254.169.254/latest/meta-data/@example.com",
+        "gopher://127.0.0.1:6379/_INFO@example.com",
+    ]
+
+    with patch("src.brevo_client.requests.post") as mock_post:
+        mock_post.return_value = MagicMock(status_code=201)
+        with patch.object(brevo_client.Config, "BREVO_API_KEY", "test-key"):
+            for email in malicious_emails:
+                brevo_client.upsert_contact(email, list_ids=[1])
+
+    assert mock_post.call_count == len(malicious_emails)
+    for call in mock_post.call_args_list:
+        assert call.args[0] == "https://api.brevo.com/v3/contacts"
+
+
 def test_session_authenticated_api_requires_csrf_token(app, client):
     """Verifica che le rotte /api/* autenticate via cookie di sessione siano protette da CSRF.
 
@@ -822,3 +995,77 @@ def test_telegram_link_returns_500_without_bot_username(client):
         response = client.post("/api/telegram/link", headers={"X-CSRFToken": csrf_token})
 
     assert response.status_code == 500
+
+
+def test_idor_account_and_expense_scoped_by_user(client):
+    """OWASP A01: un utente autenticato non deve poter leggere/modificare/cancellare
+    risorse (conti, spese) di un altro utente tramite /api/space/*, anche
+    conoscendone l'id — lo scoping deve avvenire lato server, non fidarsi del client.
+    """
+    from datetime import date
+    from src.dashboard.app import store
+    from src.storage.postgres_storage import PostgresStorage
+
+    store.add_user(chat_id="chat_user_a", username="user-a", storage_backend="postgres")
+    store.add_user(chat_id="chat_user_b", username="user-b", storage_backend="postgres")
+
+    # Seed diretto via storage layer: un conto e una spesa di proprietà di B.
+    with store.Session() as s:
+        pg_b = PostgresStorage(session=s, user_id="chat_user_b")
+        account_b = pg_b.create_account("Conto di B", initial_balance=100.0)
+        expense_b = pg_b.create_expense(
+            expense_date=date(2026, 1, 1), amount=42.0, name="Spesa di B",
+            category_name="", account_id=account_b["id"],
+        )
+
+    csrf_token = client.get("/api/csrf-token").json["csrf_token"]
+
+    # A si autentica (sessione browser)
+    with client.session_transaction() as sess:
+        sess["user_logged_in"] = True
+        sess["chat_id"] = "chat_user_a"
+
+    # A prova a modificare/cancellare il conto di B
+    resp = client.put(
+        f"/api/space/accounts/{account_b['id']}",
+        json={"name": "Hacked"},
+        headers={"X-CSRFToken": csrf_token},
+    )
+    assert resp.status_code == 404
+    resp = client.delete(
+        f"/api/space/accounts/{account_b['id']}",
+        headers={"X-CSRFToken": csrf_token},
+    )
+    assert resp.status_code == 404
+
+    # A prova a modificare/cancellare la spesa di B
+    resp = client.put(
+        f"/api/space/expenses/{expense_b['id']}",
+        json={"name": "Hacked expense"},
+        headers={"X-CSRFToken": csrf_token},
+    )
+    assert resp.status_code == 404
+    resp = client.delete(
+        f"/api/space/expenses/{expense_b['id']}",
+        headers={"X-CSRFToken": csrf_token},
+    )
+    assert resp.status_code == 404
+
+    # A elenca i propri conti: quello di B non deve comparire
+    resp = client.get("/api/space/accounts")
+    assert resp.status_code == 200
+    assert account_b["id"] not in [a["id"] for a in resp.json["accounts"]]
+
+    # Il conto e la spesa di B devono restare intatti nonostante i tentativi
+    from src.storage.models import Expense as ExpenseModel
+
+    with store.Session() as s:
+        pg_b = PostgresStorage(session=s, user_id="chat_user_b")
+        accounts_b = pg_b.fetch_accounts()
+        assert any(
+            a["id"] == account_b["id"] and a["name"] == "Conto di B" for a in accounts_b
+        )
+        expense_row = s.query(ExpenseModel).filter_by(id=expense_b["id"]).first()
+        assert expense_row is not None
+        assert expense_row.name == "Spesa di B"
+        assert expense_row.user_id == "chat_user_b"
