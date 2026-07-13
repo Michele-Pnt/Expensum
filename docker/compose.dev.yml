@@ -1,0 +1,38 @@
+# Ambiente di sviluppo locale 1:1 con la produzione (Netcup VPS).
+#
+# Riproduce fedelmente l'assetto runtime di produzione:
+#   - PostgreSQL 17 (stessa major version del VPS)
+#   - ruolo `expensum`      → OWNER dello schema, gira le migration Alembic (bypassa RLS)
+#   - ruolo `expensum_app`  → runtime dell'app, DML-only, NON owner → soggetto a Row-Level Security
+#
+# In produzione `expensum` è owner (non superuser); qui l'immagine lo crea superuser.
+# La differenza è irrilevante per i test di sicurezza: la RLS si valida sul ruolo
+# `expensum_app`, che è identico a quello di produzione. Vedi development documentation.
+#
+# Uso rapido:  ./scripts/dev_db.sh up
+name: expensum-dev
+
+services:
+  postgres:
+    image: postgres:17
+    container_name: expensum-postgres-dev
+    environment:
+      POSTGRES_USER: expensum
+      POSTGRES_PASSWORD: devpassword
+      POSTGRES_DB: expensum
+    ports:
+      # 5433 sull'host per non collidere con un eventuale PostgreSQL di sistema (5432).
+      - "5433:5432"
+    volumes:
+      - expensum_pgdata:/var/lib/postgresql/data
+      # Gli script in initdb girano SOLO al primo boot (volume vuoto). Per rieseguirli
+      # dopo una modifica: ./scripts/dev_db.sh reset  (cancella il volume e reinizializza).
+      - ./postgres/initdb:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U expensum -d expensum"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  expensum_pgdata:

@@ -10,6 +10,16 @@ def _create_dashboard_user(store, chat_id="chat_123", email="test@example.com", 
     return chat_id, email, password
 
 
+def _csrf_token(client):
+    """Recupera un token CSRF valido per la sessione corrente del test client.
+
+    enforce_csrf_on_forms() chiama csrf.protect() manualmente, che valida il
+    token a prescindere da WTF_CSRF_ENABLED: i test che fanno POST devono quindi
+    allegare un token reale come i form/API in produzione.
+    """
+    return client.get("/api/csrf-token").json["csrf_token"]
+
+
 def test_web_login_success_redirects_to_setup(client):
     from src.dashboard.app import store
 
@@ -59,6 +69,149 @@ def test_web_login_invalid_credentials_shows_error(client):
 
     assert response.status_code == 200
     assert b"Email o password errati." in response.data
+
+
+def test_web_login_notion_user_denied_web_access(client):
+    """Un utente con backend Notion non può accedere alla web app dal browser."""
+    from src.dashboard.app import store
+
+    chat_id = "chat_notion_login"
+    store.add_user(chat_id=chat_id, username="notion-user", storage_backend="notion")
+    store.set_credentials(chat_id, "notion-login@example.com", "Password123")
+
+    response = client.post(
+        "/login",
+        data={"email": "notion-login@example.com", "password": "Password123"},
+        follow_redirects=False,
+    )
+
+    # Credenziali corrette ma nessuna sessione creata: resta sulla pagina di login.
+    assert response.status_code == 200
+    assert "collegato a Notion".encode() in response.data
+    with client.session_transaction() as sess:
+        assert not sess.get("user_logged_in")
+
+
+def test_web_login_remember_me_creates_persistent_session(client):
+    """Con "ricordami" la sessione è permanente e porta la token_version."""
+    from src.dashboard.app import store
+
+    _, email, password = _create_dashboard_user(store, chat_id="chat_remember", email="remember@example.com")
+
+    response = client.post(
+        "/login",
+        data={"email": email, "password": password, "remember": "1", "csrf_token": _csrf_token(client)},
+        follow_redirects=False,
+    )
+    assert response.status_code == 302
+    with client.session_transaction() as sess:
+        assert sess.get("user_logged_in") is True
+        assert sess.permanent is True
+        assert sess.get("token_version") == 0
+
+
+def test_web_login_without_remember_is_browser_session(client):
+    """Senza "ricordami" la sessione non è permanente (muore alla chiusura del browser)."""
+    from src.dashboard.app import store
+
+    _, email, password = _create_dashboard_user(store, chat_id="chat_noremember", email="noremember@example.com")
+
+    response = client.post(
+        "/login",
+        data={"email": email, "password": password, "csrf_token": _csrf_token(client)},
+        follow_redirects=False,
+    )
+    assert response.status_code == 302
+    with client.session_transaction() as sess:
+        assert sess.get("user_logged_in") is True
+        assert sess.permanent is False
+
+
+def test_stale_token_version_invalidates_session(client):
+    """Bumpando la token_version lato server, la sessione esistente viene revocata."""
+    from src.dashboard.app import store
+
+    chat_id, email, password = _create_dashboard_user(
+        store, chat_id="chat_revoke", email="revoke@example.com"
+    )
+    store.mark_setup_completed(chat_id)
+
+    client.post(
+        "/login",
+        data={"email": email, "password": password, "remember": "1", "csrf_token": _csrf_token(client)},
+        follow_redirects=False,
+    )
+    # La sessione è valida: /app instrada l'utente autenticato (non verso /login).
+    assert not client.get("/app", follow_redirects=False).headers["Location"].endswith("/login")
+
+    # Revoca globale delle sessioni.
+    store.bump_token_version(chat_id)
+
+    response = client.get("/app", follow_redirects=False)
+    assert response.status_code == 302
+    assert response.headers["Location"].endswith("/login")
+    with client.session_transaction() as sess:
+        assert not sess.get("user_logged_in")
+
+
+def test_logout_all_devices_bumps_token_version_and_clears_session(client):
+    from src.dashboard.app import store
+
+    chat_id, email, password = _create_dashboard_user(
+        store, chat_id="chat_logoutall", email="logoutall@example.com"
+    )
+    store.mark_setup_completed(chat_id)
+    client.post(
+        "/login",
+        data={"email": email, "password": password, "remember": "1", "csrf_token": _csrf_token(client)},
+        follow_redirects=False,
+    )
+
+    response = client.post(
+        "/api/settings/logout-all-devices",
+        headers={"X-CSRFToken": _csrf_token(client)},
+    )
+    assert response.status_code == 200
+    assert response.json["ok"] is True
+    assert store.get_token_version(chat_id) == 1
+    with client.session_transaction() as sess:
+        assert not sess.get("user_logged_in")
+
+
+def test_web_app_entry_notion_session_cleared_and_redirected_to_login(client):
+    """Una sessione browser residua di un utente Notion viene invalidata su /app."""
+    from src.dashboard.app import store
+
+    chat_id = "chat_notion_entry"
+    store.add_user(chat_id=chat_id, username="notion-user", storage_backend="notion")
+    store.mark_setup_completed(chat_id)
+    with client.session_transaction() as sess:
+        sess["user_logged_in"] = True
+        sess["chat_id"] = chat_id
+
+    response = client.get("/app", follow_redirects=False)
+
+    assert response.status_code == 302
+    assert response.headers["Location"].endswith("/login")
+    with client.session_transaction() as sess:
+        assert not sess.get("user_logged_in")
+
+
+def test_api_auth_session_denies_notion_browser_session(client):
+    """L'API di sessione considera non autorizzato un utente Notion."""
+    from src.dashboard.app import store
+
+    chat_id = "chat_notion_apisession"
+    store.add_user(chat_id=chat_id, username="notion-user", storage_backend="notion")
+    store.mark_setup_completed(chat_id)
+    with client.session_transaction() as sess:
+        sess["user_logged_in"] = True
+        sess["chat_id"] = chat_id
+
+    response = client.get("/api/auth/session")
+
+    assert response.status_code == 401
+    assert response.json["authorized"] is False
 
 
 def test_web_login_session_guard_uses_user_logged_in(client):
@@ -325,6 +478,9 @@ def _login_completed(client, store, chat_id, email, storage_backend="postgres"):
     with client.session_transaction() as sess:
         sess["user_logged_in"] = True
         sess["chat_id"] = chat_id
+        # La sessione deve portare la token_version corrente, altrimenti
+        # _get_session_chat_id la considera revocata (vedi meccanismo "ricordami").
+        sess["token_version"] = store.get_token_version(chat_id)
 
 
 def test_privacy_export_json_requires_auth(client):
@@ -368,7 +524,12 @@ def test_privacy_export_json_excludes_secrets_and_includes_financial_data(client
         assert log is not None
 
 
-def test_privacy_export_json_notion_backend_does_not_call_notion_api(client):
+def test_privacy_export_json_notion_backend_denied_web_access(client):
+    """Gli account Notion non hanno accesso alla web app: l'endpoint risponde 401.
+
+    L'export GDPR (Art. 15/20) per gli utenti Notion avviene via bot Telegram
+    (comando /export), non dalla web app riservata al backend PostgreSQL.
+    """
     from src.dashboard.app import store
 
     chat_id, email = "chat_privacy_json_notion", "privacy-json-notion@example.com"
@@ -376,8 +537,7 @@ def test_privacy_export_json_notion_backend_does_not_call_notion_api(client):
 
     response = client.get("/api/privacy/export-json")
 
-    assert response.status_code == 200
-    assert "note" in response.json["financial_data"]
+    assert response.status_code == 401
 
 
 def test_privacy_export_csv_requires_auth(client):
@@ -413,7 +573,8 @@ def test_privacy_export_csv_returns_csv_for_postgres_user(client):
     assert "monthly_balance" not in csv_text.lower()
 
 
-def test_privacy_export_csv_notion_backend_returns_404(client):
+def test_privacy_export_csv_notion_backend_denied_web_access(client):
+    """Gli account Notion non hanno accesso alla web app: l'endpoint risponde 401."""
     from src.dashboard.app import store
 
     chat_id, email = "chat_privacy_csv_notion", "privacy-csv-notion@example.com"
@@ -421,7 +582,7 @@ def test_privacy_export_csv_notion_backend_returns_404(client):
 
     response = client.get("/api/privacy/export-csv")
 
-    assert response.status_code == 404
+    assert response.status_code == 401
 
 
 def test_privacy_delete_account_writes_audit_log_before_deletion(client):

@@ -48,6 +48,41 @@ def test_increment_usage(mock_db_session):
     from sqlalchemy import inspect
     assert not inspect(store.engine).has_table("daily_usage")
 
+def test_new_user_has_zero_token_version(mock_db_session):
+    store = mock_db_session
+    store.add_user(chat_id="tv_user")
+    assert store.get_token_version("tv_user") == 0
+
+
+def test_get_token_version_missing_user_returns_none(mock_db_session):
+    store = mock_db_session
+    assert store.get_token_version("does_not_exist") is None
+
+
+def test_bump_token_version_increments_and_returns_new_value(mock_db_session):
+    store = mock_db_session
+    store.add_user(chat_id="tv_bump")
+    assert store.bump_token_version("tv_bump") == 1
+    assert store.bump_token_version("tv_bump") == 2
+    assert store.get_token_version("tv_bump") == 2
+
+
+def test_bump_token_version_missing_user_returns_none(mock_db_session):
+    store = mock_db_session
+    assert store.bump_token_version("nope") is None
+
+
+def test_update_password_bumps_token_version(mock_db_session):
+    """Cambiare password deve invalidare tutte le sessioni (bump della versione)."""
+    store = mock_db_session
+    store.add_user(chat_id="tv_pwd")
+    store.set_credentials("tv_pwd", "tv-pwd@example.com", "OldPassword1")
+    assert store.get_token_version("tv_pwd") == 0
+
+    assert store.update_password("tv_pwd", "NewPassword1") is True
+    assert store.get_token_version("tv_pwd") == 1
+
+
 def test_save_feedback(mock_db_session):
     store = mock_db_session
     chat_id = "12345"

@@ -60,6 +60,7 @@ from src.rate_limiter import is_rate_limited
 from src.user_store import UserStore, User
 from src.ocr_client import OcrClient, OCRError
 from src.category_sync import refresh_category_averages
+from src.budget_alert import check_expense_budget_alert
 from src.dashboard_message import build_dashboard_text
 from src.llm_usage_tracker import build_request_key, estimate_reserved_tokens, normalize_usage_metadata
 from src.report_builder import WeeklyPlanBuilder, WeeklyPlanData, MonthlyPlanBuilder, MonthlyPlanData
@@ -1825,9 +1826,19 @@ async def _save_to_notion(query, context, chat_id: str, account_id: str | None =
                 account_id=account_id
             )
             date_str = date.strftime("%d/%m/%Y")
-            await query.edit_message_text(
+            saved_msg = (
                 f"✅ *Spesa salvata!*\n\n"
-                f"📅 {date_str} — *€{data['amount']:.2f}* — {data['name']}",
+                f"📅 {date_str} — *€{data['amount']:.2f}* — {data['name']}"
+            )
+            # Alert budget categoria in tempo reale (soglie 80/100/120%).
+            try:
+                alert = check_expense_budget_alert(storage, data.get("category"), date)
+                if alert:
+                    saved_msg += f"\n\n{alert}"
+            except Exception as _ae:
+                logger.warning("[User %s] Calcolo alert budget fallito: %s", chat_id, _ae)
+            await query.edit_message_text(
+                saved_msg,
                 parse_mode=ParseMode.MARKDOWN,
             )
             logger.info(f"Spesa salvata: {data['name']} €{data['amount']:.2f}")
@@ -2039,13 +2050,59 @@ async def handle_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> No
 # Entry point
 # ---------------------------------------------------------------------------
 
-def _nightly_category_sync() -> None:
+def _notify_category_reassignments(
+    app: Application,
+    loop: asyncio.AbstractEventLoop,
+    notifications: list,
+) -> None:
+    """Notifica agli utenti le categorie rimosse da Notion con record spostati su «Altro».
+
+    `notifications` è una lista di (chat_id, ReconcileReport). Best-effort: un errore
+    su un singolo invio non blocca gli altri.
+    """
+    async def _send():
+        bot = app.bot
+        for chat_id, report in notifications:
+            try:
+                lines = ["ℹ️ Ho allineato le categorie al tuo Notion."]
+                for r in report.reassignments:
+                    parti = []
+                    if r.moved_expenses:
+                        parti.append(f"{r.moved_expenses} spese")
+                    if r.moved_subscriptions:
+                        parti.append(f"{r.moved_subscriptions} abbonamenti")
+                    dettaglio = " e ".join(parti) if parti else "i record collegati"
+                    lines.append(
+                        f"• «{r.category_name}» è stata rimossa: {dettaglio} "
+                        f"spostati su «Altro»."
+                    )
+                await bot.send_message(chat_id=int(chat_id), text="\n".join(lines))
+                await asyncio.sleep(0.3)
+            except Exception as e:
+                logger.error("[NightlySync] Notifica riassegnazioni fallita per %s: %s", chat_id, e)
+
+    future = asyncio.run_coroutine_threadsafe(_send(), loop)
+    try:
+        future.result(timeout=120)
+    except Exception as e:
+        logger.error("[NightlySync] Errore invio notifiche riassegnazioni: %s", e)
+
+
+def _nightly_category_sync(app: Application, loop: asyncio.AbstractEventLoop) -> None:
     """Job APScheduler alle 03:00 — aggiorna medie categorie per tutti gli utenti attivi.
 
     Sequenziale con 200ms di sleep tra utenti per non saturare CPU/rete su Hetzner CX23.
     Ogni utente Notion usa il proprio OAuth token → bucket rate limit separato.
+
+    Per gli utenti Notion la sync è anche riconciliante: rimuove dalla cache le
+    categorie non più presenti su Notion. Se categorie con spese/abbonamenti
+    dipendenti vengono rimosse, i record sono spostati su «Altro» e l'utente viene
+    notificato.
     """
     logger.info("[NightlySync] Avvio sincronizzazione notturna categorie.")
+
+    # (chat_id, ReconcileReport) da notificare a fine giro Notion.
+    pending_notifications: list = []
 
     # --- Utenti Notion ---
     try:
@@ -2053,21 +2110,23 @@ def _nightly_category_sync() -> None:
         logger.info("[NightlySync] Utenti Notion: %d", len(notion_users))
         for user in notion_users:
             try:
-                db_schemas_raw = _user_store.get_database_schemas(user.chat_id)
-                schemas = {}
-                for data in db_schemas_raw.values():
-                    # get_database_schemas ritorna {db_key: {database_id, properties, mapped}}
-                    pass
                 notion_client = NotionFinanceClient(
                     api_key=user.notion_access_token,
                     categories_db_id=user.categories_db_id,
                 )
-                refresh_category_averages(user.chat_id, _user_store, notion_client=notion_client)
+                report = refresh_category_averages(
+                    user.chat_id, _user_store, notion_client=notion_client
+                )
+                if report is not None and report.has_reassignments:
+                    pending_notifications.append((user.chat_id, report))
             except Exception as e:
                 logger.error("[NightlySync] Errore Notion per %s: %s", user.chat_id, e)
             time.sleep(0.2)
     except Exception as e:
         logger.error("[NightlySync] Errore fetch utenti Notion: %s", e)
+
+    if pending_notifications:
+        _notify_category_reassignments(app, loop, pending_notifications)
 
     # --- Utenti Postgres ---
     try:
@@ -2524,7 +2583,7 @@ async def _start_scheduler(app: Application) -> None:
     """Hook post_init PTB: cattura il loop PTB e avvia APScheduler con il loop corretto."""
     loop = asyncio.get_running_loop()
     scheduler = BackgroundScheduler(daemon=True)
-    scheduler.add_job(_nightly_category_sync, 'cron', hour=3, minute=0)
+    scheduler.add_job(_nightly_category_sync, 'cron', hour=3, minute=0, args=[app, loop])
     scheduler.add_job(_nightly_subscription_job, 'cron', hour=3, minute=5, args=[app, loop])
     scheduler.add_job(_nightly_retention_cleanup, 'cron', hour=3, minute=10)
     scheduler.add_job(_trial_expiry_job, 'cron', hour=4, minute=0, args=[app, loop])

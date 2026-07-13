@@ -8,6 +8,8 @@ import hashlib
 import logging
 import os
 import uuid
+from contextlib import contextmanager
+from dataclasses import dataclass, field
 from datetime import datetime, date, timedelta
 import secrets
 import string
@@ -42,6 +44,48 @@ def _get_fernet() -> Fernet:
     secret = os.environ.get("FLASK_SECRET_KEY", "")
     key = base64.urlsafe_b64encode(hashlib.sha256(secret.encode()).digest())
     return Fernet(key)
+
+
+# ---------------------------------------------------------------------------
+# Report di riconciliazione categorie (cache Postgres ↔ Notion)
+# ---------------------------------------------------------------------------
+
+# Nome della categoria di fallback su cui riassegnare spese/abbonamenti quando
+# una categoria con record dipendenti viene rimossa da Notion.
+FALLBACK_CATEGORY_NAME = "Altro"
+
+
+@dataclass
+class CategoryReassignment:
+    """Record di una riassegnazione forzata a `Altro` durante la riconciliazione."""
+
+    category_name: str
+    moved_expenses: int
+    moved_subscriptions: int
+
+
+@dataclass
+class ReconcileReport:
+    """Esito di `reconcile_user_categories`.
+
+    `deleted_categories` elenca i nomi rimossi dalla cache; `reassignments` elenca
+    le categorie che avevano record dipendenti spostati su `Altro` prima della
+    cancellazione (il chiamante usa questo per notificare l'utente).
+    """
+
+    deleted_categories: list[str] = field(default_factory=list)
+    reassignments: list["CategoryReassignment"] = field(default_factory=list)
+    # Numero di categorie scaricate/aggiornate da Notion nell'upsert che precede
+    # la riconciliazione (retro-compatibile col vecchio valore di ritorno int).
+    synced_count: int = 0
+
+    @property
+    def has_reassignments(self) -> bool:
+        return bool(self.reassignments)
+
+    @property
+    def changed(self) -> bool:
+        return bool(self.deleted_categories or self.reassignments)
 
 
 # ---------------------------------------------------------------------------
@@ -162,6 +206,12 @@ class User(Base):
     # Autenticazione email+password
     email = Column(String, nullable=True, unique=True)
     password_hash = Column(String, nullable=True)
+
+    # Versione della sessione: incrementata per invalidare tutte le sessioni
+    # attive dell'utente (cambio password, "esci da tutti i dispositivi"). Il
+    # valore viene salvato nel cookie di sessione al login e confrontato ad ogni
+    # richiesta: se non combacia più, la sessione è considerata revocata.
+    token_version = Column(Integer, default=0, nullable=False)
 
     # Backend di storage
     storage_backend = Column(String, default="notion", nullable=False)
@@ -448,11 +498,66 @@ class UserStore:
         self.engine = create_engine(db_url, **engine_kwargs)
         # sessionmaker crea le "sessioni" di lavoro (come aprire una transazione)
         self.Session = sessionmaker(bind=self.engine, expire_on_commit=False)
-        # Questa riga crea fisicamente le tabelle se non esistono ancora
-        Base.metadata.create_all(self.engine)
-        self._ensure_sqlite_schema()
+
+        # DDL a runtime (create_all + migrazioni colonne) — gestione dei privilegi:
+        # su SQLite (dev/test) gira sempre, non c'è separazione di ruoli né Alembic.
+        # Su Postgres gira SOLO se RUN_RUNTIME_MIGRATIONS=true: in produzione il
+        # runtime usa un ruolo DML-only senza privilegi DDL, e lo schema lo gestisce
+        # esclusivamente Alembic. Vedi deployment documentation e development documentation.
+        is_sqlite = self.engine.dialect.name == "sqlite"
+        run_runtime_ddl = is_sqlite or os.getenv("RUN_RUNTIME_MIGRATIONS", "false").lower() == "true"
+        if run_runtime_ddl:
+            # Questa riga crea fisicamente le tabelle se non esistono ancora
+            Base.metadata.create_all(self.engine)
+            self._ensure_sqlite_schema()
+        else:
+            logger.info("DDL a runtime disattivato (RUN_RUNTIME_MIGRATIONS=false): schema gestito da Alembic.")
         self._seed_default_pricing()
+        # Engine OWNER (bypassa RLS) costruito on-demand: usato SOLO per le rare
+        # operazioni cross-tenant che la RLS non può soddisfare (vedi _owner_session).
+        self._owner_engine = None
+        self._owner_Session = None
         logger.info(f"UserStore inizializzato correttamente.")
+
+    @contextmanager
+    def _user_session(self, user_id: str):
+        """Sessione bindata al tenant `user_id`: imposta app.user_id per la RLS.
+
+        Va usata da tutti i metodi che toccano le tabelle finanziarie (Option A:
+        la RLS vincola anche il layer UserStore). No-op su SQLite. Fail-closed: se
+        un metodo dimentica di usarla, sotto RLS non vede righe invece di leggere
+        quelle di altri utenti.
+        """
+        from src.storage import rls
+        session = self.Session()
+        rls.bind_user(session, user_id)
+        try:
+            yield session
+        finally:
+            session.close()
+
+    @contextmanager
+    def _owner_session(self):
+        """Sessione col ruolo OWNER che BYPASSA la RLS. Superficie deliberatamente
+        minima: usarla SOLO per operazioni cross-tenant impossibili sotto RLS
+        (es. reassign_user_chat_id, old→new user_id). Mai per flussi per-utente.
+
+        In prod usa MIGRATION_DATABASE_URL (ruolo owner); in dev/sqlite ricade
+        sull'engine applicativo (stesso ruolo, nessuna separazione).
+        """
+        if self._owner_Session is None:
+            owner_url = os.getenv("MIGRATION_DATABASE_URL", "")
+            if owner_url and self.engine.dialect.name != "sqlite":
+                self._owner_engine = create_engine(owner_url)
+                self._owner_Session = sessionmaker(bind=self._owner_engine, expire_on_commit=False)
+            else:
+                # Nessun ruolo owner separato (dev/sqlite): riusa l'engine applicativo.
+                self._owner_Session = self.Session
+        session = self._owner_Session()
+        try:
+            yield session
+        finally:
+            session.close()
 
     def _next_cycle_reset(self, now: datetime) -> datetime:
         next_month = now.month % 12 + 1
@@ -533,6 +638,7 @@ class UserStore:
             "setup_completed_at": "DATETIME",
             "email": "TEXT",
             "password_hash": "TEXT",
+            "token_version": "INTEGER DEFAULT 0",
             "pinned_dashboard_msg_id": "INTEGER",
         }
 
@@ -867,7 +973,13 @@ class UserStore:
             return True
 
     def update_password(self, chat_id: str, new_password: str) -> bool:
-        """Aggiorna solo l'hash della password di un utente già registrato. Ritorna False se l'utente non esiste."""
+        """Aggiorna l'hash della password di un utente già registrato.
+
+        Incrementa anche `token_version` per invalidare tutte le sessioni esistenti:
+        un cambio password deve sloggare ovunque (standard di sicurezza). Il device
+        che effettua il cambio dovrà riallineare la propria sessione al nuovo valore.
+        Ritorna False se l'utente non esiste.
+        """
         chat_id = str(chat_id)
         hashed = hash_password(new_password)
         with self.Session() as session:
@@ -875,8 +987,38 @@ class UserStore:
             if not user:
                 return False
             user.password_hash = hashed
+            user.token_version = (user.token_version or 0) + 1
             session.commit()
             return True
+
+    def get_token_version(self, chat_id: str) -> int | None:
+        """Ritorna la `token_version` corrente dell'utente, o None se non esiste."""
+        chat_id = str(chat_id)
+        with self.Session() as session:
+            row = (
+                session.query(User.token_version)
+                .filter(User.chat_id == chat_id)
+                .first()
+            )
+            if row is None:
+                return None
+            return row[0] or 0
+
+    def bump_token_version(self, chat_id: str) -> int | None:
+        """Incrementa `token_version` per revocare tutte le sessioni dell'utente.
+
+        Usato da "esci da tutti i dispositivi". Ritorna il nuovo valore, o None
+        se l'utente non esiste.
+        """
+        chat_id = str(chat_id)
+        with self.Session() as session:
+            user = session.query(User).filter(User.chat_id == chat_id).first()
+            if not user:
+                return None
+            user.token_version = (user.token_version or 0) + 1
+            new_version = user.token_version
+            session.commit()
+            return new_version
 
     def get_user_by_email(self, email: str) -> User | None:
         """Cerca un utente attivo per email (case-insensitive)."""
@@ -961,7 +1103,10 @@ class UserStore:
         if old_chat_id == new_chat_id:
             return False
 
-        with self.Session() as session:
+        # BYPASS RLS CHIRURGICO: operazione cross-tenant (sposta righe da old→new
+        # user_id) impossibile sotto RLS con WITH CHECK. Unico uso di _owner_session
+        # nei flussi per-utente; query rigorosamente parametrizzate. Vedi Option A.
+        with self._owner_session() as session:
             user = session.query(User).filter(User.chat_id == old_chat_id).first()
             if not user:
                 return False
@@ -1207,13 +1352,34 @@ class UserStore:
         from src.storage.models import UserCategory, UserCategoryNotionLink
         user_id = str(user_id)
         now = datetime.utcnow()
-        with self.Session() as session:
+        with self._user_session(user_id) as session:
             for cat in categories:
-                # Upsert user_categories (solo dati base 3NF)
-                cat_row = session.query(UserCategory).filter_by(
-                    user_id=user_id, name=cat["name"]
-                ).first()
-                if not cat_row:
+                notion_page_id = cat.get("notion_page_id")
+                cat_row = None
+
+                # 1. Match per notion_page_id: gestisce i rinomini (il page_id è
+                #    stabile, il nome cambia) senza creare duplicati.
+                if notion_page_id:
+                    link = (
+                        session.query(UserCategoryNotionLink)
+                        .join(UserCategory, UserCategory.id == UserCategoryNotionLink.category_id)
+                        .filter(
+                            UserCategory.user_id == user_id,
+                            UserCategoryNotionLink.notion_page_id == notion_page_id,
+                        )
+                        .first()
+                    )
+                    if link:
+                        cat_row = session.get(UserCategory, link.category_id)
+
+                # 2. Fallback: match per nome (righe legacy senza link).
+                if cat_row is None:
+                    cat_row = session.query(UserCategory).filter_by(
+                        user_id=user_id, name=cat["name"]
+                    ).first()
+
+                # 3. Crea se non esiste.
+                if cat_row is None:
                     cat_row = UserCategory(
                         user_id=user_id,
                         name=cat["name"],
@@ -1222,11 +1388,20 @@ class UserStore:
                     session.add(cat_row)
                     session.flush()  # ottieni l'id
                 else:
+                    # Rinomina: aggiorna il nome evitando la collisione col vincolo
+                    # unique (user_id, name). Se esiste già una riga col nuovo nome,
+                    # si fondono (i dipendenti passano alla riga corrente).
+                    if cat_row.name != cat["name"]:
+                        dup = session.query(UserCategory).filter_by(
+                            user_id=user_id, name=cat["name"]
+                        ).first()
+                        if dup is not None and dup.id != cat_row.id:
+                            self._merge_category_into(session, user_id, cat_row, dup)
+                        cat_row.name = cat["name"]
                     if cat.get("monthly_budget") is not None:
                         cat_row.monthly_budget = cat["monthly_budget"]
 
                 # Upsert user_category_notion_links se ci sono metadati Notion
-                notion_page_id = cat.get("notion_page_id")
                 if notion_page_id:
                     link = session.query(UserCategoryNotionLink).filter_by(
                         category_id=cat_row.id
@@ -1240,10 +1415,144 @@ class UserStore:
 
             session.commit()
 
+    @staticmethod
+    def _merge_category_into(session, user_id: str, keep, dup) -> None:
+        """Fonde la categoria `dup` in `keep`: sposta i record dipendenti e la elimina.
+
+        Serve quando un rinomina su Notion porta il nome a collidere con un'altra
+        riga esistente (caso limite). I metadati Notion di `keep` restano quelli
+        authoritative.
+        """
+        from src.storage.models import Expense, Subscription, UserCategoryNotionLink
+
+        session.query(Expense).filter_by(user_id=user_id, category_id=dup.id).update(
+            {"category_id": keep.id}, synchronize_session=False
+        )
+        session.query(Subscription).filter_by(user_id=user_id, category_id=dup.id).update(
+            {"category_id": keep.id}, synchronize_session=False
+        )
+        dup_link = session.query(UserCategoryNotionLink).filter_by(category_id=dup.id).first()
+        if dup_link is not None:
+            session.delete(dup_link)
+        session.delete(dup)
+        session.flush()
+        logger.warning(
+            "[Categories] Rinomina con collisione: fusa categoria duplicata id=%s in id=%s per %s.",
+            dup.id, keep.id, user_id,
+        )
+
+    def reconcile_user_categories(self, user_id: str, valid_page_ids: set) -> "ReconcileReport":
+        """Allinea `user_categories` allo stato corrente di Notion.
+
+        Cancella dalla cache le categorie il cui `notion_page_id` non è più tra i
+        `valid_page_ids` (cioè sono state rimosse/archiviate su Notion). Le categorie
+        con spese/abbonamenti dipendenti vengono prima riassegnate alla categoria di
+        fallback `Altro` (creata se assente), poi cancellate.
+
+        IMPORTANTE: il chiamante deve invocare questo metodo SOLO dopo un fetch Notion
+        andato a buon fine — altrimenti un errore transitorio azzererebbe la cache.
+
+        Ritorna un `ReconcileReport` con le cancellazioni e le riassegnazioni.
+        """
+        from src.storage.models import (
+            UserCategory,
+            UserCategoryNotionLink,
+            Expense,
+            Subscription,
+        )
+
+        user_id = str(user_id)
+        valid = set(valid_page_ids or [])
+        report = ReconcileReport()
+
+        with self._user_session(user_id) as session:
+            rows = (
+                session.query(UserCategory, UserCategoryNotionLink)
+                .join(
+                    UserCategoryNotionLink,
+                    UserCategoryNotionLink.category_id == UserCategory.id,
+                )
+                .filter(UserCategory.user_id == user_id)
+                .all()
+            )
+
+            fallback_row = None  # risolta pigramente solo se serve
+
+            for cat, link in rows:
+                # Solo le categorie mappate a Notion sono soggette a riconciliazione.
+                if link is None or link.notion_page_id is None:
+                    continue
+                if link.notion_page_id in valid:
+                    continue
+
+                cat_id = cat.id
+                cat_name = cat.name
+
+                expenses = session.query(Expense).filter_by(
+                    user_id=user_id, category_id=cat_id
+                ).all()
+                subs = session.query(Subscription).filter_by(
+                    user_id=user_id, category_id=cat_id
+                ).all()
+
+                if expenses or subs:
+                    # Non cancellare il fallback stesso: farebbe da rete di sicurezza
+                    # per i propri dipendenti. Lo si mantiene.
+                    if cat_name == FALLBACK_CATEGORY_NAME:
+                        logger.warning(
+                            "[Reconcile] '%s' con dipendenti è fuori da Notion ma è il "
+                            "fallback: mantenuta per %s.", cat_name, user_id,
+                        )
+                        continue
+
+                    if fallback_row is None:
+                        fallback_row = self._ensure_fallback_category(session, user_id)
+                    # Evita di riassegnare al fallback se coincide (paranoia).
+                    if fallback_row.id != cat_id:
+                        for e in expenses:
+                            e.category_id = fallback_row.id
+                        for sub in subs:
+                            sub.category_id = fallback_row.id
+                        report.reassignments.append(
+                            CategoryReassignment(
+                                category_name=cat_name,
+                                moved_expenses=len(expenses),
+                                moved_subscriptions=len(subs),
+                            )
+                        )
+                        session.flush()
+
+                session.delete(link)
+                session.delete(cat)
+                report.deleted_categories.append(cat_name)
+
+            if report.changed:
+                session.commit()
+                logger.info(
+                    "[Reconcile] %s: rimosse %d categorie fantasma, %d riassegnazioni.",
+                    user_id, len(report.deleted_categories), len(report.reassignments),
+                )
+
+        return report
+
+    @staticmethod
+    def _ensure_fallback_category(session, user_id: str):
+        """Ritorna la categoria di fallback `Altro` dell'utente, creandola se assente."""
+        from src.storage.models import UserCategory
+
+        row = session.query(UserCategory).filter_by(
+            user_id=user_id, name=FALLBACK_CATEGORY_NAME
+        ).first()
+        if row is None:
+            row = UserCategory(user_id=user_id, name=FALLBACK_CATEGORY_NAME)
+            session.add(row)
+            session.flush()
+        return row
+
     def get_user_category_names(self, user_id: str) -> list[str]:
         """Ritorna i nomi delle categorie dell'utente."""
         user_id = str(user_id)
-        with self.Session() as session:
+        with self._user_session(user_id) as session:
             rows = session.execute(
                 text("SELECT name FROM user_categories WHERE user_id = :uid ORDER BY name"),
                 {"uid": user_id},
@@ -1253,7 +1562,7 @@ class UserStore:
     def get_category_by_notion_page_id(self, user_id: str, page_id: str) -> dict:
         """Ritorna {name, average} per un page_id Notion. Fallback su Sconosciuta."""
         user_id = str(user_id)
-        with self.Session() as session:
+        with self._user_session(user_id) as session:
             row = session.execute(
                 text(
                     "SELECT uc.name, ucnl.average "
@@ -1270,7 +1579,7 @@ class UserStore:
     def get_notion_page_id_for_category(self, user_id: str, name: str) -> Optional[str]:
         """Ritorna il notion_page_id per un nome categoria. None se non trovato."""
         user_id = str(user_id)
-        with self.Session() as session:
+        with self._user_session(user_id) as session:
             row = session.execute(
                 text(
                     "SELECT ucnl.notion_page_id "
@@ -1299,7 +1608,7 @@ class UserStore:
     def update_category_average(self, user_id: str, category_name: str, new_average: float) -> None:
         """Aggiorna la media storica per una singola categoria in user_category_notion_links."""
         user_id = str(user_id)
-        with self.Session() as session:
+        with self._user_session(user_id) as session:
             session.execute(
                 text(
                     "UPDATE user_category_notion_links "
@@ -1352,7 +1661,7 @@ class UserStore:
         nel DB locale (user_categories + user_category_notion_links).
         """
         user_id = str(user_id)
-        with self.Session() as session:
+        with self._user_session(user_id) as session:
             rows = session.execute(
                 text(
                     "SELECT uc.name, uc.monthly_budget, ucnl.average "
@@ -1373,7 +1682,7 @@ class UserStore:
         `average` viene da `user_category_notion_links` (None per categorie senza link Notion).
         """
         user_id = str(user_id)
-        with self.Session() as session:
+        with self._user_session(user_id) as session:
             rows = session.execute(
                 text(
                     "SELECT uc.name, ucnl.average "
@@ -1664,7 +1973,9 @@ class UserStore:
         )
 
         chat_id = str(chat_id)
-        with self.Session() as session:
+        # Cancellazione dei propri dati: bindata al tenant, la RLS consente il DELETE
+        # delle proprie righe (GDPR erasure). Vedi _user_session.
+        with self._user_session(chat_id) as session:
             user = session.query(User).filter(User.chat_id == chat_id).first()
             if not user:
                 return "not_found"
@@ -1726,7 +2037,7 @@ class UserStore:
     def get_user_subscriptions(self, user_id: str) -> list[dict]:
         """Ritorna gli abbonamenti dell'utente dal DB locale (tabella subscriptions)."""
         user_id = str(user_id)
-        with self.Session() as session:
+        with self._user_session(user_id) as session:
             rows = session.execute(
                 text(
                     "SELECT name, amount, last_billed, sub_type FROM subscriptions "

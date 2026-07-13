@@ -245,9 +245,9 @@ class TestSyncCategoriesToLocal:
         ]
         client = _notion_client_mock(pages)
 
-        n = sync_categories_to_local(client, "user_nt", store)
+        report = sync_categories_to_local(client, "user_nt", store)
 
-        assert n == 2
+        assert report.synced_count == 2
         names = store.get_user_category_names("user_nt")
         assert set(names) == {"Alimentari", "Trasporti"}
 
@@ -302,26 +302,26 @@ class TestSyncCategoriesToLocal:
         }
         client = _notion_client_mock([page])
 
-        n = sync_categories_to_local(client, "user_nt", store)
+        report = sync_categories_to_local(client, "user_nt", store)
 
-        assert n == 0
+        assert report.synced_count == 0
 
     def test_no_categories_db_id_returns_zero(self, db_session, store):
         client = Mock()
         client.categories_db_id = None
 
-        n = sync_categories_to_local(client, "user_nt", store)
+        report = sync_categories_to_local(client, "user_nt", store)
 
-        assert n == 0
+        assert report.synced_count == 0
 
     def test_api_error_returns_zero(self, db_session, store):
         client = Mock()
         client.categories_db_id = "db_test"
         client._get_data_source_id.side_effect = RuntimeError("timeout")
 
-        n = sync_categories_to_local(client, "user_nt", store)
+        report = sync_categories_to_local(client, "user_nt", store)
 
-        assert n == 0
+        assert report.synced_count == 0
 
     def test_pagination_fetches_all_pages(self, db_session, store):
         """Verifica che has_more=True faccia iterare sulla seconda pagina."""
@@ -336,9 +336,9 @@ class TestSyncCategoriesToLocal:
             {"results": [page_2], "has_more": False, "next_cursor": None},
         ]
 
-        n = sync_categories_to_local(client, "user_nt", store)
+        report = sync_categories_to_local(client, "user_nt", store)
 
-        assert n == 2
+        assert report.synced_count == 2
         assert set(store.get_user_category_names("user_nt")) == {"Alimentari", "Sport"}
 
 
@@ -359,11 +359,14 @@ class TestRefreshCategoryAverages:
     def test_postgres_user_routes_to_compute(self, store):
         user = Mock(storage_backend="postgres")
         store.get_user = Mock(return_value=user)
-        session = Mock()
+        # info={} così bind_user (RLS) può registrare lo user_id sulla sessione.
+        session = Mock(info={})
 
         with patch("src.category_sync.compute_category_averages") as mock_compute:
             refresh_category_averages("user_pg", store, session=session)
             mock_compute.assert_called_once_with("user_pg", session, store)
+        # La sessione dev'essere bindata all'utente per la RLS.
+        assert session.info["app_user_id"] == "user_pg"
 
     def test_notion_user_without_client_logs_warning(self, store, caplog):
         import logging
@@ -393,6 +396,130 @@ class TestRefreshCategoryAverages:
             refresh_category_averages("ghost_user", store)
 
         assert any("ghost_user" in r.message for r in caplog.records)
+
+
+# ---------------------------------------------------------------------------
+# 5. Riconciliazione — la cache diventa uno specchio esatto di Notion
+# ---------------------------------------------------------------------------
+
+class TestReconcileUserCategories:
+    def test_deleted_in_notion_is_removed_from_cache(self, db_session, store):
+        """Una categoria sparita da Notion viene rimossa dalla cache (non più fantasma)."""
+        sync_categories_to_local(
+            _notion_client_mock([
+                _make_notion_page("A", "Alimentari", 10.0),
+                _make_notion_page("B", "Sport", 20.0),
+            ]),
+            "user_nt", store,
+        )
+        assert set(store.get_user_category_names("user_nt")) == {"Alimentari", "Sport"}
+
+        # Notion ora contiene solo "Alimentari"
+        report = sync_categories_to_local(
+            _notion_client_mock([_make_notion_page("A", "Alimentari", 10.0)]),
+            "user_nt", store,
+        )
+
+        assert set(store.get_user_category_names("user_nt")) == {"Alimentari"}
+        assert "Sport" in report.deleted_categories
+
+    def test_rename_in_notion_updates_in_place(self, db_session, store):
+        """Un rinomina su Notion (page_id stabile) aggiorna la riga, senza duplicati."""
+        sync_categories_to_local(
+            _notion_client_mock([_make_notion_page("P", "Benzina", 5.0)]),
+            "user_nt", store,
+        )
+        report = sync_categories_to_local(
+            _notion_client_mock([_make_notion_page("P", "Carburante", 5.0)]),
+            "user_nt", store,
+        )
+
+        names = store.get_user_category_names("user_nt")
+        assert names == ["Carburante"]
+        assert "Benzina" not in names
+        assert report.deleted_categories == []  # page P ancora valido → nessuna cancellazione
+
+    def test_reconcile_skipped_on_fetch_error(self, db_session, store):
+        """Un errore Notion NON deve azzerare la cache (guardia fetch_ok)."""
+        sync_categories_to_local(
+            _notion_client_mock([_make_notion_page("A", "Alimentari", 10.0)]),
+            "user_nt", store,
+        )
+
+        bad = Mock()
+        bad.categories_db_id = "db_test"
+        bad._get_data_source_id.return_value = "ds_test"
+        bad._query_with_retry.side_effect = RuntimeError("boom")
+
+        report = sync_categories_to_local(bad, "user_nt", store)
+
+        assert report.synced_count == 0
+        # cache invariata: nessun wipe
+        assert set(store.get_user_category_names("user_nt")) == {"Alimentari"}
+
+    def test_reassigns_dependents_to_altro(self, db_session, store):
+        """Una categoria con spese dipendenti viene rimossa spostando i record su «Altro»."""
+        sync_categories_to_local(
+            _notion_client_mock([_make_notion_page("V", "Vecchia", 0.0)]),
+            "user_nt", store,
+        )
+        cat = db_session.query(UserCategory).filter_by(user_id="user_nt", name="Vecchia").first()
+        db_session.add(Expense(
+            user_id="user_nt",
+            expense_date=date(2026, 5, 1),
+            amount=9.0,
+            name="Spesa collegata",
+            category_id=cat.id,
+            account_id=1,
+        ))
+        db_session.commit()
+
+        # Notion non ha più "Vecchia": ritorna un'altra categoria
+        report = sync_categories_to_local(
+            _notion_client_mock([_make_notion_page("N", "Nuova", 0.0)]),
+            "user_nt", store,
+        )
+
+        names = set(store.get_user_category_names("user_nt"))
+        assert "Vecchia" not in names
+        assert "Altro" in names     # fallback creato
+        assert "Nuova" in names
+        assert any(
+            r.category_name == "Vecchia" and r.moved_expenses == 1
+            for r in report.reassignments
+        )
+
+        # la spesa è stata spostata su «Altro»
+        db_session.expire_all()
+        altro = db_session.query(UserCategory).filter_by(user_id="user_nt", name="Altro").first()
+        moved = db_session.query(Expense).filter_by(user_id="user_nt", name="Spesa collegata").first()
+        assert moved.category_id == altro.id
+
+    def test_fallback_with_dependents_not_deleted(self, db_session, store):
+        """«Altro» con dipendenti fuori da Notion non viene cancellata (rete di sicurezza)."""
+        sync_categories_to_local(
+            _notion_client_mock([_make_notion_page("ALT", "Altro", 0.0)]),
+            "user_nt", store,
+        )
+        altro = db_session.query(UserCategory).filter_by(user_id="user_nt", name="Altro").first()
+        db_session.add(Expense(
+            user_id="user_nt",
+            expense_date=date(2026, 5, 2),
+            amount=3.0,
+            name="Residuo",
+            category_id=altro.id,
+            account_id=1,
+        ))
+        db_session.commit()
+
+        # Notion non ha più "Altro"
+        report = sync_categories_to_local(
+            _notion_client_mock([_make_notion_page("N", "Nuova", 0.0)]),
+            "user_nt", store,
+        )
+
+        assert "Altro" in set(store.get_user_category_names("user_nt"))
+        assert "Altro" not in report.deleted_categories
 
 
 # ---------------------------------------------------------------------------
@@ -472,3 +599,71 @@ class TestLookupHelpers:
         result = store.get_category_by_notion_page_id("user_nt", "page_inesistente")
         assert result["name"] == "Sconosciuta"
         assert result["average"] == 0.0
+
+
+# ---------------------------------------------------------------------------
+# 7. Regressione — il budget delle categorie sopravvive al ciclo sync+reconcile
+#    (la sync Notion invia solo name+average, mai monthly_budget: il budget
+#    locale, impostato dall'utente, non deve mai essere azzerato o alterato).
+# ---------------------------------------------------------------------------
+
+class TestBudgetSurvivesSync:
+    def _seed_with_budget(self, store, user_id, name, page_id, budget):
+        """Categoria con budget impostato dall'utente + link Notion (setup iniziale)."""
+        from datetime import datetime
+        with store.Session() as s:
+            cat = UserCategory(user_id=user_id, name=name, monthly_budget=budget)
+            s.add(cat)
+            s.flush()
+            s.add(UserCategoryNotionLink(
+                category_id=cat.id, notion_page_id=page_id, average=0.0,
+                synced_at=datetime.utcnow()))
+            s.commit()
+
+    def _budgets(self, store, user_id):
+        return {
+            r["name"]: r["monthly_budget"]
+            for r in store.get_user_categories_with_budget(user_id)
+        }
+
+    def test_budget_preserved_through_normal_sync(self, db_session, store):
+        self._seed_with_budget(store, "user_nt", "Alimentari", "p1", 400.0)
+        self._seed_with_budget(store, "user_nt", "Trasporti", "p2", 150.0)
+        # Notion rimanda le stesse categorie con average aggiornata, senza budget.
+        sync_categories_to_local(
+            _notion_client_mock([
+                _make_notion_page("p1", "Alimentari", 320.0),
+                _make_notion_page("p2", "Trasporti", 90.0),
+            ]), "user_nt", store)
+        b = self._budgets(store, "user_nt")
+        assert float(b["Alimentari"]) == 400.0
+        assert float(b["Trasporti"]) == 150.0
+
+    def test_budget_follows_rename(self, db_session, store):
+        self._seed_with_budget(store, "user_nt", "Bar", "p1", 60.0)
+        sync_categories_to_local(
+            _notion_client_mock([_make_notion_page("p1", "Bar/Caffè", 0.0)]),
+            "user_nt", store)
+        b = self._budgets(store, "user_nt")
+        assert "Bar" not in b
+        assert float(b["Bar/Caffè"]) == 60.0
+
+    def test_budget_intact_when_other_category_reconciled(self, db_session, store):
+        self._seed_with_budget(store, "user_nt", "Alimentari", "p1", 400.0)
+        self._seed_with_budget(store, "user_nt", "Streaming", "p2", 30.0)
+        # Notion ora ha solo Alimentari: Streaming va rimossa, Alimentari resta.
+        sync_categories_to_local(
+            _notion_client_mock([_make_notion_page("p1", "Alimentari", 0.0)]),
+            "user_nt", store)
+        b = self._budgets(store, "user_nt")
+        assert "Streaming" not in b
+        assert float(b["Alimentari"]) == 400.0
+
+    def test_budget_intact_on_fetch_error(self, db_session, store):
+        self._seed_with_budget(store, "user_nt", "Alimentari", "p1", 400.0)
+        client = _notion_client_mock([])
+        client._query_with_retry.side_effect = RuntimeError("Notion 500")
+        report = sync_categories_to_local(client, "user_nt", store)
+        b = self._budgets(store, "user_nt")
+        assert float(b["Alimentari"]) == 400.0
+        assert not report.changed

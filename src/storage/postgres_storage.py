@@ -18,6 +18,7 @@ import uuid
 
 from src.storage.base import FinancialStorage
 from src.storage.models import Account, UserCategory, UserCategoryNotionLink, Expense, Income, Subscription, SavedReport
+from src.storage import rls  # registra il listener RLS e fornisce bind_user
 
 
 def _d(v) -> float:
@@ -33,6 +34,10 @@ class PostgresStorage(FinancialStorage):
     def __init__(self, session: Session, user_id: str) -> None:
         self._session = session
         self._user_id = user_id
+        # Alimenta la RLS: ogni transazione di questa sessione imposterà
+        # app.user_id = user_id, così su Postgres il DB stesso filtra il tenant.
+        # No-op su SQLite. Difesa aggiuntiva oltre al filtro applicativo WHERE user_id.
+        rls.bind_user(session, user_id)
 
     # ------------------------------------------------------------------ helpers
 

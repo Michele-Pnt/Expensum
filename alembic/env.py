@@ -13,8 +13,10 @@ load_dotenv()
 # access to the values within the .ini file in use.
 config = context.config
 
-# Sovrascrive sqlalchemy.url con DATABASE_URL dal .env (se presente)
-db_url = os.getenv("DATABASE_URL")
+# Le migration girano come ruolo OWNER (privilegi DDL), separato dal ruolo
+# runtime DML-only dell'app. Preferisci MIGRATION_DATABASE_URL; se assente ricadi
+# su DATABASE_URL (dev "single-role") e infine sull'URL in alembic.ini.
+db_url = os.getenv("MIGRATION_DATABASE_URL") or os.getenv("DATABASE_URL")
 if db_url:
     config.set_main_option("sqlalchemy.url", db_url)
 

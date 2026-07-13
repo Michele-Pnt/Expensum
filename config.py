@@ -107,9 +107,17 @@ class Config:
     FLASK_SECRET_KEY: str = os.getenv("FLASK_SECRET_KEY", "")
 
     # --- DATABASE ---
-    # Default: SQLite locale (sqlite:///users.db). 
-    # Per PostgreSQL: "postgresql://utente:password@localhost:5432/financebot"
+    # Default: SQLite locale (sqlite:///users.db).
+    # Per PostgreSQL usa il driver psycopg3 (postgresql+psycopg://):
+    #   "postgresql+psycopg://utente:password@localhost:5432/expensum"
+    # In produzione questo è il ruolo runtime DML-only (expensum_app), soggetto a RLS.
     DATABASE_URL: str = os.getenv("DATABASE_URL", "sqlite:///users.db")
+    # URL con privilegi DDL (ruolo OWNER) usato SOLO dalle migration Alembic; il
+    # runtime dell'app non deve mai usarlo. Fallback su DATABASE_URL se assente.
+    MIGRATION_DATABASE_URL: str = os.getenv("MIGRATION_DATABASE_URL", "")
+    # DDL a runtime (create_all/_ensure_schema all'avvio). In produzione DEVE essere
+    # false: lo schema lo gestisce solo Alembic e il ruolo runtime non ha privilegi DDL.
+    RUN_RUNTIME_MIGRATIONS: bool = os.getenv("RUN_RUNTIME_MIGRATIONS", "false").lower() == "true"
 
     # --- SICUREZZA e CLOUD ---
     # Email di supporto mostrata agli utenti bannati per comportamento malevolo

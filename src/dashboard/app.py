@@ -63,6 +63,13 @@ app.config['WTF_CSRF_CHECK_DEFAULT'] = False   # CSRF applicato solo ai form, no
 app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'  # blocca invio cookie su richieste cross-origin
 app.config['SESSION_COOKIE_HTTPONLY'] = True    # cookie non accessibile da JavaScript
 app.config['SESSION_COOKIE_SECURE'] = os.getenv('FLASK_ENV') == 'production'  # HTTPS only in prod
+# "Ricordami": una sessione marcata permanente (session.permanent = True) sopravvive
+# alla chiusura del browser fino a PERMANENT_SESSION_LIFETIME. Con REFRESH_EACH_REQUEST
+# la scadenza è *scorrevole*: ogni richiesta la sposta avanti di 30 giorni, quindi
+# l'utente resta loggato finché torna almeno una volta ogni 30 giorni. Senza spuntare
+# "ricordami" la sessione resta un cookie di sessione del browser (muore alla chiusura).
+app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(days=30)
+app.config['SESSION_REFRESH_EACH_REQUEST'] = True
 csrf = CSRFProtect(app)
 limiter = Limiter(app=app, key_func=get_remote_address, default_limits=[])
 
@@ -329,11 +336,22 @@ def webhook_stripe():
 
 
 def _get_session_chat_id() -> str | None:
-    """Ritorna il chat_id della sessione browser se valida."""
+    """Ritorna il chat_id della sessione browser se valida.
+
+    Oltre al flag di login, verifica la `token_version`: il valore salvato nel
+    cookie al login deve combaciare con quello corrente nel DB. In caso contrario
+    la sessione è stata revocata (cambio password, "esci da tutti i dispositivi")
+    o è una sessione legacy anteriore all'introduzione del meccanismo: in entrambi
+    i casi va invalidata forzando un nuovo login.
+    """
     if not session.get("user_logged_in"):
         return None
     chat_id = session.get("chat_id")
     if not chat_id:
+        return None
+    current_version = store.get_token_version(chat_id)
+    if current_version is None or session.get("token_version") != current_version:
+        session.clear()
         return None
     return str(chat_id)
 
@@ -345,6 +363,16 @@ def _get_user_by_chat_id(chat_id: str):
         return s.query(User).filter_by(chat_id=chat_id).first()
 
 
+def _user_has_web_access(user) -> bool:
+    """La web app è riservata agli utenti con backend PostgreSQL.
+
+    Chi ha collegato Notion gestisce le finanze esclusivamente dal bot Telegram
+    e dal proprio workspace Notion: per questi utenti la web app (login browser,
+    chat, onboarding, analytics, gestione spazi, impostazioni) non è disponibile.
+    """
+    return bool(user) and user.storage_backend != "notion"
+
+
 def _build_setup_redirect(chat_id: str) -> str:
     reg_token = store.create_oauth_session(chat_id)
     return url_for("setup_form") + f"?reg_token={reg_token}"
@@ -354,6 +382,10 @@ def _resolve_authenticated_redirect(chat_id: str) -> str:
     """Instrada un utente autenticato verso setup, onboarding o home app."""
     user = _get_user_by_chat_id(chat_id)
     if not user:
+        session.clear()
+        return url_for("web_login")
+    if not _user_has_web_access(user):
+        # Account Notion: nessun accesso alla web app, termina la sessione browser.
         session.clear()
         return url_for("web_login")
     if user.setup_completed_at is None:
@@ -369,7 +401,12 @@ def _resolve_request_chat_id() -> tuple[str | None, str | None]:
     if init_data:
         parsed = _validate_telegram_init_data(init_data)
         if parsed and parsed.get("chat_id"):
-            return str(parsed["chat_id"]), "telegram"
+            chat_id = str(parsed["chat_id"])
+            # Gli utenti Notion non hanno accesso alla web app: nega la risoluzione
+            # così ogni endpoint risponde 401 anche via Telegram WebApp.
+            if not _user_has_web_access(_get_user_by_chat_id(chat_id)):
+                return None, None
+            return chat_id, "telegram"
 
     chat_id = _get_session_chat_id()
     if not chat_id:
@@ -379,11 +416,37 @@ def _resolve_request_chat_id() -> tuple[str | None, str | None]:
     if not user:
         session.clear()
         return None, None
+    if not _user_has_web_access(user):
+        return None, None
     return chat_id, "browser"
 
 
 def _forbidden_setup_response():
     return "<h1>Accesso negato</h1><p>Link non valido o sessione non autorizzata.</p>", 403
+
+
+def _resync_category_cache_from_notion(user: "User") -> None:
+    """Riallinea la cache `user_categories` a Notion dopo una mutazione categoria.
+
+    Per gli utenti Notion, create/rename/delete di categorie dalla web app scrivono
+    solo su Notion: senza questo re-sync la cache (che alimenta il parser del bot)
+    resterebbe disallineata fino al job notturno. Best-effort: la scrittura su Notion
+    è già avvenuta, quindi eventuali errori qui vengono solo loggati.
+    """
+    if user.storage_backend != "notion" or not user.categories_db_id:
+        return
+    try:
+        from src.category_sync import sync_categories_to_local
+
+        notion_client = NotionFinanceClient(
+            api_key=user.notion_access_token,
+            categories_db_id=user.categories_db_id,
+        )
+        sync_categories_to_local(notion_client, user.chat_id, store)
+    except Exception as e:
+        logger.warning(
+            "[Manage] Re-sync cache categorie fallito per %s: %s", user.chat_id, e
+        )
 
 
 def _trigger_dashboard_refresh(user: "User", s) -> None:
@@ -450,7 +513,9 @@ def _trigger_dashboard_refresh(user: "User", s) -> None:
 def login_required(f):
     @wraps(f)
     def decorated_function(*args, **kwargs):
-        if not session.get("user_logged_in"):
+        # _get_session_chat_id valida anche la token_version: una sessione revocata
+        # viene azzerata qui e reindirizzata al login.
+        if not _get_session_chat_id():
             return redirect(url_for("web_login"))
         return f(*args, **kwargs)
     return decorated_function
@@ -519,8 +584,22 @@ def web_login():
                 store.reactivate_user(user.chat_id)
         if user:
             reset_failed_logins(email)
+            if not _user_has_web_access(user):
+                # Account collegato a Notion: la web app non è disponibile.
+                return render_template(
+                    "login.html",
+                    error="Questo account è collegato a Notion: gestisci le tue finanze "
+                          "dal bot Telegram e dal tuo workspace Notion. La web app è "
+                          "riservata agli account con backend PostgreSQL.",
+                    registration_enabled=Config.PUBLIC_REGISTRATION_ENABLED,
+                    next_url=next_url,
+                )
+            # "Ricordami": sessione persistente (sopravvive alla chiusura del
+            # browser); altrimenti cookie di sessione che muore alla chiusura.
+            session.permanent = bool(request.form.get("remember"))
             session["user_logged_in"] = True
             session["chat_id"] = user.chat_id
+            session["token_version"] = user.token_version or 0
             return redirect(next_url or _resolve_authenticated_redirect(user.chat_id))
 
         error = "Email o password errati."
@@ -614,8 +693,11 @@ def web_register():
         return _err("Errore durante la registrazione. Riprova.")
 
     analytics.track(web_chat_id, "user_signed_up", {"auth_method": "web", "storage_backend": "postgres"})
+    # Appena registrato: sessione persistente, così non deve rifare login subito.
+    session.permanent = True
     session["user_logged_in"] = True
     session["chat_id"] = web_chat_id
+    session["token_version"] = 0
     return redirect("/onboarding")
 
 
@@ -1678,11 +1760,13 @@ def setup_form():
             logger.exception("[Setup] fetch_categories da Notion fallito: %s", e)
             try:
                 from src.storage.models import UserCategory
-                cat_rows = s.query(UserCategory).filter_by(user_id=user.chat_id).all()
-                available_categories = [
-                    {"id": r.notion_page_id or str(r.id), "name": r.name, "monthly_budget": r.monthly_budget}
-                    for r in cat_rows
-                ]
+                # Sessione bindata al tenant per la RLS (user_categories è protetta).
+                with store._user_session(user.chat_id) as _cs:
+                    cat_rows = _cs.query(UserCategory).filter_by(user_id=user.chat_id).all()
+                    available_categories = [
+                        {"id": r.notion_page_id or str(r.id), "name": r.name, "monthly_budget": r.monthly_budget}
+                        for r in cat_rows
+                    ]
             except Exception as e2:
                 logger.exception("[Setup] fetch_categories da DB fallito: %s", e2)
 
@@ -2135,6 +2219,8 @@ def api_manage_add():
                 else:
                     return jsonify({"error": f"entity_type '{entity_type}' non supportato"}), 400
 
+            if entity_type == "category":
+                _resync_category_cache_from_notion(user)
             _trigger_dashboard_refresh(user, s)
             return jsonify({"status": "ok", "entity": result})
         except Exception as e:
@@ -2186,6 +2272,8 @@ def api_manage_remove():
                 notion_raw = NotionClient(auth=user.notion_access_token)
                 notion_raw.pages.update(page_id=str(entity_id), archived=True)
 
+            if entity_type == "category":
+                _resync_category_cache_from_notion(user)
             _trigger_dashboard_refresh(user, s)
             return jsonify({"status": "ok"})
         except Exception as e:
@@ -2359,6 +2447,8 @@ def api_manage_update():
                             raise
                 result = {"id": entity_id, **data}
 
+            if entity_type == "category":
+                _resync_category_cache_from_notion(user)
             _trigger_dashboard_refresh(user, s)
             return jsonify({"status": "ok", "entity": result})
         except Exception as e:
@@ -2582,7 +2672,8 @@ def api_chat_confirm():
     _is_first_expense = False
     try:
         if user.storage_backend == "postgres" and parsed_type == "expense":
-            with store.Session() as _s:
+            # Sessione bindata al tenant per la RLS (expenses è protetta).
+            with store._user_session(chat_id) as _s:
                 from src.storage.models import Expense as _ExpenseModel
                 _count = _s.query(_ExpenseModel).filter_by(user_id=chat_id).count()
                 _is_first_expense = _count == 0
@@ -3180,12 +3271,39 @@ def api_settings_change_password():
     if not email or not store.verify_password(email, current_password):
         return jsonify({"error": "Password corrente errata."}), 401
 
+    # update_password incrementa token_version: tutte le sessioni esistenti
+    # (compresa questa) vengono invalidate. Riallineo la sessione del device
+    # corrente al nuovo valore così chi cambia password non viene sloggato,
+    # mentre gli altri dispositivi sì.
     store.update_password(chat_id, new_password)
+    if session.get("user_logged_in"):
+        session["token_version"] = store.get_token_version(chat_id)
     store.write_audit_log(
         chat_id, actor="user", action="change_password",
         ip_address=request.remote_addr, user_agent=request.headers.get("User-Agent"),
     )
     return jsonify({"ok": True})
+
+
+@app.route("/api/settings/logout-all-devices", methods=["POST"])
+def api_settings_logout_all_devices():
+    """Revoca tutte le sessioni dell'utente su ogni dispositivo, inclusa questa.
+
+    Incrementa `token_version`: ogni cookie di sessione emesso in precedenza
+    diventa invalido al confronto in `_get_session_chat_id`. A differenza di
+    /api/settings/logout NON sospende l'account (is_active resta True).
+    """
+    chat_id, _ = _resolve_request_chat_id()
+    if not chat_id:
+        return jsonify({"error": "Unauthorized"}), 401
+
+    store.bump_token_version(chat_id)
+    store.write_audit_log(
+        chat_id, actor="user", action="logout_all_devices",
+        ip_address=request.remote_addr, user_agent=request.headers.get("User-Agent"),
+    )
+    session.clear()
+    return jsonify({"ok": True, "redirect_url": "/login"})
 
 
 @app.route("/api/settings/delete-account", methods=["POST"])
