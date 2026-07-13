@@ -18,7 +18,11 @@ config = context.config
 # su DATABASE_URL (dev "single-role") e infine sull'URL in alembic.ini.
 db_url = os.getenv("MIGRATION_DATABASE_URL") or os.getenv("DATABASE_URL")
 if db_url:
-    config.set_main_option("sqlalchemy.url", db_url)
+    # configparser (usato da Alembic) interpreta '%' come sintassi di interpolazione:
+    # va raddoppiato ('%%') o la set_main_option solleva ValueError. NB: i caratteri
+    # strutturali dell'URL (@ : / ?) in una password vanno comunque percent-encoded a
+    # monte — consigliata una password alfanumerica per i ruoli DB (vedi deployment documentation).
+    config.set_main_option("sqlalchemy.url", db_url.replace("%", "%%"))
 
 # Interpret the config file for Python logging.
 # This line sets up loggers basically.
