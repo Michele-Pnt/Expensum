@@ -81,7 +81,11 @@ def test_web_login_notion_user_denied_web_access(client):
 
     response = client.post(
         "/login",
-        data={"email": "notion-login@example.com", "password": "Password123"},
+        data={
+            "email": "notion-login@example.com",
+            "password": "Password123",
+            "csrf_token": _csrf_token(client),
+        },
         follow_redirects=False,
     )
 
