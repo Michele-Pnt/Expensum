@@ -403,9 +403,9 @@ export default function LandingPage() {
 
             <div className={styles.pricingCta} data-reveal>
               <p>{t("pricing.ctaQuestion")}</p>
-              <a href="mailto:expensum.finance@gmail.com" className={styles.ctaLink}>
+              <Link href="/contatti" className={styles.ctaLink}>
                 {t("pricing.ctaContact")}
-              </a>
+              </Link>
             </div>
           </div>
         </section>
