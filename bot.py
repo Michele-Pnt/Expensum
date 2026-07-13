@@ -1415,8 +1415,23 @@ def _build_expense_summary(data: dict) -> str:
     )
 
 
-def _build_confirm_keyboard(data: dict) -> InlineKeyboardMarkup:
-    """Costruisce la tastiera di conferma spesa/entrata, con bottone di modifica categoria per le spese."""
+def _build_confirm_keyboard(data: dict, tx_id: str | None = None) -> InlineKeyboardMarkup:
+    """Costruisce la tastiera di conferma spesa/entrata, con bottone di modifica categoria per le spese.
+
+    Se `tx_id` è fornito, i callback_data sono prefissati con "m" e taggati con l'id
+    (es. "mconfirm:3") per instradare bottoni di transazioni multiple presentate in parallelo
+    (vedi `pending_expenses` in `context.user_data`), invece della singola `pending_expense`.
+    """
+    if tx_id is not None:
+        rows = []
+        if data.get("type") == "expense":
+            rows.append([InlineKeyboardButton("✏️ Cambia categoria", callback_data=f"medit_category:{tx_id}")])
+        rows.append([
+            InlineKeyboardButton("✅ Conferma", callback_data=f"mconfirm:{tx_id}"),
+            InlineKeyboardButton("❌ Annulla", callback_data=f"mcancel:{tx_id}"),
+        ])
+        return InlineKeyboardMarkup(rows)
+
     rows = []
     if data.get("type") == "expense":
         rows.append([InlineKeyboardButton("✏️ Cambia categoria", callback_data="edit_category")])
@@ -1425,6 +1440,14 @@ def _build_confirm_keyboard(data: dict) -> InlineKeyboardMarkup:
         InlineKeyboardButton("❌ Annulla", callback_data="cancel"),
     ])
     return InlineKeyboardMarkup(rows)
+
+
+def _next_expense_id(context: ContextTypes.DEFAULT_TYPE) -> str:
+    """Genera un id breve e univoco per la sessione, usato per taggare i bottoni delle
+    transazioni multiple presentate in parallelo (vedi `pending_expenses`)."""
+    n = context.user_data.get("expense_id_counter", 0) + 1
+    context.user_data["expense_id_counter"] = n
+    return str(n)
 
 
 def _resolve_account_hint(hint: str | None, accounts: list[dict]) -> dict | None:
@@ -1731,10 +1754,39 @@ async def _process_expense_text(update: Update, context: ContextTypes.DEFAULT_TY
 
     logger.info(f"[User {chat_id}] Risultato parser: {len(transactions)} transazione/i rilevate")
 
-    # Mette in coda tutte le transazioni rilevate (una sola, se il messaggio ne descriveva una)
-    # e presenta subito la prima con il consueto messaggio di conferma + scelta conto.
-    context.user_data["expense_queue"] = transactions
-    await _present_next_pending_expense(context, chat_id)
+    # Multi-spesa: le transazioni con importo già noto (il caso comune) vengono presentate
+    # TUTTE SUBITO, ciascuna con bottoni indipendenti (id dedicato) — l'utente le conferma
+    # nell'ordine che vuole. Solo i casi che richiedono per forza un passaggio sequenziale
+    # (importo mancante da chiedere in chiaro, trasferimento con conti ancora da risolvere)
+    # restano in coda e vengono gestiti uno alla volta come prima.
+    immediate = []
+    sequential = []
+    for tx in transactions:
+        (immediate if tx["type"] != "transfer" and tx["amount"] is not None else sequential).append(tx)
+
+    pending_expenses = context.user_data.setdefault("pending_expenses", {})
+    for tx in immediate:
+        tx_id = _next_expense_id(context)
+        data = {
+            "type": tx["type"],
+            "date": tx["date"].isoformat(),
+            "amount": tx["amount"],
+            "category": tx["category"],
+            "income_type": tx.get("income_type"),
+            "name": tx["name"],
+        }
+        pending_expenses[tx_id] = data
+        summary = _build_expense_summary(data)
+        keyboard = _build_confirm_keyboard(data, tx_id)
+        await update.message.reply_text(summary, parse_mode=ParseMode.MARKDOWN, reply_markup=keyboard)
+        try:
+            _user_store.log_message(chat_id, source="telegram", role="bot", text=summary, metadata=tx)
+        except Exception as _le:
+            logger.debug("[User %s] log_message bot summary fallito: %s", chat_id, _le)
+
+    if sequential:
+        context.user_data["expense_queue"] = sequential
+        await _present_next_pending_expense(context, chat_id)
 
 async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handler per messaggi vocali — trascrizione e parsing spesa con LLM."""
@@ -1966,10 +2018,9 @@ async def handle_photos(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             os.remove(temp_path)
             logger.info(f"[User {chat_id}] File temporaneo eliminato: {temp_path}")
 
-async def _save_to_notion(query, context, chat_id: str, account_id: str | None = None):
-    data = context.user_data.pop("pending_expense", None)
+async def _save_to_notion(query, context, chat_id: str, data: dict | None, account_id: str | None = None):
     context.user_data.pop("waiting_for_amount", None)
-    
+
     if not data:
         await query.edit_message_text("⚠️ Nessuna spesa in sospeso.")
         return
@@ -2213,6 +2264,124 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         await query.edit_message_text("❌ Eliminazione annullata. Il tuo account è al sicuro.")
         return
 
+    # ------------------------------------------------------------------
+    # Transazioni multiple presentate in parallelo (vedi _process_expense_text):
+    # ognuna vive in context.user_data["pending_expenses"][tx_id], indipendente
+    # dalle altre — annullarne/confermarne una non tocca le altre in sospeso.
+    # ------------------------------------------------------------------
+
+    if query.data.startswith("mcancel:"):
+        tx_id = query.data.split(":", 1)[1]
+        pending_expenses = context.user_data.get("pending_expenses", {})
+        if pending_expenses.pop(tx_id, None) is None:
+            await query.edit_message_text("⚠️ Nessuna spesa in sospeso.")
+            return
+        analytics.track(chat_id, "expense_tracking_failed", {"reason": "user_cancelled", "input_method": "text"})
+        await query.edit_message_text("❌ Operazione annullata.")
+        return
+
+    if query.data.startswith("medit_category:") or query.data.startswith("medit_category_back:"):
+        is_back = query.data.startswith("medit_category_back:")
+        tx_id = query.data.split(":", 1)[1]
+        pending = context.user_data.get("pending_expenses", {}).get(tx_id)
+        if not pending:
+            await query.edit_message_text("⚠️ Nessuna spesa in sospeso.")
+            return
+
+        if is_back:
+            summary = _build_expense_summary(pending)
+            keyboard = _build_confirm_keyboard(pending, tx_id)
+            await query.edit_message_text(summary, parse_mode=ParseMode.MARKDOWN, reply_markup=keyboard)
+            return
+
+        try:
+            storage = _get_storage(chat_id)
+            category_names = storage.get_category_names()
+        except Exception as e:
+            logger.error(f"[User {chat_id}] Errore fetch categorie: {e}")
+            await query.edit_message_text("⚠️ Errore nel recupero delle categorie. Riprova tra qualche istante.")
+            return
+
+        if not category_names:
+            await query.edit_message_text("⚠️ Non hai ancora nessuna categoria configurata. Usa /modify per crearne una.")
+            return
+
+        context.user_data["category_options"] = category_names
+        keyboard = [
+            [InlineKeyboardButton(name, callback_data=f"msetcat:{tx_id}:{idx}")]
+            for idx, name in enumerate(category_names)
+        ]
+        keyboard.append([InlineKeyboardButton("🔙 Indietro", callback_data=f"medit_category_back:{tx_id}")])
+        await query.edit_message_text(
+            "📂 Scegli la categoria giusta:",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+        )
+        return
+
+    if query.data.startswith("msetcat:"):
+        _, tx_id, idx_str = query.data.split(":", 2)
+        pending = context.user_data.get("pending_expenses", {}).get(tx_id)
+        category_options = context.user_data.get("category_options")
+        if not pending or not category_options:
+            await query.edit_message_text("⚠️ Nessuna spesa in sospeso.")
+            return
+        try:
+            new_category = category_options[int(idx_str)]
+        except (ValueError, IndexError):
+            await query.edit_message_text("⚠️ Categoria non valida. Riprova.")
+            return
+
+        pending["category"] = new_category
+        summary = _build_expense_summary(pending)
+        keyboard = _build_confirm_keyboard(pending, tx_id)
+        await query.edit_message_text(summary, parse_mode=ParseMode.MARKDOWN, reply_markup=keyboard)
+        return
+
+    if query.data.startswith("mconfirm:"):
+        tx_id = query.data.split(":", 1)[1]
+        data = context.user_data.get("pending_expenses", {}).get(tx_id)
+        if not data:
+            await query.edit_message_text("⚠️ Nessuna spesa in sospeso.")
+            return
+
+        try:
+            storage = _get_storage(chat_id)
+            accounts = storage.fetch_accounts()
+        except Exception as e:
+            logger.error(f"[User {chat_id}] Errore fetch accounts: {e}")
+            await query.edit_message_text("⚠️ Errore nel recupero dei tuoi conti. Riprova tra qualche istante.")
+            return
+
+        if not accounts:
+            # Nessun conto configurato: blocca solo questa transazione (le altre in parallelo
+            # restano in sospeso, l'utente potrà confermarle appena avrà creato un conto).
+            context.user_data.get("pending_expenses", {}).pop(tx_id, None)
+            analytics.track(chat_id, "expense_tracking_failed", {"reason": "no_account", "input_method": "text"})
+            await query.edit_message_text(
+                "🏦 Non hai ancora nessun conto su Expensum, quindi non posso registrare la spesa.\n\n"
+                "Usa /modify e vai nella tab \"Conti\" per aggiungerne uno, poi rimanda il messaggio della spesa."
+            )
+            return
+
+        keyboard = []
+        for acc in accounts:
+            bal = acc.get('current_balance', 0.0)
+            keyboard.append([InlineKeyboardButton(f"🏦 {acc['name']} (€{bal:.2f})", callback_data=f"maccount:{tx_id}:{acc['id']}")])
+        keyboard.append([InlineKeyboardButton("❌ Annulla", callback_data=f"mcancel:{tx_id}")])
+
+        question = "🏦 Su quale conto è arrivata l'entrata?" if data.get("type") == "income" else "🏦 Da quale conto hai pagato?"
+        await query.edit_message_text(question, reply_markup=InlineKeyboardMarkup(keyboard))
+        return
+
+    if query.data.startswith("maccount:"):
+        _, tx_id, account_id = query.data.split(":", 2)
+        data = context.user_data.get("pending_expenses", {}).pop(tx_id, None)
+        if not data:
+            await query.edit_message_text("⚠️ Nessuna spesa in sospeso.")
+            return
+        await _save_to_notion(query, context, chat_id, data, account_id=account_id)
+        return
+
     if query.data == "edit_category":
         pending = context.user_data.get("pending_expense")
         if not pending:
@@ -2339,7 +2508,8 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
     if query.data.startswith("account:"):
         account_id = query.data.split(":", 1)[1]
-        await _save_to_notion(query, context, chat_id, account_id=account_id)
+        data = context.user_data.pop("pending_expense", None)
+        await _save_to_notion(query, context, chat_id, data, account_id=account_id)
         return
 
     if query.data.startswith("transfer_from:") or query.data.startswith("transfer_to:"):
