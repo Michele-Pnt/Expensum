@@ -3,6 +3,7 @@ import re
 import sys
 import json
 import uuid
+import difflib
 import logging
 import threading
 from pathlib import Path
@@ -2536,11 +2537,31 @@ def _build_financial_storage(user, pg_session=None):
     return NotionStorage(notion_client, store=store, user_id=user.chat_id)
 
 
-def _chat_parse_text(chat_id: str, text: str, skip_length_check: bool = False) -> tuple[dict | None, dict | None, str]:
-    """Valida, sanitizza e lancia il parsing LLM su un messaggio testuale.
+def _resolve_account_hint(hint: str | None, accounts: list[dict]) -> dict | None:
+    """Risolve un nome conto libero (hint estratto dall'NLP) su un conto reale dell'utente.
 
-    Ritorna (result, usage, error_reply). Se error_reply è non-None il chiamante
-    deve restituire un errore al client senza procedere.
+    Stessa logica di `_resolve_account_hint` in bot.py: match esatto case-insensitive,
+    poi fuzzy match (soglia 0.6) sui nomi conto. None se non menzionato o senza match.
+    """
+    if not hint:
+        return None
+    hint_low = hint.strip().lower()
+    for acc in accounts:
+        if acc["name"].strip().lower() == hint_low:
+            return acc
+    names_low = [a["name"].strip().lower() for a in accounts]
+    matches = difflib.get_close_matches(hint_low, names_low, n=1, cutoff=0.6)
+    if matches:
+        return next(a for a in accounts if a["name"].strip().lower() == matches[0])
+    return None
+
+
+def _chat_parse_text(chat_id: str, text: str, skip_length_check: bool = False) -> tuple[list[dict] | None, dict | None, str]:
+    """Valida, sanitizza e lancia il parsing LLM (multi-transazione) su un messaggio testuale.
+
+    Ritorna (results, usage, error_reply). Se error_reply è non-None il chiamante
+    deve restituire un errore al client senza procedere. `results` è una lista di
+    transazioni rilevate (può contenerne più di una, es. scontrino con più voci).
     skip_length_check=True per testo OCR (generato dal sistema, non digitato dall'utente).
     """
     from src.expense_parser import ExpenseParser
@@ -2584,10 +2605,10 @@ def _chat_parse_text(chat_id: str, text: str, skip_length_check: bool = False) -
     except Exception:
         pass
 
-    # Parsing LLM
+    # Parsing LLM (multi-transazione: un messaggio può contenere più spese/entrate)
     try:
         parser = ExpenseParser(categories=categories)
-        result, usage = parser.parse_with_usage(safe_input)
+        results, usage = parser.parse_multi_with_usage(safe_input)
     except Exception as e:
         logger.exception("Errore ExpenseParser chat: %s", e)
         return None, None, "⚠️ Errore interno durante il parsing. Riprova."
@@ -2609,10 +2630,10 @@ def _chat_parse_text(chat_id: str, text: str, skip_length_check: bool = False) -
         except Exception:
             pass
 
-    return result, usage, ""
+    return results, usage, ""
 
 
-def _build_parse_reply(result: dict) -> tuple[str, dict]:
+def _build_parse_reply(result: dict, from_name: str | None = None, to_name: str | None = None) -> tuple[str, dict]:
     """Costruisce il testo di preview e il dict parsed da mandare al client."""
     parsed_type = result.get("type", "expense")
     amount_str = f"€{result['amount']:.2f}" if result.get("amount") else "importo non specificato"
@@ -2623,6 +2644,15 @@ def _build_parse_reply(result: dict) -> tuple[str, dict]:
         cat = result.get("category") or "Altro"
         name = result.get("name") or "Spesa"
         reply = f"Ho interpretato **{name}** di {amount_str} nella categoria _{cat}_ ({date_str}). Confermi?"
+    elif parsed_type == "transfer":
+        name = result.get("name") or "Trasferimento"
+        reply = (
+            f"📝 Nuovo trasferimento riconosciuto:\n\n"
+            f"💰 Importo: **{amount_str}**\n"
+            f"🏦 Da: **{from_name or '—'}**\n"
+            f"🏦 A: **{to_name or '—'}**\n"
+            f"📝 Descrizione: **{name}**\n\nConfermi?"
+        )
     else:
         income_type = result.get("income_type") or "Entrata"
         name = result.get("name") or "Entrata"
@@ -2639,9 +2669,150 @@ def _build_parse_reply(result: dict) -> tuple[str, dict]:
     return reply, parsed
 
 
+def _build_transaction_payload(result: dict, accounts: list[dict], categories: list[str]) -> dict:
+    """Arricchisce un item parsato con conti/categorie e i flag di step successivo.
+
+    Replica le domande sequenziali del bot Telegram: importo mancante, risoluzione
+    conti (con hint LLM) per i trasferimenti, e blocco se mancano conti sufficienti.
+    I conti (e per i trasferimenti gli hint risolti) sono sempre inclusi nel `parsed`,
+    anche quando manca l'importo, così il frontend non deve rifare un giro di rete
+    quando l'utente completa l'importo in un messaggio successivo.
+    """
+    parsed_type = result.get("type", "expense")
+    amount_missing = result.get("amount") is None
+
+    if parsed_type == "transfer":
+        from_match = _resolve_account_hint(result.get("from_account"), accounts)
+        to_match = _resolve_account_hint(result.get("to_account"), accounts)
+        if from_match and to_match and str(from_match["id"]) == str(to_match["id"]):
+            to_match = None
+        from_name = from_match["name"] if from_match else None
+        to_name = to_match["name"] if to_match else None
+
+        reply, parsed = _build_parse_reply(result, from_name=from_name, to_name=to_name)
+        parsed["accounts"] = accounts
+        parsed["resolved_from_account_id"] = from_match["id"] if from_match else None
+        parsed["resolved_from_account_name"] = from_match["name"] if from_match else None
+        parsed["resolved_to_account_id"] = to_match["id"] if to_match else None
+        parsed["resolved_to_account_name"] = to_match["name"] if to_match else None
+
+        if amount_missing:
+            return {
+                "type": parsed_type,
+                "reply": "📝 Quanto vuoi trasferire? Scrivi solo l'importo (es. 100).",
+                "parsed": parsed,
+                "needs_amount": True,
+                "awaiting_confirm": False,
+            }
+        if len(accounts) < 2:
+            return {
+                "type": parsed_type,
+                "reply": (
+                    "🏦 Ti servono almeno due conti per fare un trasferimento.\n\n"
+                    "Aggiungine uno nella tab \"Conti\" del tuo spazio."
+                ),
+                "parsed": parsed,
+                "needs_second_account": True,
+                "awaiting_confirm": False,
+            }
+        # Come bot.py:_advance_transfer_flow — se un conto non è stato risolto dagli hint
+        # LLM, si chiede via picker PRIMA di mostrare il riepilogo di conferma.
+        if not from_match:
+            return {
+                "type": parsed_type,
+                "reply": "🏦 Da quale conto vuoi spostare i soldi?",
+                "parsed": parsed,
+                "needs_account_pick": "from",
+                "awaiting_confirm": False,
+            }
+        if not to_match:
+            return {
+                "type": parsed_type,
+                "reply": "🏦 Su quale conto vuoi spostare i soldi?",
+                "parsed": parsed,
+                "needs_account_pick": "to",
+                "awaiting_confirm": False,
+            }
+        return {"type": parsed_type, "reply": reply, "parsed": parsed, "awaiting_confirm": True}
+
+    reply, parsed = _build_parse_reply(result)
+    parsed["accounts"] = accounts
+    if parsed_type == "expense":
+        parsed["categories"] = categories
+
+    if amount_missing:
+        return {
+            "type": parsed_type,
+            "reply": "📝 Non ho capito l'importo. Prova a ridirmelo, scrivendo solo il numero (es. 20 o 20,50).",
+            "parsed": parsed,
+            "needs_amount": True,
+            "awaiting_confirm": False,
+        }
+    return {"type": parsed_type, "reply": reply, "parsed": parsed, "awaiting_confirm": True}
+
+
+def _build_chat_parse_result(chat_id: str, results: list[dict] | None, error_reply: str) -> dict:
+    """Costruisce il payload JSON-able per una risposta di parsing chat (0+ transazioni).
+
+    Condiviso da /api/chat/message, /api/chat/voice, /api/chat/photo: tutti e tre
+    lanciano lo stesso parsing multi-transazione e devono offrire la stessa UX
+    (conti, categorie, trasferimenti) indipendentemente dal canale di input.
+    """
+    if error_reply:
+        try:
+            store.log_message(chat_id, source="webapp", role="bot", text=error_reply)
+        except Exception:
+            pass
+        return {"ok": False, "type": "error", "reply": error_reply, "saved": False}
+
+    if not results:
+        unknown_reply = "Non ho riconosciuto una transazione nel tuo messaggio. Prova con qualcosa come «ho speso 20€ al supermercato» 🛒"
+        try:
+            store.log_message(chat_id, source="webapp", role="bot", text=unknown_reply)
+        except Exception:
+            pass
+        return {"ok": True, "type": "unknown", "reply": unknown_reply, "saved": False}
+
+    accounts: list[dict] = []
+    categories: list[str] = []
+    try:
+        user = _get_user_by_chat_id(chat_id)
+        if user.storage_backend == "postgres":
+            with store.Session() as s:
+                storage = _build_financial_storage(user, pg_session=s)
+                accounts = storage.fetch_accounts()
+                categories = storage.get_category_names()
+        else:
+            storage = _build_financial_storage(user)
+            accounts = storage.fetch_accounts()
+            categories = storage.get_category_names()
+    except Exception as e:
+        logger.exception("Errore fetch accounts/categorie chat: %s", e)
+
+    if not accounts:
+        no_account_reply = (
+            "🏦 Non hai ancora nessun conto su Expensum, quindi non posso registrare la transazione.\n\n"
+            "Aggiungine uno nella tab \"Conti\" del tuo spazio, poi rimanda il messaggio."
+        )
+        try:
+            store.log_message(chat_id, source="webapp", role="bot", text=no_account_reply)
+        except Exception:
+            pass
+        return {"ok": False, "type": "no_account", "reply": no_account_reply, "saved": False, "setup_path": "/spazio"}
+
+    transactions = [_build_transaction_payload(r, accounts, categories) for r in results]
+    for tx in transactions:
+        try:
+            store.log_message(chat_id, source="webapp", role="bot", text=tx["reply"], metadata=tx["parsed"])
+        except Exception:
+            pass
+
+    return {"ok": True, "transactions": transactions}
+
+
 @app.route("/api/chat/message", methods=["POST"])
 def api_chat_message():
-    """Parse-only: interpreta il messaggio via LLM ma non salva. Richiede conferma."""
+    """Parse-only: interpreta il messaggio via LLM (anche multi-transazione), non salva."""
     chat_id, _ = _resolve_request_chat_id()
     if not chat_id:
         return jsonify({"error": "Unauthorized"}), 401
@@ -2651,48 +2822,24 @@ def api_chat_message():
     if not text:
         return jsonify({"error": "Testo vuoto"}), 400
 
-    result, _usage, error_reply = _chat_parse_text(chat_id, text)
+    results, _usage, error_reply = _chat_parse_text(chat_id, text)
 
-    if error_reply:
-        # Distinguiamo tra errore di validazione e parsing fallito
-        if result is None and error_reply.startswith("⚠️") or error_reply.startswith("🔒") or error_reply.startswith("⏳"):
-            # Log il messaggio utente anche in caso di errore lieve
-            try:
-                store.log_message(chat_id, source="webapp", role="user", text=text)
-                store.log_message(chat_id, source="webapp", role="bot", text=error_reply)
-            except Exception:
-                pass
-            return jsonify({"ok": False, "type": "error", "reply": error_reply, "saved": False})
-        return jsonify({"ok": False, "type": "error", "reply": error_reply, "saved": False})
-
-    # Log messaggio utente
     try:
         store.log_message(chat_id, source="webapp", role="user", text=text)
     except Exception:
         pass
 
-    if result is None:
-        unknown_reply = "Non ho riconosciuto una transazione nel tuo messaggio. Prova con qualcosa come «ho speso 20€ al supermercato» 🛒"
-        try:
-            store.log_message(chat_id, source="webapp", role="bot", text=unknown_reply)
-        except Exception:
-            pass
-        return jsonify({"ok": True, "type": "unknown", "reply": unknown_reply, "saved": False})
-
-    reply, parsed = _build_parse_reply(result)
-
-    # Log preview bot (non ancora confermata)
-    try:
-        store.log_message(chat_id, source="webapp", role="bot", text=reply, metadata=parsed)
-    except Exception:
-        pass
-
-    return jsonify({"ok": True, "type": parsed["type"], "parsed": parsed, "reply": reply, "saved": False})
+    return jsonify(_build_chat_parse_result(chat_id, results, error_reply))
 
 
 @app.route("/api/chat/confirm", methods=["POST"])
 def api_chat_confirm():
-    """Salva la transazione parsata dopo conferma esplicita dell'utente."""
+    """Salva la transazione parsata dopo conferma esplicita dell'utente.
+
+    Il conto (o i due conti, per un trasferimento) va scelto esplicitamente dal
+    frontend — niente più default silenzioso sul primo conto dell'utente, per
+    parità con il bot Telegram (bot.py:2472-2515, 2517-2549).
+    """
     chat_id, _ = _resolve_request_chat_id()
     if not chat_id:
         return jsonify({"error": "Unauthorized"}), 401
@@ -2700,9 +2847,21 @@ def api_chat_confirm():
     data = request.get_json(silent=True) or {}
     parsed = data.get("parsed") or {}
     parsed_type = parsed.get("type", "expense")
+    category_override = data.get("category")
+    account_id = data.get("account_id")
+    from_account_id = data.get("from_account_id")
+    to_account_id = data.get("to_account_id")
 
     if not parsed.get("amount"):
         return jsonify({"error": "Dati transazione mancanti"}), 400
+
+    if parsed_type == "transfer":
+        if not from_account_id or not to_account_id:
+            return jsonify({"error": "Conto di origine/destinazione mancante"}), 400
+        if str(from_account_id) == str(to_account_id):
+            return jsonify({"error": "Il conto di destinazione deve essere diverso da quello di origine"}), 400
+    elif not account_id:
+        return jsonify({"error": "Conto mancante"}), 400
 
     user = _get_user_by_chat_id(chat_id)
     if not user:
@@ -2728,77 +2887,44 @@ def api_chat_confirm():
     except Exception:
         pass
 
+    def _save(storage) -> None:
+        if parsed_type == "expense":
+            storage.create_expense(
+                expense_date=tx_date,
+                amount=float(parsed.get("amount") or 0),
+                category_name=category_override or parsed.get("category") or "Altro",
+                name=parsed.get("name") or "Spesa",
+                account_id=account_id,
+            )
+        elif parsed_type == "transfer":
+            storage.create_transfer(
+                transfer_date=tx_date,
+                amount=float(parsed.get("amount") or 0),
+                from_account_id=from_account_id,
+                to_account_id=to_account_id,
+                name=parsed.get("name") or "Trasferimento",
+            )
+        else:
+            storage.create_income(
+                income_date=tx_date,
+                amount=float(parsed.get("amount") or 0),
+                income_type=parsed.get("income_type") or "Stipendio",
+                name=parsed.get("name") or "Entrata",
+                account_id=account_id,
+            )
+
     saved = False
-    no_account = False
     try:
         if user.storage_backend == "postgres":
             with store.Session() as s:
                 storage = _build_financial_storage(user, pg_session=s)
-                accounts = storage.fetch_accounts()
-                if not accounts:
-                    no_account = True
-                else:
-                    default_account_id = accounts[0]["id"]
-                    if parsed_type == "expense":
-                        storage.create_expense(
-                            expense_date=tx_date,
-                            amount=float(parsed.get("amount") or 0),
-                            category_name=parsed.get("category") or "Altro",
-                            name=parsed.get("name") or "Spesa",
-                            account_id=default_account_id,
-                        )
-                    else:
-                        storage.create_income(
-                            income_date=tx_date,
-                            amount=float(parsed.get("amount") or 0),
-                            income_type=parsed.get("income_type") or "Stipendio",
-                            name=parsed.get("name") or "Entrata",
-                            account_id=default_account_id,
-                        )
+                _save(storage)
         else:
             storage = _build_financial_storage(user)
-            accounts = storage.fetch_accounts()
-            if not accounts:
-                no_account = True
-            else:
-                default_account_id = accounts[0]["id"]
-                if parsed_type == "expense":
-                    storage.create_expense(
-                        expense_date=tx_date,
-                        amount=float(parsed.get("amount") or 0),
-                        category_name=parsed.get("category") or "Altro",
-                        name=parsed.get("name") or "Spesa",
-                        account_id=default_account_id,
-                    )
-                else:
-                    storage.create_income(
-                        income_date=tx_date,
-                        amount=float(parsed.get("amount") or 0),
-                        income_type=parsed.get("income_type") or "Stipendio",
-                        name=parsed.get("name") or "Entrata",
-                        account_id=default_account_id,
-                    )
-        saved = not no_account
+            _save(storage)
+        saved = True
     except Exception as e:
         logger.exception("Errore salvataggio transazione confermata: %s", e)
-
-    if no_account:
-        analytics.track(chat_id, "expense_tracking_failed", {"reason": "no_account", "input_method": data.get("input_method", "text")})
-        reply = (
-            "🏦 Non hai ancora nessun conto su Expensum, quindi non posso registrare la transazione. "
-            "Aggiungine uno nella tab \"Conti\" del tuo spazio."
-        )
-        try:
-            store.log_message(chat_id, source="webapp", role="bot", text=reply, metadata=None)
-        except Exception:
-            pass
-        return jsonify({
-            "ok": False,
-            "saved": False,
-            "error": "no_account",
-            "reply": reply,
-            "setup_path": "/spazio",
-        })
 
     if saved:
         input_method = data.get("input_method", "text")
@@ -2814,12 +2940,19 @@ def api_chat_confirm():
 
     amount_str = f"€{float(parsed.get('amount', 0)):.2f}"
     if parsed_type == "expense":
-        cat = parsed.get("category") or "Altro"
+        cat = category_override or parsed.get("category") or "Altro"
         name = parsed.get("name") or "Spesa"
         if saved:
             reply = f"✅ Ho registrato **{name}** di {amount_str} nella categoria _{cat}_."
         else:
             reply = f"⚠️ Ho interpretato **{name}** di {amount_str}, ma non sono riuscito a salvarlo. Riprova."
+    elif parsed_type == "transfer":
+        from_name = parsed.get("resolved_from_account_name") or "—"
+        to_name = parsed.get("resolved_to_account_name") or "—"
+        if saved:
+            reply = f"✅ Trasferiti {amount_str} da **{from_name}** a **{to_name}**."
+        else:
+            reply = f"⚠️ Ho interpretato il trasferimento di {amount_str}, ma non sono riuscito a salvarlo. Riprova."
     else:
         income_type = parsed.get("income_type") or "Entrata"
         name = parsed.get("name") or "Entrata"
@@ -2900,7 +3033,7 @@ def api_chat_voice():
     if not transcribed:
         return jsonify({"ok": False, "reply": "⚠️ Non sono riuscito a trascrivere l'audio. Parla più chiaramente o scrivi il messaggio.", "saved": False})
 
-    result, _usage, error_reply = _chat_parse_text(chat_id, transcribed)
+    results, _usage, error_reply = _chat_parse_text(chat_id, transcribed)
 
     user_text = f"🎤 {transcribed}"
     try:
@@ -2908,28 +3041,9 @@ def api_chat_voice():
     except Exception:
         pass
 
-    if error_reply:
-        try:
-            store.log_message(chat_id, source="webapp", role="bot", text=error_reply)
-        except Exception:
-            pass
-        return jsonify({"ok": False, "type": "error", "reply": error_reply, "saved": False, "transcription": transcribed})
-
-    if result is None:
-        unknown_reply = "Non ho riconosciuto una transazione nel tuo messaggio vocale. Prova a descrivere la spesa più chiaramente."
-        try:
-            store.log_message(chat_id, source="webapp", role="bot", text=unknown_reply)
-        except Exception:
-            pass
-        return jsonify({"ok": True, "type": "unknown", "reply": unknown_reply, "saved": False, "transcription": transcribed})
-
-    reply, parsed = _build_parse_reply(result)
-    try:
-        store.log_message(chat_id, source="webapp", role="bot", text=reply, metadata=parsed)
-    except Exception:
-        pass
-
-    return jsonify({"ok": True, "type": parsed["type"], "parsed": parsed, "reply": reply, "saved": False, "transcription": transcribed})
+    payload = _build_chat_parse_result(chat_id, results, error_reply)
+    payload["transcription"] = transcribed
+    return jsonify(payload)
 
 
 @app.route("/api/chat/photo", methods=["POST"])
@@ -3003,7 +3117,7 @@ def api_chat_photo():
             "banned": True,
         })
 
-    result, _usage, error_reply = _chat_parse_text(chat_id, ocr_text, skip_length_check=True)
+    results, _usage, error_reply = _chat_parse_text(chat_id, ocr_text, skip_length_check=True)
 
     user_text = f"📷 {ocr_text[:200]}"
     try:
@@ -3011,28 +3125,10 @@ def api_chat_photo():
     except Exception:
         pass
 
-    if error_reply:
-        try:
-            store.log_message(chat_id, source="webapp", role="bot", text=error_reply)
-        except Exception:
-            pass
-        return jsonify({"ok": False, "type": "error", "reply": error_reply, "saved": False})
-
-    if result is None:
-        unknown_reply = "⚠️ Ho letto il testo dello scontrino ma non ho riconosciuto una transazione. Prova a scrivere la spesa manualmente."
-        try:
-            store.log_message(chat_id, source="webapp", role="bot", text=unknown_reply)
-        except Exception:
-            pass
-        return jsonify({"ok": True, "type": "unknown", "reply": unknown_reply, "saved": False})
-
-    reply, parsed = _build_parse_reply(result)
-    try:
-        store.log_message(chat_id, source="webapp", role="bot", text=reply, metadata=parsed)
-    except Exception:
-        pass
-
-    return jsonify({"ok": True, "type": parsed["type"], "parsed": parsed, "reply": reply, "saved": False})
+    payload = _build_chat_parse_result(chat_id, results, error_reply)
+    if payload.get("type") == "unknown":
+        payload["reply"] = "⚠️ Ho letto il testo dello scontrino ma non ho riconosciuto una transazione. Prova a scrivere la spesa manualmente."
+    return jsonify(payload)
 
 
 @app.route("/api/chat/history", methods=["GET"])

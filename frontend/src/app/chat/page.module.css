@@ -402,6 +402,28 @@
   background: rgba(197, 160, 89, 0.25);
 }
 
+/* ─── Picker (conti / categorie) ─────────────────────────────────────────── */
+
+.pickerCol {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.pickerBtn {
+  flex: none;
+  width: 100%;
+  text-align: left;
+  background: rgba(26, 54, 115, 0.12);
+  color: #7B9FE0;
+  border: 1px solid rgba(26, 54, 115, 0.3);
+}
+
+.pickerBtn:hover {
+  background: rgba(26, 54, 115, 0.22);
+}
+
 /* ─── Bubble Meta (time + check) ─────────────────────────────────────────── */
 
 .bubbleMeta {

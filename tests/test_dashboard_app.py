@@ -1145,6 +1145,214 @@ def test_space_transfers_rejects_same_account(client):
     assert resp.status_code == 400
 
 
+def _login_chat_user(client, store, chat_id):
+    """Sessione autenticata minimale (storage postgres) per gli endpoint /api/chat/*."""
+    store.add_user(chat_id=chat_id, username=chat_id, storage_backend="postgres")
+    with client.session_transaction() as sess:
+        sess["user_logged_in"] = True
+        sess["chat_id"] = chat_id
+        sess["token_version"] = store.get_token_version(chat_id)
+    return client.get("/api/csrf-token").json["csrf_token"]
+
+
+def _fake_parsed(**overrides):
+    from datetime import date as _date
+
+    base = {
+        "type": "expense",
+        "date": _date(2026, 4, 10),
+        "amount": 20.0,
+        "category": "Ristoranti",
+        "name": "Pizza",
+        "income_type": None,
+        "from_account": None,
+        "to_account": None,
+    }
+    base.update(overrides)
+    return base
+
+
+def test_chat_message_multi_transaction(client):
+    """Un messaggio con più spese restituisce più item in 'transactions' (bot.py:1769-1791)."""
+    from src.dashboard.app import store
+    from src.storage.postgres_storage import PostgresStorage
+    from src.expense_parser import ExpenseParser
+
+    csrf_token = _login_chat_user(client, store, "chat_multi_user")
+    with store.Session() as s:
+        pg = PostgresStorage(session=s, user_id="chat_multi_user")
+        pg.create_account("Corrente", initial_balance=100.0)
+
+    transactions = [
+        _fake_parsed(name="Pizza", amount=20.0),
+        _fake_parsed(name="Benzina", amount=15.0, category="Trasporti"),
+    ]
+    with patch.object(ExpenseParser, "parse_multi_with_usage", return_value=(transactions, {})):
+        resp = client.post(
+            "/api/chat/message",
+            json={"text": "Ho speso 20€ pizza e 15€ benzina"},
+            headers={"X-CSRFToken": csrf_token},
+        )
+
+    assert resp.status_code == 200
+    body = resp.json
+    assert body["ok"] is True
+    assert len(body["transactions"]) == 2
+    names = {tx["parsed"]["name"] for tx in body["transactions"]}
+    assert names == {"Pizza", "Benzina"}
+    assert all(tx["awaiting_confirm"] for tx in body["transactions"])
+
+
+def test_chat_confirm_expense_requires_account_id(client):
+    """/api/chat/confirm rifiuta una spesa senza account_id esplicito (niente default silenzioso)."""
+    from src.dashboard.app import store
+
+    csrf_token = _login_chat_user(client, store, "chat_noaccount_user")
+
+    resp = client.post(
+        "/api/chat/confirm",
+        json={"parsed": {"type": "expense", "amount": 20.0, "date": "2026-04-10", "name": "Pizza"}},
+        headers={"X-CSRFToken": csrf_token},
+    )
+    assert resp.status_code == 400
+
+
+def test_chat_confirm_expense_saves_with_category_override(client):
+    """/api/chat/confirm salva la categoria scelta dal picker rapido, non quella originale."""
+    from src.dashboard.app import store
+    from src.storage.postgres_storage import PostgresStorage
+    from src.storage.models import Expense as ExpenseModel
+
+    csrf_token = _login_chat_user(client, store, "chat_category_user")
+    with store.Session() as s:
+        pg = PostgresStorage(session=s, user_id="chat_category_user")
+        acc = pg.create_account("Corrente", initial_balance=100.0)
+
+    resp = client.post(
+        "/api/chat/confirm",
+        json={
+            "parsed": {"type": "expense", "amount": 20.0, "date": "2026-04-10", "name": "Pizza", "category": "Altro"},
+            "account_id": acc["id"],
+            "category": "Ristoranti & Fast Food",
+        },
+        headers={"X-CSRFToken": csrf_token},
+    )
+    assert resp.status_code == 200
+    assert resp.json["saved"] is True
+
+    from src.storage.models import UserCategory
+
+    with store.Session() as s:
+        row = s.query(ExpenseModel).filter_by(user_id="chat_category_user").first()
+        assert row is not None
+        cat_name = s.query(UserCategory.name).filter(UserCategory.id == row.category_id).scalar()
+        assert cat_name == "Ristoranti & Fast Food"
+
+
+def test_chat_confirm_transfer_creates_transfer_not_income(client):
+    """/api/chat/confirm con type=transfer crea un Transfer, non un'entrata (bug fix)."""
+    from datetime import date as _date
+    from src.dashboard.app import store
+    from src.storage.postgres_storage import PostgresStorage
+    from src.storage.models import Income as IncomeModel
+
+    csrf_token = _login_chat_user(client, store, "chat_transfer_confirm_user")
+    with store.Session() as s:
+        pg = PostgresStorage(session=s, user_id="chat_transfer_confirm_user")
+        acc_from = pg.create_account("Corrente", initial_balance=200.0)
+        acc_to = pg.create_account("Risparmio", initial_balance=0.0)
+
+    resp = client.post(
+        "/api/chat/confirm",
+        json={
+            "parsed": {
+                "type": "transfer", "amount": 50.0, "date": "2026-04-10", "name": "Giroconto",
+                "resolved_from_account_name": "Corrente", "resolved_to_account_name": "Risparmio",
+            },
+            "from_account_id": acc_from["id"],
+            "to_account_id": acc_to["id"],
+        },
+        headers={"X-CSRFToken": csrf_token},
+    )
+    assert resp.status_code == 200
+    assert resp.json["saved"] is True
+
+    with store.Session() as s:
+        pg = PostgresStorage(session=s, user_id="chat_transfer_confirm_user")
+        transfers = pg.fetch_transfers(_date(2026, 4, 1), _date(2026, 4, 30))
+        assert len(transfers) == 1
+        assert transfers[0]["amount"] == 50.0
+        incomes = s.query(IncomeModel).filter_by(user_id="chat_transfer_confirm_user").count()
+        assert incomes == 0
+
+
+def test_chat_confirm_transfer_rejects_same_account(client):
+    """/api/chat/confirm rifiuta un trasferimento con from_account_id == to_account_id."""
+    from src.dashboard.app import store
+    from src.storage.postgres_storage import PostgresStorage
+
+    csrf_token = _login_chat_user(client, store, "chat_transfer_same_user")
+    with store.Session() as s:
+        pg = PostgresStorage(session=s, user_id="chat_transfer_same_user")
+        acc = pg.create_account("Unico", initial_balance=100.0)
+
+    resp = client.post(
+        "/api/chat/confirm",
+        json={
+            "parsed": {"type": "transfer", "amount": 10.0, "date": "2026-04-10", "name": "Giroconto"},
+            "from_account_id": acc["id"],
+            "to_account_id": acc["id"],
+        },
+        headers={"X-CSRFToken": csrf_token},
+    )
+    assert resp.status_code == 400
+
+
+def test_chat_message_transfer_needs_second_account(client):
+    """Con un solo conto, un trasferimento riconosciuto viene bloccato con needs_second_account."""
+    from src.dashboard.app import store
+    from src.storage.postgres_storage import PostgresStorage
+    from src.expense_parser import ExpenseParser
+
+    csrf_token = _login_chat_user(client, store, "chat_transfer_single_acc_user")
+    with store.Session() as s:
+        pg = PostgresStorage(session=s, user_id="chat_transfer_single_acc_user")
+        pg.create_account("Unico", initial_balance=100.0)
+
+    transactions = [_fake_parsed(type="transfer", name="Giroconto", amount=50.0, category=None)]
+    with patch.object(ExpenseParser, "parse_multi_with_usage", return_value=(transactions, {})):
+        resp = client.post(
+            "/api/chat/message",
+            json={"text": "Trasferisci 50€"},
+            headers={"X-CSRFToken": csrf_token},
+        )
+
+    assert resp.status_code == 200
+    tx = resp.json["transactions"][0]
+    assert tx["needs_second_account"] is True
+    assert tx["awaiting_confirm"] is False
+
+
+def test_chat_message_no_account_blocks_batch(client):
+    """Senza nessun conto configurato, l'intero messaggio viene bloccato (no_account)."""
+    from src.dashboard.app import store
+    from src.expense_parser import ExpenseParser
+
+    csrf_token = _login_chat_user(client, store, "chat_no_account_at_all_user")
+
+    transactions = [_fake_parsed(name="Pizza", amount=20.0)]
+    with patch.object(ExpenseParser, "parse_multi_with_usage", return_value=(transactions, {})):
+        resp = client.post(
+            "/api/chat/message",
+            json={"text": "Ho speso 20€ pizza"},
+            headers={"X-CSRFToken": csrf_token},
+        )
+
+    assert resp.status_code == 200
+    assert resp.json["type"] == "no_account"
+    assert resp.json["ok"] is False
+
+
 def test_space_transfers_requires_auth(client):
     """GET /api/space/transfers senza sessione/init-data valido risponde 401."""
     resp = client.get("/api/space/transfers")
