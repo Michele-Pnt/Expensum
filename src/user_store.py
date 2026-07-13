@@ -1959,6 +1959,9 @@ class UserStore:
             metadata={"consent_type": "privacy_policy", "version": Config.CURRENT_PRIVACY_POLICY_VERSION},
             ip_address=None, user_agent="create_beta_account",
         )
+        # Pro di default per tutta la fase beta (reason="beta_default" per poterlo
+        # revocare in blocco al lancio pubblico senza toccare i Pro pagati veri).
+        self.set_user_plan(chat_id, "pro", payment_reference="beta_default")
         return chat_id, password
 
     def delete_user_completely(self, chat_id: str) -> str:
