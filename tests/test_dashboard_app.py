@@ -1020,10 +1020,13 @@ def test_idor_account_and_expense_scoped_by_user(client):
 
     csrf_token = client.get("/api/csrf-token").json["csrf_token"]
 
-    # A si autentica (sessione browser)
+    # A si autentica (sessione browser). token_version deve combaciare con quello
+    # persistito, altrimenti _get_session_chat_id la considera revocata (401 invece
+    # del 404 atteso per lo scoping IDOR).
     with client.session_transaction() as sess:
         sess["user_logged_in"] = True
         sess["chat_id"] = "chat_user_a"
+        sess["token_version"] = store.get_token_version("chat_user_a")
 
     # A prova a modificare/cancellare il conto di B
     resp = client.put(
