@@ -1324,12 +1324,17 @@ class UserStore:
             ).all()
 
     def get_active_postgres_users(self) -> list:
-        """Ritorna tutti gli utenti attivi con storage_backend Postgres."""
+        """Ritorna tutti gli utenti attivi con storage_backend Postgres.
+
+        Il flow di onboarding beta (create_beta_account) imposta setup_status
+        a "COMPLETED" invece di "DONE" (usato dal flow Notion) — accettiamo
+        entrambi i valori per non escludere gli utenti Postgres dai job.
+        """
         with self.Session() as session:
             return session.query(User).filter(
                 User.is_active == True,
                 User.storage_backend == "postgres",
-                User.setup_status == "DONE",
+                User.setup_status.in_(["DONE", "COMPLETED"]),
             ).all()
 
     def get_pro_users(self) -> list[User]:
