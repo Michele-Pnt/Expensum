@@ -1126,6 +1126,100 @@ class NotionFinanceClient:
             "income_type": income_type
         }
 
+    def fetch_transfers(
+        self,
+        start_date: Optional[date] = None,
+        end_date: Optional[date] = None,
+    ) -> list[dict]:
+        """
+        Recupera i trasferimenti dal database Pay/Transfer.
+
+        Returns:
+            Lista di dict {date, name, amount, from_account_id, to_account_id} ordinata per data.
+        """
+        db_id = self.pay_transfer_db_id
+        if not db_id:
+            logger.warning("Pay/Transfer Database ID non configurato.")
+            return []
+
+        try:
+            ds_id = self._get_data_source_id(db_id)
+        except Exception as e:
+            logger.warning(f"Impossibile accedere al database Pay/Transfer: {e}")
+            return []
+
+        logger.info(f"Estrazione Pay/Transfer [{start_date or 'inizio'} → {end_date or 'oggi'}]")
+
+        filters = self._build_date_filter(start_date, end_date)
+        transfers = []
+        has_more = True
+        cursor = None
+
+        while has_more:
+            try:
+                resp = self._query_with_retry(ds_id, filters, cursor)
+            except Exception as e:
+                logger.warning(f"Errore query Pay/Transfer: {e}")
+                break
+
+            for page in resp.get("results", []):
+                parsed = self._parse_transfer_page(page)
+                if parsed:
+                    transfers.append(parsed)
+
+            has_more = resp.get("has_more", False)
+            cursor = resp.get("next_cursor")
+
+        transfers.sort(key=lambda x: x["date"])
+        logger.info(f"Pay/Transfer: {len(transfers)} record trovati")
+        return transfers
+
+    def _parse_transfer_page(self, page: dict) -> Optional[dict]:
+        props = page.get("properties", {})
+
+        col_date = self._get_property_name("pay_transfer_db_id", "date", Config.NOTION_COL_DATE)
+        col_amount = self._get_property_name("pay_transfer_db_id", "amount", Config.NOTION_COL_AMOUNT)
+        col_name = self._get_property_name("pay_transfer_db_id", "name", Config.NOTION_COL_NAME)
+        col_from = self._get_property_name("pay_transfer_db_id", "rel_account_from", "From Account")
+        col_to = self._get_property_name("pay_transfer_db_id", "rel_account_to", "To Account")
+
+        # --- DATA ---
+        date_prop = props.get(col_date, {})
+        date_val = date_prop.get("date")
+        if not date_val or not date_val.get("start"):
+            return None
+        try:
+            tx_date = datetime.fromisoformat(date_val["start"]).date()
+        except (ValueError, TypeError):
+            return None
+
+        # --- IMPORTO ---
+        amount_prop = props.get(col_amount, {})
+        amount_val = amount_prop.get("number")
+        if amount_val is None:
+            return None
+
+        # --- NOME ---
+        name_prop = props.get(col_name, {})
+        ptype = name_prop.get("type", "")
+        rich = name_prop.get(ptype, [])
+        name = rich[0].get("plain_text", "—") if rich else "—"
+
+        # --- CONTI ---
+        from_rel = (props.get(col_from, {}) or {}).get("relation", []) if col_from else []
+        to_rel = (props.get(col_to, {}) or {}).get("relation", []) if col_to else []
+        from_account_id = from_rel[0]["id"] if from_rel else None
+        to_account_id = to_rel[0]["id"] if to_rel else None
+
+        return {
+            "id": page.get("id", ""),
+            "date": tx_date,
+            "name": name,
+            "amount": float(amount_val),
+            "from_account_id": from_account_id,
+            "to_account_id": to_account_id,
+        }
+
     # ------------------------------------------------------------------
     # Fetch Accounts
     # ------------------------------------------------------------------
@@ -1822,6 +1916,72 @@ class NotionFinanceClient:
         )
 
         logger.info(f"Introito creato con successo: page_id={result['id'][:8]}...")
+        return result
+
+    # ------------------------------------------------------------------
+    # Write: creazione nuovo trasferimento tra conti
+    # ------------------------------------------------------------------
+    def create_transfer(
+        self,
+        transfer_date: date,
+        amount: float,
+        from_account_id: str,
+        to_account_id: str,
+        name: Optional[str] = None,
+    ) -> dict:
+        """
+        Crea una nuova page nel database Pay/Transfer.
+
+        Args:
+            transfer_date: Data del trasferimento
+            amount: Importo (positivo)
+            from_account_id: Page ID del conto di origine
+            to_account_id: Page ID del conto di destinazione
+            name: Descrizione del trasferimento (opzionale)
+
+        Returns:
+            dict con i dati della page creata
+        """
+        if not self.pay_transfer_db_id:
+            raise ValueError("Pay/Transfer database non configurato")
+
+        col_date = self._get_property_name("pay_transfer_db_id", "date", Config.NOTION_COL_DATE)
+        col_amount = self._get_property_name("pay_transfer_db_id", "amount", Config.NOTION_COL_AMOUNT)
+        col_name = self._get_property_name("pay_transfer_db_id", "name", Config.NOTION_COL_NAME)
+        col_from = self._get_property_name("pay_transfer_db_id", "rel_account_from", "From Account")
+        col_to = self._get_property_name("pay_transfer_db_id", "rel_account_to", "To Account")
+
+        properties = {
+            col_date: {
+                "date": {"start": transfer_date.isoformat()}
+            },
+            col_amount: {
+                "number": abs(float(amount))
+            },
+            col_name: {
+                "title": [
+                    {
+                        "text": {"content": name or "Trasferimento"}
+                    }
+                ]
+            },
+        }
+        if col_from and from_account_id:
+            properties[col_from] = {"relation": [{"id": from_account_id}]}
+        if col_to and to_account_id:
+            properties[col_to] = {"relation": [{"id": to_account_id}]}
+
+        logger.info(
+            f"Creazione trasferimento su Notion: €{amount:.2f} — {transfer_date.isoformat()} — "
+            f"da conto_id: {from_account_id or 'nessuno'} a conto_id: {to_account_id or 'nessuno'}"
+        )
+
+        result = self._client.pages.create(
+            parent={"database_id": self.pay_transfer_db_id},
+            properties=properties,
+        )
+
+        logger.info(f"Trasferimento creato con successo: page_id={result['id'][:8]}...")
         return result
 
     # ------------------------------------------------------------------

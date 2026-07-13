@@ -4491,6 +4491,73 @@ def space_accounts_delete(account_id: int):
         return jsonify({"status": "ok"})
 
 
+# ── Transfers ────────────────────────────────────────────────────────────────
+
+@app.route("/api/space/transfers", methods=["GET"])
+@_tg_webapp_auth
+def space_transfers_list():
+    from flask import g
+    from datetime import date as _date, datetime as _dt
+    today = _date.today()
+    start = request.args.get("start", _date(today.year, today.month, 1).isoformat())
+    end = request.args.get("end", today.isoformat())
+    try:
+        start_d = _dt.strptime(start, "%Y-%m-%d").date()
+        end_d = _dt.strptime(end, "%Y-%m-%d").date()
+    except ValueError:
+        return jsonify({"error": "Formato data non valido (YYYY-MM-DD)"}), 400
+    with store.Session() as s:
+        pg, err = _pg_or_401(s, g.chat_id)
+        if err:
+            return err
+        items = pg.fetch_transfers(start_d, end_d)
+        for item in items:
+            if hasattr(item.get("date"), "isoformat"):
+                item["date"] = item["date"].isoformat()
+        return jsonify({"transfers": items})
+
+
+@app.route("/api/space/transfers", methods=["POST"])
+@_tg_webapp_auth
+def space_transfers_create():
+    from flask import g
+    from datetime import datetime as _dt
+    data = request.json or {}
+    try:
+        amount = float(data.get("amount"))
+    except (TypeError, ValueError):
+        return jsonify({"error": "Il campo 'amount' è obbligatorio ed è un numero"}), 400
+    if amount <= 0:
+        return jsonify({"error": "L'importo deve essere positivo"}), 400
+    from_account_id = data.get("from_account_id")
+    to_account_id = data.get("to_account_id")
+    if not from_account_id or not to_account_id:
+        return jsonify({"error": "I campi 'from_account_id' e 'to_account_id' sono obbligatori"}), 400
+    if str(from_account_id) == str(to_account_id):
+        return jsonify({"error": "Il conto di origine e di destinazione devono essere diversi"}), 400
+    try:
+        transfer_date = _dt.strptime(data.get("date") or _dt.today().strftime("%Y-%m-%d"), "%Y-%m-%d").date()
+    except ValueError:
+        return jsonify({"error": "Formato data non valido (YYYY-MM-DD)"}), 400
+    with store.Session() as s:
+        pg, err = _pg_or_401(s, g.chat_id)
+        if err:
+            return err
+        try:
+            result = pg.create_transfer(
+                transfer_date=transfer_date,
+                amount=amount,
+                from_account_id=from_account_id,
+                to_account_id=to_account_id,
+                name=(data.get("name") or "").strip() or None,
+            )
+        except ValueError as e:
+            return jsonify({"error": str(e)}), 400
+        if hasattr(result.get("date"), "isoformat"):
+            result["date"] = result["date"].isoformat()
+        return jsonify(result), 201
+
+
 # ── Categories ────────────────────────────────────────────────────────────────
 
 @app.route("/api/space/categories", methods=["GET"])

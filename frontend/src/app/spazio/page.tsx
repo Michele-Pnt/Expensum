@@ -5,7 +5,7 @@ import {
   Box, Card, CardContent, Tab, Tabs, Typography, Table, TableBody,
   TableCell, TableContainer, TableHead, TableRow, TablePagination,
   IconButton, Button, Dialog, DialogTitle, DialogContent, DialogActions,
-  TextField, Select, MenuItem, FormControl, InputLabel, Chip,
+  TextField, Select, MenuItem, FormControl, InputLabel, Chip, Menu,
   CircularProgress, Snackbar, Alert, Tooltip, TableSortLabel,
 } from "@mui/material";
 import { Plus, Pencil, Trash2, Check, X } from "lucide-react";
@@ -34,9 +34,13 @@ interface Income {
   id: number; date: string; name: string; amount: number;
   income_type: string; account: string; account_id: number | null;
 }
+interface Transfer {
+  id: number; date: string; name: string; amount: number;
+  from_account_id: number; to_account_id: number;
+}
 
 type DialogMode = "add" | "edit";
-type EntityType = "account" | "category" | "subscription" | "expense" | "income";
+type EntityType = "account" | "category" | "subscription" | "expense" | "income" | "transfer";
 
 // ---------------------------------------------------------------------------
 // Colori / costanti
@@ -55,6 +59,7 @@ const ENTITY_PATH: Record<EntityType, string> = {
   subscription: "subscriptions",
   expense: "expenses",
   income: "incomes",
+  transfer: "transfers",
 };
 
 const ACCOUNT_TYPES = ["Conto corrente", "Carta di credito", "Risparmio", "Contanti", "Investimento"];
@@ -109,6 +114,7 @@ export default function SpazioPage() {
   const [subscriptions, setSubscriptions] = useState<Subscription[]>([]);
   const [expenses, setExpenses] = useState<Expense[]>([]);
   const [incomes, setIncomes] = useState<Income[]>([]);
+  const [transfers, setTransfers] = useState<Transfer[]>([]);
 
   // Paginazione spese/entrate
   const [expPage, setExpPage] = useState(0);
@@ -161,6 +167,9 @@ export default function SpazioPage() {
   const [snack, setSnack] = useState<{ open: boolean; msg: string; severity: "success" | "error" }>({
     open: false, msg: "", severity: "success",
   });
+
+  // Menu di modifica rapida categoria (click sul chip in tabella spese)
+  const [catMenu, setCatMenu] = useState<{ anchorEl: HTMLElement; expenseId: number } | null>(null);
 
   // Suggerimenti budget (calcolati on-demand, non persistiti)
   const [suggestions, setSuggestions] = useState<Record<string, number>>({});
@@ -267,11 +276,24 @@ export default function SpazioPage() {
     }
   }, [incPage, incRowsPP, incStart, incEnd, incSearch, incType, incAccId, incSortBy, incSortDir]);
 
+  const fetchTransfers = useCallback(async (start = monthStartIso(), end = todayIso()) => {
+    setLoading(l => ({ ...l, transfers: true }));
+    try {
+      const params = new URLSearchParams({ start, end });
+      const res = await fetch(`/api/space/transfers?${params}`, { headers: await buildHeaders() });
+      const json = await res.json();
+      setTransfers(json.transfers ?? []);
+    } finally {
+      setLoading(l => ({ ...l, transfers: false }));
+    }
+  }, []);
+
   // Carica tutto al mount e poi su cambio tab
   useEffect(() => { fetchAccounts(); fetchCategories(); fetchSubscriptions(); fetchSuggestions(); }, [fetchAccounts, fetchCategories, fetchSubscriptions, fetchSuggestions]);
   useEffect(() => { if (tab === 1) fetchSuggestions(); }, [tab, fetchSuggestions]);
   useEffect(() => { if (tab === 3) fetchExpenses(); }, [tab, fetchExpenses]);
   useEffect(() => { if (tab === 4) fetchIncomes(); }, [tab, fetchIncomes]);
+  useEffect(() => { if (tab === 5) fetchTransfers(); }, [tab, fetchTransfers]);
 
   // ---------------------------------------------------------------------------
   // Dialog helpers
@@ -284,6 +306,7 @@ export default function SpazioPage() {
       subscription: { name: "", amount: "", sub_type: "", last_billed: "", account_id: "", category_id: "" },
       expense: { name: "", amount: "", date: todayIso(), category: "", category_id: "", account_id: "" },
       income: { name: "", amount: "", date: todayIso(), income_type: "", account_id: "" },
+      transfer: { name: "", amount: "", date: todayIso(), from_account_id: "", to_account_id: "" },
     };
     setDialog({ open: true, mode: "add", entity, data: defaults[entity] });
   }
@@ -335,6 +358,32 @@ export default function SpazioPage() {
   }
 
   // ---------------------------------------------------------------------------
+  // Modifica rapida categoria (click sul chip in tabella spese)
+  // ---------------------------------------------------------------------------
+
+  async function quickUpdateCategory(expenseId: number, category: Category) {
+    setCatMenu(null);
+    try {
+      const res = await fetch(`/api/space/expenses/${expenseId}`, {
+        method: "PUT",
+        headers: await buildHeaders(),
+        body: JSON.stringify({ category_id: category.id }),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.error || "Errore sconosciuto");
+      }
+      setExpenses(prev => prev.map(e =>
+        e.id === expenseId ? { ...e, category_id: category.id, category: category.name } : e
+      ));
+      setSnack({ open: true, msg: "Categoria aggiornata", severity: "success" });
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : "Errore";
+      setSnack({ open: true, msg, severity: "error" });
+    }
+  }
+
+  // ---------------------------------------------------------------------------
   // Delete
   // ---------------------------------------------------------------------------
 
@@ -362,6 +411,7 @@ export default function SpazioPage() {
     else if (entity === "subscription") fetchSubscriptions();
     else if (entity === "expense") fetchExpenses();
     else if (entity === "income") fetchIncomes();
+    else if (entity === "transfer") { fetchTransfers(); fetchAccounts(); }
   }
 
   // ---------------------------------------------------------------------------
@@ -700,8 +750,25 @@ export default function SpazioPage() {
                   </TableCell>
                   <TableCell sx={CELL_SX}>
                     {row.category
-                      ? <Chip label={row.category} size="small" sx={{ fontSize: "0.7rem", bgcolor: "#F0EDE8" }} />
-                      : <span style={{ color: "#9CA3AF" }}>—</span>}
+                      ? (
+                        <Chip
+                          label={row.category}
+                          size="small"
+                          clickable
+                          onClick={e => setCatMenu({ anchorEl: e.currentTarget, expenseId: row.id })}
+                          sx={{ fontSize: "0.7rem", bgcolor: "#F0EDE8" }}
+                        />
+                      )
+                      : (
+                        <Chip
+                          label="Assegna categoria"
+                          size="small"
+                          clickable
+                          variant="outlined"
+                          onClick={e => setCatMenu({ anchorEl: e.currentTarget, expenseId: row.id })}
+                          sx={{ fontSize: "0.7rem", color: "#9CA3AF", borderStyle: "dashed" }}
+                        />
+                      )}
                   </TableCell>
                   <TableCell sx={{ ...CELL_SX, color: "#6B7280" }}>{row.account || "—"}</TableCell>
                   <TableCell sx={CELL_SX}>
@@ -731,6 +798,18 @@ export default function SpazioPage() {
           labelRowsPerPage="Righe:"
           sx={{ fontSize: "0.75rem" }}
         />
+        <Menu
+          anchorEl={catMenu?.anchorEl ?? null}
+          open={!!catMenu}
+          onClose={() => setCatMenu(null)}
+        >
+          {categories.map(c => (
+            <MenuItem key={c.id} onClick={() => catMenu && quickUpdateCategory(catMenu.expenseId, c)}>
+              {c.name}
+            </MenuItem>
+          ))}
+          {categories.length === 0 && <MenuItem disabled>Nessuna categoria disponibile</MenuItem>}
+        </Menu>
       </>
     );
   }
@@ -821,6 +900,48 @@ export default function SpazioPage() {
           sx={{ fontSize: "0.75rem" }}
         />
       </>
+    );
+  }
+
+  function renderTransfers() {
+    const accName = (id: number) => accounts.find(a => a.id === id)?.name ?? "—";
+    return (
+      <Box>
+        <TabToolbar label="Trasferimenti" onAdd={() => openAdd("transfer")} loading={loading.transfers}>
+          {accounts.length < 2 && (
+            <Typography variant="caption" sx={{ color: "#9CA3AF" }}>
+              Servono almeno due conti per creare un trasferimento
+            </Typography>
+          )}
+        </TabToolbar>
+        <TableContainer sx={{ overflowX: "auto" }}>
+          <Table size="small" sx={{ minWidth: 600 }}>
+            <TableHead>
+              <TableRow>
+                <TableCell sx={HEAD_SX}>Data</TableCell>
+                <TableCell sx={HEAD_SX}>Descrizione</TableCell>
+                <TableCell sx={HEAD_SX}>Da</TableCell>
+                <TableCell sx={HEAD_SX}>A</TableCell>
+                <TableCell sx={{ ...HEAD_SX, textAlign: "right" }}>Importo</TableCell>
+              </TableRow>
+            </TableHead>
+            <TableBody>
+              {transfers.map(row => (
+                <TableRow key={row.id} hover>
+                  <TableCell sx={{ ...CELL_SX, color: "#6B7280" }}>{row.date}</TableCell>
+                  <TableCell sx={CELL_SX}>{row.name}</TableCell>
+                  <TableCell sx={{ ...CELL_SX, color: "#6B7280" }}>{accName(row.from_account_id)}</TableCell>
+                  <TableCell sx={{ ...CELL_SX, color: "#6B7280" }}>{accName(row.to_account_id)}</TableCell>
+                  <TableCell sx={{ ...CELL_SX, textAlign: "right", color: PRIMARY, fontWeight: 600 }}>
+                    {fmtCurrency(row.amount)}
+                  </TableCell>
+                </TableRow>
+              ))}
+              {!loading.transfers && transfers.length === 0 && <EmptyRow colSpan={5} />}
+            </TableBody>
+          </Table>
+        </TableContainer>
+      </Box>
     );
   }
 
@@ -957,12 +1078,47 @@ export default function SpazioPage() {
       </>
     );
 
+    if (entity === "transfer") {
+      const fromId = data.from_account_id ?? "";
+      return (
+        <>
+          <TextField label="Descrizione" fullWidth size="small" margin="dense" value={data.name ?? ""}
+            onChange={e => setField("name", e.target.value)} />
+          <TextField label="Importo (€) *" fullWidth size="small" margin="dense" type="number"
+            value={data.amount ?? ""}
+            onChange={e => setField("amount", e.target.value)} />
+          <TextField label="Data *" fullWidth size="small" margin="dense" type="date"
+            value={data.date ?? todayIso()}
+            slotProps={{ inputLabel: { shrink: true } }}
+            onChange={e => setField("date", e.target.value)} />
+          <FormControl fullWidth size="small" margin="dense">
+            <InputLabel>Da conto *</InputLabel>
+            <Select label="Da conto *" value={fromId}
+              onChange={e => setField("from_account_id", e.target.value)}>
+              <MenuItem value=""><em>Nessuno</em></MenuItem>
+              {accounts.map(a => <MenuItem key={a.id} value={a.id}>{a.name}</MenuItem>)}
+            </Select>
+          </FormControl>
+          <FormControl fullWidth size="small" margin="dense">
+            <InputLabel>A conto *</InputLabel>
+            <Select label="A conto *" value={data.to_account_id ?? ""}
+              onChange={e => setField("to_account_id", e.target.value)}>
+              <MenuItem value=""><em>Nessuno</em></MenuItem>
+              {accounts.filter(a => String(a.id) !== String(fromId)).map(a => (
+                <MenuItem key={a.id} value={a.id}>{a.name}</MenuItem>
+              ))}
+            </Select>
+          </FormControl>
+        </>
+      );
+    }
+
     return null;
   }
 
   const ENTITY_LABELS: Record<EntityType, string> = {
     account: "Conto", category: "Categoria", subscription: "Abbonamento",
-    expense: "Spesa", income: "Entrata",
+    expense: "Spesa", income: "Entrata", transfer: "Trasferimento",
   };
 
   // ---------------------------------------------------------------------------
@@ -1020,6 +1176,7 @@ export default function SpazioPage() {
           <Tab label="Abbonamenti" />
           <Tab label="Spese" />
           <Tab label="Entrate" />
+          <Tab label="Trasferimenti" />
         </Tabs>
 
         <CardContent sx={{ p: 0, "&:last-child": { pb: 0 } }}>
@@ -1028,6 +1185,7 @@ export default function SpazioPage() {
           {tab === 2 && renderSubscriptions()}
           {tab === 3 && renderExpenses()}
           {tab === 4 && renderIncomes()}
+          {tab === 5 && renderTransfers()}
         </CardContent>
       </Card>
 

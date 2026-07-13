@@ -17,7 +17,9 @@ from sqlalchemy.orm import Session
 import uuid
 
 from src.storage.base import FinancialStorage
-from src.storage.models import Account, UserCategory, UserCategoryNotionLink, Expense, Income, Subscription, SavedReport
+from src.storage.models import (
+    Account, UserCategory, UserCategoryNotionLink, Expense, Income, Subscription, SavedReport, Transfer,
+)
 from src.storage import rls  # registra il listener RLS e fornisce bind_user
 
 
@@ -79,7 +81,7 @@ class PostgresStorage(FinancialStorage):
         return new_cat.id
 
     def _compute_balance(self, account: Account) -> Decimal:
-        """Calcola il saldo corrente: opening_balance + entrate - uscite."""
+        """Calcola il saldo corrente: opening_balance + entrate - uscite + trasferimenti in - trasferimenti out."""
         total_income = self._session.query(
             func.coalesce(func.sum(Income.amount), 0)
         ).filter(
@@ -94,8 +96,28 @@ class PostgresStorage(FinancialStorage):
             Expense.account_id == account.id,
         ).scalar() or 0
 
+        total_transfer_in = self._session.query(
+            func.coalesce(func.sum(Transfer.amount), 0)
+        ).filter(
+            Transfer.user_id == self._user_id,
+            Transfer.to_account_id == account.id,
+        ).scalar() or 0
+
+        total_transfer_out = self._session.query(
+            func.coalesce(func.sum(Transfer.amount), 0)
+        ).filter(
+            Transfer.user_id == self._user_id,
+            Transfer.from_account_id == account.id,
+        ).scalar() or 0
+
         opening = account.opening_balance if account.opening_balance is not None else Decimal(0)
-        return Decimal(str(opening)) + Decimal(str(total_income)) - Decimal(str(total_expense))
+        return (
+            Decimal(str(opening))
+            + Decimal(str(total_income))
+            - Decimal(str(total_expense))
+            + Decimal(str(total_transfer_in))
+            - Decimal(str(total_transfer_out))
+        )
 
     # ------------------------------------------------------------------ categories
 
@@ -358,6 +380,60 @@ class PostgresStorage(FinancialStorage):
         self._session.delete(row)
         self._commit()
         return True
+
+    # ------------------------------------------------------------------ transfers
+
+    def create_transfer(
+        self,
+        transfer_date: date,
+        amount: float,
+        from_account_id: str,
+        to_account_id: str,
+        name: str | None = None,
+    ) -> dict:
+        """Crea un trasferimento tra due conti dello stesso utente."""
+        from_id_int = int(from_account_id)
+        to_id_int = int(to_account_id)
+        if from_id_int == to_id_int:
+            raise ValueError("Il conto di origine e di destinazione devono essere diversi")
+
+        transfer = Transfer(
+            user_id=self._user_id,
+            from_account_id=from_id_int,
+            to_account_id=to_id_int,
+            amount=abs(float(amount)),
+            transfer_date=transfer_date,
+            name=name,
+        )
+        self._session.add(transfer)
+        self._commit()
+        return {
+            "id": transfer.id,
+            "date": transfer.transfer_date,
+            "amount": _d(transfer.amount),
+            "from_account_id": transfer.from_account_id,
+            "to_account_id": transfer.to_account_id,
+            "name": transfer.name,
+        }
+
+    def fetch_transfers(self, start_date: date, end_date: date) -> list[dict]:
+        """Restituisce tutti i trasferimenti nell'intervallo."""
+        rows = self._session.query(Transfer).filter(
+            Transfer.user_id == self._user_id,
+            Transfer.transfer_date >= start_date,
+            Transfer.transfer_date <= end_date,
+        ).all()
+        return [
+            {
+                "id": r.id,
+                "date": r.transfer_date,
+                "amount": _d(r.amount),
+                "from_account_id": r.from_account_id,
+                "to_account_id": r.to_account_id,
+                "name": r.name,
+            }
+            for r in rows
+        ]
 
     # ------------------------------------------------------------------ monthly balances
 

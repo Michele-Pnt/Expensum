@@ -14,7 +14,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from src.user_store import Base, User
-from src.storage.models import Account, UserCategory, Expense, Income, Subscription, SavedReport
+from src.storage.models import Account, UserCategory, Expense, Income, Subscription, SavedReport, Transfer
 from src.storage.postgres_storage import PostgresStorage
 
 pytestmark = pytest.mark.integration
@@ -376,6 +376,86 @@ class TestFetchAccounts:
         db_session.commit()
 
         assert storage.fetch_accounts() == []
+
+
+# ---------------------------------------------------------------------------
+# 6b. create_transfer / fetch_transfers
+# ---------------------------------------------------------------------------
+
+class TestCreateTransfer:
+    def test_creates_transfer_and_updates_both_balances(self, db_session, storage):
+        db_session.add(Account(user_id="test_user_1", name="Corrente", opening_balance=1000.0))
+        db_session.add(Account(user_id="test_user_1", name="Risparmio", opening_balance=200.0))
+        db_session.commit()
+        corrente = db_session.query(Account).filter_by(name="Corrente").first()
+        risparmio = db_session.query(Account).filter_by(name="Risparmio").first()
+
+        storage.create_transfer(
+            transfer_date=date(2026, 4, 1),
+            amount=300.0,
+            from_account_id=corrente.id,
+            to_account_id=risparmio.id,
+            name="Giroconto",
+        )
+
+        accounts = {a["name"]: a["current_balance"] for a in storage.fetch_accounts()}
+        assert accounts["Corrente"] == 1000.0 - 300.0
+        assert accounts["Risparmio"] == 200.0 + 300.0
+
+    def test_rejects_same_account(self, db_session, storage):
+        db_session.add(Account(user_id="test_user_1", name="Solo", opening_balance=100.0))
+        db_session.commit()
+        acc = db_session.query(Account).filter_by(name="Solo").first()
+
+        with pytest.raises(ValueError):
+            storage.create_transfer(
+                transfer_date=date(2026, 4, 1),
+                amount=50.0,
+                from_account_id=acc.id,
+                to_account_id=acc.id,
+            )
+
+    def test_amount_is_stored_positive(self, db_session, storage):
+        db_session.add(Account(user_id="test_user_1", name="A", opening_balance=0.0))
+        db_session.add(Account(user_id="test_user_1", name="B", opening_balance=0.0))
+        db_session.commit()
+        a = db_session.query(Account).filter_by(name="A").first()
+        b = db_session.query(Account).filter_by(name="B").first()
+
+        result = storage.create_transfer(
+            transfer_date=date(2026, 4, 1), amount=-75.0, from_account_id=a.id, to_account_id=b.id,
+        )
+        assert result["amount"] == 75.0
+
+
+class TestFetchTransfers:
+    def test_returns_transfers_in_range(self, db_session, storage):
+        db_session.add(Account(user_id="test_user_1", name="A", opening_balance=0.0))
+        db_session.add(Account(user_id="test_user_1", name="B", opening_balance=0.0))
+        db_session.commit()
+        a = db_session.query(Account).filter_by(name="A").first()
+        b = db_session.query(Account).filter_by(name="B").first()
+
+        storage.create_transfer(date(2026, 4, 15), 100.0, a.id, b.id)
+
+        results = storage.fetch_transfers(date(2026, 4, 1), date(2026, 4, 30))
+        assert len(results) == 1
+        assert results[0]["amount"] == 100.0
+        assert results[0]["from_account_id"] == a.id
+        assert results[0]["to_account_id"] == b.id
+
+    def test_does_not_return_other_users_transfers(self, db_session, storage):
+        db_session.add(User(chat_id="other_user5", is_active=True))
+        db_session.add(Account(user_id="other_user5", name="Alieno1", opening_balance=0.0))
+        db_session.add(Account(user_id="other_user5", name="Alieno2", opening_balance=0.0))
+        db_session.commit()
+        a = db_session.query(Account).filter_by(name="Alieno1").first()
+        b = db_session.query(Account).filter_by(name="Alieno2").first()
+        db_session.add(Transfer(user_id="other_user5", from_account_id=a.id, to_account_id=b.id,
+                                 amount=10.0, transfer_date=date(2026, 4, 1)))
+        db_session.commit()
+
+        assert storage.fetch_transfers(date(2026, 4, 1), date(2026, 4, 30)) == []
 
 
 # ---------------------------------------------------------------------------

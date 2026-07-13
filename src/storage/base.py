@@ -70,6 +70,23 @@ class FinancialStorage(ABC):
         ...
 
     @abstractmethod
+    def create_transfer(
+        self,
+        transfer_date: date,
+        amount: float,
+        from_account_id: str,
+        to_account_id: str,
+        name: str | None = None,
+    ) -> dict:
+        """Crea un trasferimento tra due conti e restituisce un dict con i dati salvati."""
+        ...
+
+    @abstractmethod
+    def fetch_transfers(self, start_date: date, end_date: date) -> list[dict]:
+        """Restituisce tutti i trasferimenti nel periodo indicato."""
+        ...
+
+    @abstractmethod
     def create_subscription(self, name: str) -> dict:
         """Crea un nuovo abbonamento. Restituisce dict con almeno 'id' e 'name'."""
         ...

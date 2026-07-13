@@ -75,6 +75,27 @@ class NotionStorage(FinancialStorage):
         result = self._client.create_category(name)
         return {"id": result["id"], "name": name}
 
+    def create_transfer(
+        self,
+        transfer_date: date,
+        amount: float,
+        from_account_id: str,
+        to_account_id: str,
+        name: str | None = None,
+    ) -> dict:
+        result = self._client.create_transfer(
+            transfer_date, amount, from_account_id, to_account_id, name=name,
+        )
+        return {
+            "id": result["id"],
+            "amount": amount,
+            "from_account_id": from_account_id,
+            "to_account_id": to_account_id,
+        }
+
+    def fetch_transfers(self, start_date: date, end_date: date) -> list[dict]:
+        return self._client.fetch_transfers(start_date, end_date)
+
     def create_subscription(self, name: str) -> dict:
         result = self._client.create_subscription(name)
         return {"id": result["id"], "name": name}

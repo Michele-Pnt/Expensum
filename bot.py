@@ -19,6 +19,7 @@ Avvio:
 import argparse
 import asyncio
 import csv
+import difflib
 import io
 import logging
 import shutil
@@ -1340,6 +1341,250 @@ async def cmd_logout(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     )
 
 
+# ---------------------------------------------------------------------------
+# /trasferimento — Spostamento di denaro guidato a bottoni tra due conti
+# ---------------------------------------------------------------------------
+
+async def cmd_trasferimento(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Avvia il flusso guidato a bottoni per spostare denaro tra due conti dell'utente.
+
+    Stessa pipeline di risoluzione conti/importo/conferma usata dal ramo NLP in
+    _process_expense_text — vedi _advance_transfer_flow.
+    """
+    if not _is_authorized(update):
+        await _reply_not_authorized(update)
+        return
+
+    chat_id = str(update.effective_chat.id)
+
+    if is_rate_limited(chat_id, max_messages=Config.MAX_MESSAGES_PER_MINUTE):
+        await update.message.reply_text("⏳ Stai inviando troppi messaggi. Aspetta un momento e riprova.")
+        return
+
+    context.user_data["pending_expense"] = {
+        "type": "transfer",
+        "date": date.today().isoformat(),
+        "amount": None,
+        "category": None,
+        "income_type": None,
+        "name": "Trasferimento",
+        "from_account_id": None,
+        "to_account_id": None,
+    }
+    context.user_data.pop("waiting_for_amount", None)
+    context.user_data.pop("expense_queue", None)
+    context.user_data["input_method"] = "button"
+
+    async def _send(text, reply_markup=None):
+        await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=reply_markup)
+
+    await _advance_transfer_flow(context, chat_id, _send)
+
+
+def _build_expense_summary(data: dict) -> str:
+    """Costruisce il testo di riepilogo per una spesa/entrata in sospeso di conferma."""
+    from datetime import datetime
+    dt = datetime.fromisoformat(data["date"]) if isinstance(data["date"], str) else data["date"]
+    date_str = dt.strftime("%d/%m/%Y")
+    if data.get("type") == "income":
+        income_type_label = data.get("income_type") or "Non determinato"
+        return (
+            f"📝 *Nuova Entrata riconosciuta:*\n\n"
+            f"📅 Data: *{date_str}*\n"
+            f"💰 Importo: *€{data['amount']:.2f}*\n"
+            f"🏷️ Tipo: *{income_type_label}*\n"
+            f"📝 Descrizione: *{data['name']}*"
+        )
+    if data.get("type") == "transfer":
+        from_name = data.get("from_account_name") or "—"
+        to_name = data.get("to_account_name") or "—"
+        return (
+            f"📝 *Nuovo trasferimento riconosciuto:*\n\n"
+            f"📅 Data: *{date_str}*\n"
+            f"💰 Importo: *€{data['amount']:.2f}*\n"
+            f"🏦 Da: *{from_name}*\n"
+            f"🏦 A: *{to_name}*\n"
+            f"📝 Descrizione: *{data['name']}*"
+        )
+    return (
+        f"📝 *Nuova spesa riconosciuta:*\n\n"
+        f"📅 Data: *{date_str}*\n"
+        f"💰 Importo: *€{data['amount']:.2f}*\n"
+        f"📂 Categoria: *{data['category'] or 'Non determinata'}*\n"
+        f"📝 Descrizione: *{data['name']}*"
+    )
+
+
+def _build_confirm_keyboard(data: dict) -> InlineKeyboardMarkup:
+    """Costruisce la tastiera di conferma spesa/entrata, con bottone di modifica categoria per le spese."""
+    rows = []
+    if data.get("type") == "expense":
+        rows.append([InlineKeyboardButton("✏️ Cambia categoria", callback_data="edit_category")])
+    rows.append([
+        InlineKeyboardButton("✅ Conferma", callback_data="confirm"),
+        InlineKeyboardButton("❌ Annulla", callback_data="cancel"),
+    ])
+    return InlineKeyboardMarkup(rows)
+
+
+def _resolve_account_hint(hint: str | None, accounts: list[dict]) -> dict | None:
+    """Risolve un nome conto libero (hint estratto dall'NLP) su un conto reale dell'utente.
+
+    Prova prima il match esatto case-insensitive, poi un fuzzy match (stessa soglia 0.6
+    usata in expense_parser.py per categorie/income_type). None se non menzionato o
+    se non trova nessun conto abbastanza simile.
+    """
+    if not hint:
+        return None
+    hint_low = hint.strip().lower()
+    for acc in accounts:
+        if acc["name"].strip().lower() == hint_low:
+            return acc
+    names_low = [a["name"].strip().lower() for a in accounts]
+    matches = difflib.get_close_matches(hint_low, names_low, n=1, cutoff=0.6)
+    if matches:
+        return next(a for a in accounts if a["name"].strip().lower() == matches[0])
+    return None
+
+
+async def _advance_transfer_flow(context: ContextTypes.DEFAULT_TYPE, chat_id: str, send) -> None:
+    """Fa avanzare il flusso guidato di un trasferimento in sospeso.
+
+    Chiamata sia dal comando /trasferimento (bottoni), sia dal ramo NLP quando l'LLM
+    riconosce un `type: "transfer"`: in entrambi i casi lo stato vive in
+    `context.user_data["pending_expense"]` e questa funzione decide il prossimo step
+    (risoluzione conto origine/destinazione, richiesta importo, riepilogo di conferma).
+
+    `send(text, reply_markup=None)` astrae il canale di invio (nuovo messaggio o edit
+    di una callback query) così la stessa logica serve per bottoni, NLP e conferma importo.
+    """
+    pending = context.user_data.get("pending_expense")
+    if not pending or pending.get("type") != "transfer":
+        return
+
+    if pending.get("from_account_id") is None or pending.get("to_account_id") is None:
+        try:
+            storage = _get_storage(chat_id)
+            accounts = storage.fetch_accounts()
+        except Exception as e:
+            logger.error(f"[User {chat_id}] Errore fetch accounts per trasferimento: {e}")
+            await send("⚠️ Errore nel recupero dei tuoi conti. Riprova tra qualche istante.")
+            return
+
+        if len(accounts) < 2:
+            context.user_data.pop("pending_expense", None)
+            context.user_data.pop("waiting_for_amount", None)
+            context.user_data.pop("expense_queue", None)
+            await send(
+                "🏦 Ti servono almeno due conti per fare un trasferimento.\n\n"
+                "Usa /modify e vai nella tab \"Conti\" per aggiungerne un secondo."
+            )
+            return
+
+        # Risolve una tantum gli hint testuali del parser NLP sui conti reali dell'utente.
+        if pending.get("from_account_id") is None and not pending.get("_from_hint_tried"):
+            pending["_from_hint_tried"] = True
+            match = _resolve_account_hint(pending.get("from_account_hint"), accounts)
+            if match:
+                pending["from_account_id"] = match["id"]
+                pending["from_account_name"] = match["name"]
+        if pending.get("to_account_id") is None and not pending.get("_to_hint_tried"):
+            pending["_to_hint_tried"] = True
+            match = _resolve_account_hint(pending.get("to_account_hint"), accounts)
+            if match and str(match["id"]) != str(pending.get("from_account_id")):
+                pending["to_account_id"] = match["id"]
+                pending["to_account_name"] = match["name"]
+
+        if pending.get("from_account_id") is None:
+            keyboard = [
+                [InlineKeyboardButton(f"🏦 {a['name']}", callback_data=f"transfer_from:{a['id']}")]
+                for a in accounts
+            ]
+            keyboard.append([InlineKeyboardButton("❌ Annulla", callback_data="cancel")])
+            await send("🏦 Da quale conto vuoi spostare i soldi?", InlineKeyboardMarkup(keyboard))
+            return
+
+        if pending.get("to_account_id") is None:
+            remaining = [a for a in accounts if str(a["id"]) != str(pending["from_account_id"])]
+            if not remaining:
+                await send("⚠️ Ti serve un secondo conto diverso da quello di origine per completare il trasferimento.")
+                return
+            keyboard = [
+                [InlineKeyboardButton(f"🏦 {a['name']}", callback_data=f"transfer_to:{a['id']}")]
+                for a in remaining
+            ]
+            keyboard.append([InlineKeyboardButton("❌ Annulla", callback_data="cancel")])
+            await send("🏦 Su quale conto vuoi spostare i soldi?", InlineKeyboardMarkup(keyboard))
+            return
+
+    if pending.get("amount") is None:
+        context.user_data["waiting_for_amount"] = True
+        await send("📝 Quanto vuoi trasferire? Scrivi solo l'importo (es. 100).")
+        return
+
+    summary = _build_expense_summary(pending)
+    keyboard = _build_confirm_keyboard(pending)
+    await send(summary, keyboard)
+
+
+async def _present_next_pending_expense(context: ContextTypes.DEFAULT_TYPE, chat_id: str) -> bool:
+    """Estrae la prossima transazione dalla coda multi-spesa e ne invia il messaggio di conferma
+    (o la richiesta di importo mancante), come nuovo messaggio in chat.
+
+    Usata sia per la prima transazione rilevata sia per presentare in sequenza quelle successive
+    dopo che l'utente ha confermato/annullato/scelto il conto per la transazione precedente.
+
+    Returns:
+        True se c'era una transazione in coda da presentare, False se la coda era vuota.
+    """
+    queue = context.user_data.get("expense_queue") or []
+    if not queue:
+        return False
+
+    result = queue.pop(0)
+    pending = {
+        "type": result["type"],
+        "date": result["date"].isoformat(),
+        "amount": result["amount"],
+        "category": result["category"],
+        "income_type": result.get("income_type"),
+        "name": result["name"],
+    }
+    if result["type"] == "transfer":
+        pending["from_account_hint"] = result.get("from_account")
+        pending["to_account_hint"] = result.get("to_account")
+        pending["from_account_id"] = None
+        pending["to_account_id"] = None
+    context.user_data["pending_expense"] = pending
+
+    if result["type"] == "transfer":
+        async def _send(text, reply_markup=None):
+            await context.bot.send_message(
+                chat_id=chat_id, text=text, parse_mode=ParseMode.MARKDOWN, reply_markup=reply_markup,
+            )
+        await _advance_transfer_flow(context, chat_id, _send)
+        return True
+
+    if result["amount"] is None:
+        _user_store.increment_ai_metrics(success=False)
+        context.user_data["waiting_for_amount"] = True
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text="📝 Non ho Capito l'importo. Prova a ridirmelo, grazie!❤️\n",
+            parse_mode=ParseMode.MARKDOWN,
+        )
+        return True
+
+    summary = _build_expense_summary(context.user_data["pending_expense"])
+    keyboard = _build_confirm_keyboard(context.user_data["pending_expense"])
+    await context.bot.send_message(chat_id=chat_id, text=summary, parse_mode=ParseMode.MARKDOWN, reply_markup=keyboard)
+    try:
+        _user_store.log_message(chat_id, source="telegram", role="bot", text=summary, metadata=result)
+    except Exception as _le:
+        logger.debug("[User %s] log_message bot summary fallito: %s", chat_id, _le)
+    return True
+
+
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handler per messaggi di testo — parsing spesa con LLM."""
     
@@ -1410,25 +1655,16 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
              
         context.user_data["pending_expense"]["amount"] = amt
         context.user_data["waiting_for_amount"] = False
-        
+
         # Procede alla conferma
         data = context.user_data["pending_expense"]
-        from datetime import datetime
-        dt = datetime.fromisoformat(data["date"])
-        date_str = dt.strftime("%d/%m/%Y")
-        summary = (
-            f"📝 *Nuova spesa riconosciuta:*\n\n"
-            f"📅 Data: *{date_str}*\n"
-            f"💰 Importo: *€{data['amount']:.2f}*\n"
-            f"📂 Categoria: *{data['category'] or 'Non determinata'}*\n"
-            f"📝 Descrizione: *{data['name']}*"
-        )
-        keyboard = InlineKeyboardMarkup([
-            [
-                InlineKeyboardButton("✅ Conferma", callback_data="confirm"),
-                InlineKeyboardButton("❌ Annulla", callback_data="cancel"),
-            ]
-        ])
+        if data.get("type") == "transfer":
+            async def _send(text, reply_markup=None):
+                await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=reply_markup)
+            await _advance_transfer_flow(context, chat_id, _send)
+            return
+        summary = _build_expense_summary(data)
+        keyboard = _build_confirm_keyboard(data)
         await update.message.reply_text(summary, parse_mode=ParseMode.MARKDOWN, reply_markup=keyboard)
         return
 
@@ -1459,8 +1695,8 @@ async def _process_expense_text(update: Update, context: ContextTypes.DEFAULT_TY
 
     # 1. Recuperiamo il parser specifico per l'utente
     parser = _get_parser(chat_id)
-    # 2. Parsa con LLM (input sanificato)
-    result, usage = parser.parse_with_usage(safe_input)
+    # 2. Parsa con LLM (input sanificato) — l'LLM decide se è una o più transazioni
+    transactions, usage = parser.parse_multi_with_usage(safe_input)
     raw_usage = usage or {}
     normalized_usage = normalize_usage_metadata(raw_usage)
 
@@ -1484,7 +1720,7 @@ async def _process_expense_text(update: Update, context: ContextTypes.DEFAULT_TY
         except Exception as _e:
             logger.warning("[User %s] release_llm_reservation fallita: %s", chat_id, _e)
 
-    if result is None:
+    if not transactions:
         _user_store.increment_ai_metrics(success=False)
         analytics.track(chat_id, "expense_tracking_failed", {"reason": "ai_unavailable", "input_method": "text"})
         await update.message.reply_text(
@@ -1493,66 +1729,12 @@ async def _process_expense_text(update: Update, context: ContextTypes.DEFAULT_TY
         )
         return
 
-    logger.info(f"[User {chat_id}] Risultato parser: {result['type']} - {result['name']} (€{result['amount']})")
+    logger.info(f"[User {chat_id}] Risultato parser: {len(transactions)} transazione/i rilevate")
 
-    # Salva i dati nel contesto utente (evita il limite 64 byte di callback_data)
-    context.user_data["pending_expense"] = {
-        "type": result["type"],
-        "date": result["date"].isoformat(),
-        "amount": result["amount"],
-        "category": result["category"],
-        "income_type": result.get("income_type"),
-        "name": result["name"],
-    }
-    
-    # Se manca l'importo, chiedi chiarimento e metti in attesa
-    if result["amount"] is None:
-        _user_store.increment_ai_metrics(success=False)
-        context.user_data["waiting_for_amount"] = True
-        cat_info = f" ({result['category']})" if result["category"] else ""
-        await update.message.reply_text(
-            f"📝 Non ho Capito l'importo. Prova a ridirmelo, grazie!❤️\n",
-            parse_mode=ParseMode.MARKDOWN,
-        )
-        return
-    date_str = result["date"].strftime("%d/%m/%Y")
-
-    # Scegliamo l'etichetta giusta in base al tipo
-    if result.get("type") == "income":
-        # Se abbiamo già tutto, formatta l'entrata
-        
-        income_type_label = result.get("income_type") or "Non determinato"
-        summary = (
-            f"📝 *Nuova Entrata riconosciuta:*\n\n"
-            f"📅 Data: *{date_str}*\n"
-            f"💰 Importo: *€{result['amount']:.2f}*\n"
-            f"🏷️ Tipo: *{income_type_label}*\n"
-            f"📝 Descrizione: *{result['name']}*"
-        )
-
-    else:
-        # Se abbiamo già tutto, formatta la spesa
-        summary = (
-            f"📝 *Nuova spesa riconosciuta:*\n\n"
-            f"📅 Data: *{date_str}*\n"
-            f"💰 Importo: *€{result['amount']:.2f}*\n"
-            f"📂 Categoria: *{result['category'] or 'Non determinata'}*\n"
-            f"📝 Descrizione: *{result['name']}*"
-        )
-
-    # Bottoni inline
-    keyboard = InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton("✅ Conferma", callback_data="confirm"),
-            InlineKeyboardButton("❌ Annulla", callback_data="cancel"),
-        ]
-    ])
-
-    await update.message.reply_text(summary, parse_mode=ParseMode.MARKDOWN, reply_markup=keyboard)
-    try:
-        _user_store.log_message(chat_id, source="telegram", role="bot", text=summary, metadata=result)
-    except Exception as _le:
-        logger.debug("[User %s] log_message bot summary fallito: %s", chat_id, _le)
+    # Mette in coda tutte le transazioni rilevate (una sola, se il messaggio ne descriveva una)
+    # e presenta subito la prima con il consueto messaggio di conferma + scelta conto.
+    context.user_data["expense_queue"] = transactions
+    await _present_next_pending_expense(context, chat_id)
 
 async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handler per messaggi vocali — trascrizione e parsing spesa con LLM."""
@@ -1871,12 +2053,84 @@ async def _save_to_notion(query, context, chat_id: str, account_id: str | None =
         except Exception as e:
             logger.warning(f"[User {chat_id}] Errore refresh dashboard post-save: {e}")
 
+        # Messaggio multi-spesa: se ce ne sono altre in coda, presenta subito la prossima
+        try:
+            await _present_next_pending_expense(context, chat_id)
+        except Exception as e:
+            logger.warning(f"[User {chat_id}] Errore presentazione prossima transazione in coda: {e}")
+
     except Exception as e:
         logger.error(f"Errore salvataggio Notion: {e}")
         await query.edit_message_text(
             "⚠️ Non sono riuscito a salvare su Notion in questo momento.\n"
             "Riprova tra qualche secondo oppure contatta il supporto se il problema persiste.",
         )
+
+
+async def _save_transfer(query, context, chat_id: str) -> None:
+    """Salva un trasferimento in sospeso (conti origine/destinazione già risolti). Mirror di _save_to_notion."""
+    data = context.user_data.pop("pending_expense", None)
+    context.user_data.pop("waiting_for_amount", None)
+
+    if not data:
+        await query.edit_message_text("⚠️ Nessun trasferimento in sospeso.")
+        return
+
+    try:
+        transfer_date = datetime.strptime(data["date"].split("T")[0], "%Y-%m-%d").date()
+
+        storage = _get_storage(chat_id)
+        storage.create_transfer(
+            transfer_date=transfer_date,
+            amount=data["amount"],
+            from_account_id=data["from_account_id"],
+            to_account_id=data["to_account_id"],
+            name=data.get("name"),
+        )
+        date_str = transfer_date.strftime("%d/%m/%Y")
+        from_name = data.get("from_account_name") or "conto di origine"
+        to_name = data.get("to_account_name") or "conto di destinazione"
+        await query.edit_message_text(
+            f"✅ *Trasferimento salvato!*\n\n"
+            f"📅 {date_str} — *€{data['amount']:.2f}*\n"
+            f"🏦 {from_name} → {to_name}",
+            parse_mode=ParseMode.MARKDOWN,
+        )
+        logger.info(f"[User {chat_id}] Trasferimento salvato: €{data['amount']:.2f}")
+        try:
+            _success_text = f"✅ Trasferimento salvato: €{data['amount']:.2f}"
+            _user_store.log_message(chat_id, source="telegram", role="bot", text=_success_text, metadata=data)
+        except Exception as _le:
+            logger.debug("[User %s] log_message transfer saved fallito: %s", chat_id, _le)
+
+        input_method = context.user_data.pop("input_method", "text")
+        user_obj = _user_store.get_user(chat_id)
+        analytics.track(chat_id, "expense_tracked", {
+            "input_method": input_method,
+            "storage_backend": user_obj.storage_backend if user_obj else "unknown",
+            "transaction_type": "transfer",
+        })
+
+        try:
+            await _refresh_pinned_dashboard(query._bot, chat_id)
+        except Exception as e:
+            logger.warning(f"[User {chat_id}] Errore refresh dashboard post-save: {e}")
+
+        try:
+            await _present_next_pending_expense(context, chat_id)
+        except Exception as e:
+            logger.warning(f"[User {chat_id}] Errore presentazione prossima transazione in coda: {e}")
+
+    except ValueError as e:
+        logger.warning(f"[User {chat_id}] Trasferimento non valido: {e}")
+        await query.edit_message_text(f"⚠️ {e}")
+    except Exception as e:
+        logger.error(f"Errore salvataggio trasferimento: {e}")
+        await query.edit_message_text(
+            "⚠️ Non sono riuscito a salvare il trasferimento in questo momento.\n"
+            "Riprova tra qualche secondo oppure contatta il supporto se il problema persiste.",
+        )
+
 
 async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handler per i bottoni inline (conferma/annulla/conti)."""
@@ -1959,18 +2213,89 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         await query.edit_message_text("❌ Eliminazione annullata. Il tuo account è al sicuro.")
         return
 
+    if query.data == "edit_category":
+        pending = context.user_data.get("pending_expense")
+        if not pending:
+            await query.edit_message_text("⚠️ Nessuna spesa in sospeso.")
+            return
+        try:
+            storage = _get_storage(chat_id)
+            category_names = storage.get_category_names()
+        except Exception as e:
+            logger.error(f"[User {chat_id}] Errore fetch categorie: {e}")
+            await query.edit_message_text("⚠️ Errore nel recupero delle categorie. Riprova tra qualche istante.")
+            return
+
+        if not category_names:
+            await query.edit_message_text("⚠️ Non hai ancora nessuna categoria configurata. Usa /modify per crearne una.")
+            return
+
+        # Le categorie vanno in user_data (non nel callback_data) per non rischiare
+        # di superare il limite di 64 byte di Telegram con nomi lunghi o emoji.
+        context.user_data["category_options"] = category_names
+        keyboard = [
+            [InlineKeyboardButton(name, callback_data=f"setcat:{idx}")]
+            for idx, name in enumerate(category_names)
+        ]
+        keyboard.append([InlineKeyboardButton("🔙 Indietro", callback_data="edit_category_back")])
+        await query.edit_message_text(
+            "📂 Scegli la categoria giusta:",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+        )
+        return
+
+    if query.data == "edit_category_back":
+        pending = context.user_data.get("pending_expense")
+        if not pending:
+            await query.edit_message_text("⚠️ Nessuna spesa in sospeso.")
+            return
+        summary = _build_expense_summary(pending)
+        keyboard = _build_confirm_keyboard(pending)
+        await query.edit_message_text(summary, parse_mode=ParseMode.MARKDOWN, reply_markup=keyboard)
+        return
+
+    if query.data.startswith("setcat:"):
+        pending = context.user_data.get("pending_expense")
+        category_options = context.user_data.get("category_options")
+        if not pending or not category_options:
+            await query.edit_message_text("⚠️ Nessuna spesa in sospeso.")
+            return
+        try:
+            idx = int(query.data.split(":", 1)[1])
+            new_category = category_options[idx]
+        except (ValueError, IndexError):
+            await query.edit_message_text("⚠️ Categoria non valida. Riprova.")
+            return
+
+        pending["category"] = new_category
+        summary = _build_expense_summary(pending)
+        keyboard = _build_confirm_keyboard(pending)
+        await query.edit_message_text(summary, parse_mode=ParseMode.MARKDOWN, reply_markup=keyboard)
+        return
+
     if query.data == "cancel":
         input_method = context.user_data.pop("input_method", "text")
         context.user_data.pop("pending_expense", None)
         context.user_data.pop("waiting_for_amount", None)
         analytics.track(chat_id, "expense_tracking_failed", {"reason": "user_cancelled", "input_method": input_method})
         await query.edit_message_text("❌ Operazione annullata.")
+        # Messaggio multi-spesa: annullare una transazione non annulla le altre in coda
+        try:
+            await _present_next_pending_expense(context, chat_id)
+        except Exception as e:
+            logger.warning(f"[User {chat_id}] Errore presentazione prossima transazione in coda: {e}")
         return
 
     if query.data == "confirm":
         data = context.user_data.get("pending_expense")
         if not data:
             await query.edit_message_text("⚠️ Nessuna spesa in sospeso.")
+            return
+
+        if data.get("type") == "transfer":
+            # I conti origine/destinazione sono già stati risolti prima della conferma
+            # (picker a bottoni o match NLP): niente step "quale conto" da fare qui.
+            await _save_transfer(query, context, chat_id)
             return
 
         # Recupera accounts da Notion per far selezionare il conto
@@ -1987,9 +2312,12 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         if not accounts:
             # Nessun conto configurato: non si può salvare senza sapere su quale conto
             # accreditare/scalare la transazione. Blocca e indirizza l'utente a crearne uno.
+            # Svuota anche l'eventuale coda multi-spesa: nessuna delle transazioni rilevate
+            # sarebbe comunque salvabile finché non esiste un conto.
             input_method = context.user_data.pop("input_method", "text")
             context.user_data.pop("pending_expense", None)
             context.user_data.pop("waiting_for_amount", None)
+            context.user_data.pop("expense_queue", None)
             analytics.track(chat_id, "expense_tracking_failed", {"reason": "no_account", "input_method": input_method})
             await query.edit_message_text(
                 "🏦 Non hai ancora nessun conto su Expensum, quindi non posso registrare la spesa.\n\n"
@@ -2012,6 +2340,40 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     if query.data.startswith("account:"):
         account_id = query.data.split(":", 1)[1]
         await _save_to_notion(query, context, chat_id, account_id=account_id)
+        return
+
+    if query.data.startswith("transfer_from:") or query.data.startswith("transfer_to:"):
+        side, account_id = query.data.split(":", 1)
+        pending = context.user_data.get("pending_expense")
+        if not pending or pending.get("type") != "transfer":
+            await query.edit_message_text("⚠️ Nessun trasferimento in sospeso.")
+            return
+
+        if side == "transfer_to" and account_id == str(pending.get("from_account_id")):
+            await query.edit_message_text(
+                "⚠️ Il conto di destinazione deve essere diverso da quello di origine."
+            )
+            return
+
+        try:
+            storage = _get_storage(chat_id)
+            accounts = storage.fetch_accounts()
+        except Exception as e:
+            logger.error(f"[User {chat_id}] Errore fetch accounts: {e}")
+            await query.edit_message_text("⚠️ Errore nel recupero dei tuoi conti. Riprova tra qualche istante.")
+            return
+
+        acc = next((a for a in accounts if str(a["id"]) == account_id), None)
+        if side == "transfer_from":
+            pending["from_account_id"] = account_id
+            pending["from_account_name"] = acc["name"] if acc else None
+        else:
+            pending["to_account_id"] = account_id
+            pending["to_account_name"] = acc["name"] if acc else None
+
+        async def _send(text, reply_markup=None):
+            await query.edit_message_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=reply_markup)
+        await _advance_transfer_flow(context, chat_id, _send)
         return
 
 
@@ -3177,6 +3539,7 @@ def main():
     app.add_handler(CommandHandler("logout", cmd_logout))
     app.add_handler(CommandHandler("login", cmd_login))
     app.add_handler(CommandHandler("modify", cmd_modify))
+    app.add_handler(CommandHandler("trasferimento", cmd_trasferimento))
     app.add_handler(CommandHandler("impostazioni", cmd_impostazioni_menu))
     app.add_handler(CommandHandler("privacy", cmd_privacy))
     app.add_handler(CommandHandler("export", cmd_export))

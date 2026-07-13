@@ -1072,3 +1072,80 @@ def test_idor_account_and_expense_scoped_by_user(client):
         assert expense_row is not None
         assert expense_row.name == "Spesa di B"
         assert expense_row.user_id == "chat_user_b"
+
+
+def test_space_transfers_create_and_list(client):
+    """POST /api/space/transfers crea il trasferimento e aggiorna i saldi;
+    GET /api/space/transfers lo restituisce nel range di date richiesto."""
+    from src.dashboard.app import store
+    from src.storage.postgres_storage import PostgresStorage
+
+    store.add_user(chat_id="chat_transfer_user", username="transfer-user", storage_backend="postgres")
+    with store.Session() as s:
+        pg = PostgresStorage(session=s, user_id="chat_transfer_user")
+        acc_from = pg.create_account("Corrente", initial_balance=500.0)
+        acc_to = pg.create_account("Risparmio", initial_balance=0.0)
+
+    with client.session_transaction() as sess:
+        sess["user_logged_in"] = True
+        sess["chat_id"] = "chat_transfer_user"
+        sess["token_version"] = store.get_token_version("chat_transfer_user")
+
+    csrf_token = client.get("/api/csrf-token").json["csrf_token"]
+
+    resp = client.post(
+        "/api/space/transfers",
+        json={
+            "amount": 150.0,
+            "from_account_id": acc_from["id"],
+            "to_account_id": acc_to["id"],
+            "date": "2026-04-10",
+            "name": "Giroconto test",
+        },
+        headers={"X-CSRFToken": csrf_token},
+    )
+    assert resp.status_code == 201
+
+    resp = client.get("/api/space/transfers?start=2026-04-01&end=2026-04-30")
+    assert resp.status_code == 200
+    transfers = resp.json["transfers"]
+    assert len(transfers) == 1
+    assert transfers[0]["amount"] == 150.0
+    assert transfers[0]["from_account_id"] == acc_from["id"]
+    assert transfers[0]["to_account_id"] == acc_to["id"]
+
+    resp = client.get("/api/space/accounts")
+    balances = {a["name"]: a["current_balance"] for a in resp.json["accounts"]}
+    assert balances["Corrente"] == 500.0 - 150.0
+    assert balances["Risparmio"] == 0.0 + 150.0
+
+
+def test_space_transfers_rejects_same_account(client):
+    """POST /api/space/transfers rifiuta from_account_id == to_account_id (400)."""
+    from src.dashboard.app import store
+    from src.storage.postgres_storage import PostgresStorage
+
+    store.add_user(chat_id="chat_transfer_same", username="transfer-same", storage_backend="postgres")
+    with store.Session() as s:
+        pg = PostgresStorage(session=s, user_id="chat_transfer_same")
+        acc = pg.create_account("Unico", initial_balance=100.0)
+
+    with client.session_transaction() as sess:
+        sess["user_logged_in"] = True
+        sess["chat_id"] = "chat_transfer_same"
+        sess["token_version"] = store.get_token_version("chat_transfer_same")
+
+    csrf_token = client.get("/api/csrf-token").json["csrf_token"]
+
+    resp = client.post(
+        "/api/space/transfers",
+        json={"amount": 10.0, "from_account_id": acc["id"], "to_account_id": acc["id"]},
+        headers={"X-CSRFToken": csrf_token},
+    )
+    assert resp.status_code == 400
+
+
+def test_space_transfers_requires_auth(client):
+    """GET /api/space/transfers senza sessione/init-data valido risponde 401."""
+    resp = client.get("/api/space/transfers")
+    assert resp.status_code == 401
