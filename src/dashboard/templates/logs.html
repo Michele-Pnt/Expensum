@@ -1,23 +1,60 @@
 {% extends "base.html" %}
+{% import "_macros.html" as ui %}
 {% block content %}
-<h1 class="page-title">Terminale Live Log</h1>
-<p class="page-desc">Ispezione cruda di `agent.log`. Mostra le ultime 100 righe del file senza SSH.</p>
+<h1 class="page-title">Log {{ ui.info("Log strutturati in JSON Lines, un file per dominio (app, error, security, access), letti direttamente dai file su VPS — nessun SSH. Ogni riga ha ts, level, domain, event e meta. Per GDPR non contengono mai contenuto libero dell'utente (importi, testi, trascrizioni): solo identificatori pseudonimi e codici evento.") }}</h1>
+<p class="page-desc">Log strutturati JSON Lines per dominio, letti direttamente dal VPS. Nessun SSH.</p>
 
-<div class="terminal-window">
-<pre id="logArea">{% if not log_lines %}File `agent.log` non ancora creato o vuoto.{% endif %}
-{% for line in log_lines %}
-{% if 'ERROR' in line %}
-<span class="log-error">{{ line }}</span>
-{% elif 'WARNING' in line %}
-<span class="log-warn">{{ line }}</span>
-{% else %}
-{{ line }}
-{% endif %}
-{% endfor %}</pre>
+<div class="stats-grid" style="margin-bottom: 1.5rem;">
+    <div class="stat-card glass-panel" style="border-left: 4px solid var(--danger)">
+        <div class="stat-label">Errori oggi {{ ui.info("Numero di righe in error.jsonl con timestamp di oggi. Colpo d'occhio immediato: è successo qualcosa di grave nelle ultime ore? Se > 0, aprire il file error.jsonl qui sotto.") }}</div>
+        <div class="stat-value" style="color: {% if summary.errors_today > 0 %}var(--danger){% else %}var(--success){% endif %}">{{ summary.errors_today }}</div>
+    </div>
+    <div class="stat-card glass-panel" style="border-left: 4px solid var(--warning)">
+        <div class="stat-label">Eventi security oggi {{ ui.info("Righe in security.jsonl di oggi: login falliti, blocchi rate-limit, prompt injection rilevate, eventi OAuth. Un aumento improvviso può indicare un attacco o un abuso in corso.") }}</div>
+        <div class="stat-value" style="color: {% if summary.security_today > 0 %}var(--warning){% else %}var(--success){% endif %}">{{ summary.security_today }}</div>
+    </div>
 </div>
-<script>
-    // Forza scroll in basso all'apertura
-    const term = document.querySelector('.terminal-window');
-    term.scrollTop = term.scrollHeight;
-</script>
+
+<form method="get" style="display:flex; gap:0.75rem; align-items:center; margin-bottom:1rem; flex-wrap:wrap;">
+    <label>File: {{ ui.info("Sceglie il dominio da ispezionare: app.jsonl (flusso generale, incl. esito cron/health-check), error.jsonl (solo ERROR+), security.jsonl (sicurezza), access.jsonl (azioni utente senza contenuto).") }}
+        <select name="file" onchange="this.form.submit()">
+            {% for f in files %}<option value="{{ f }}" {% if f == selected_file %}selected{% endif %}>{{ f }}</option>{% endfor %}
+        </select>
+    </label>
+    <label>Livello:
+        <select name="level" onchange="this.form.submit()">
+            <option value="">Tutti</option>
+            {% for lvl in ['INFO', 'WARNING', 'ERROR', 'CRITICAL', 'DEBUG'] %}
+            <option value="{{ lvl }}" {% if lvl == selected_level %}selected{% endif %}>{{ lvl }}</option>
+            {% endfor %}
+        </select>
+    </label>
+    <label>Righe:
+        <input type="number" name="limit" value="{{ limit }}" min="20" max="4000" step="20" style="width:90px;">
+    </label>
+    <button type="submit" class="btn-toggle">Aggiorna</button>
+</form>
+
+<div class="glass-panel data-table-wrapper">
+    <table class="glass-table">
+        <thead><tr><th>Timestamp</th><th>Livello</th><th>Dominio</th><th>Evento</th><th>Meta</th></tr></thead>
+        <tbody>
+            {% for e in entries %}
+            <tr>
+                <td style="white-space:nowrap; font-size:0.8rem;">{{ e.timestamp }}</td>
+                <td>
+                    {% if e.level in ['ERROR', 'CRITICAL'] %}<span class="badge suspended">{{ e.level }}</span>
+                    {% elif e.level == 'WARNING' %}<span class="badge" style="background: var(--warning); color:#000;">{{ e.level }}</span>
+                    {% else %}<span class="badge active">{{ e.level }}</span>{% endif %}
+                </td>
+                <td><code>{{ e.domain }}</code></td>
+                <td>{{ e.event }}</td>
+                <td style="font-size:0.75rem; color: var(--text-secondary); max-width:360px; overflow:hidden; text-overflow:ellipsis;">{{ e.meta }}</td>
+            </tr>
+            {% else %}
+            <tr><td colspan="5" style="text-align:center; color: var(--text-secondary);">Nessuna riga (file vuoto o filtro senza risultati).</td></tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
 {% endblock %}

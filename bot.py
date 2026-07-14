@@ -30,6 +30,7 @@ import threading
 from datetime import date, datetime, timedelta
 from cachetools import TTLCache
 from apscheduler.schedulers.background import BackgroundScheduler
+from apscheduler.events import EVENT_JOB_ERROR, EVENT_JOB_EXECUTED, EVENT_JOB_MISSED
 import requests
 
 from src.billing_utils import get_next_billing_date
@@ -899,12 +900,14 @@ def _build_dashboard_for_user(chat_id: str) -> str:
         # Unisci spese attuali + medie
         all_cat_names = set(spending_by_cat.keys()) | set(avg_map.keys())
         categories_spending = []
-        for cat_name in sorted(all_cat_names):
+        for cat_name in all_cat_names:
             categories_spending.append({
                 "name": cat_name,
                 "spent_this_month": spending_by_cat.get(cat_name, 0.0),
                 "average": avg_map.get(cat_name, 0.0),
             })
+        # Ordina per media storica decrescente
+        categories_spending.sort(key=lambda c: c["average"], reverse=True)
 
     return build_dashboard_text(
         accounts=accounts,
@@ -3045,9 +3048,11 @@ def _nightly_retention_cleanup() -> None:
     try:
         deleted_oauth = _user_store.cleanup_expired_oauth_sessions()
         deleted_chats = _user_store.cleanup_old_chat_messages(days=90)
+        deleted_jobs = _user_store.cleanup_old_job_runs(days=90)
         logger.info(
-            "[NightlyRetention] OAuth sessions rimosse: %d, chat_messages rimossi: %d",
-            deleted_oauth, deleted_chats,
+            "[NightlyRetention] OAuth sessions rimosse: %d, chat_messages rimossi: %d, "
+            "job_runs rimossi: %d",
+            deleted_oauth, deleted_chats, deleted_jobs,
         )
     except Exception as e:
         logger.error(f"[NightlyRetention] Errore job: {e}")
@@ -3111,20 +3116,51 @@ def _disk_space_check_job(warning_mb: int = 1024, critical_mb: int = 500) -> Non
         logger.info("disk_space_ok", extra={"event": "disk_space_ok", "meta": meta})
 
 
+def _record_scheduler_event(event) -> None:
+    """Listener APScheduler: persiste ogni esecuzione in `job_runs`.
+
+    Consente alla dashboard admin di sapere se i job di oggi sono girati e con
+    che esito. Gira nel thread dello scheduler; è best-effort (record_job_run
+    non solleva). `error_text` contiene solo tipo/messaggio eccezione, mai dati
+    liberi utente.
+    """
+    code = getattr(event, "code", None)
+    exc = getattr(event, "exception", None)
+    if exc is not None:
+        status, error_text = "error", f"{type(exc).__name__}: {exc}"
+    elif code == EVENT_JOB_MISSED:
+        status, error_text = "missed", None
+    else:
+        status, error_text = "success", None
+    _user_store.record_job_run(
+        getattr(event, "job_id", "unknown"),
+        status,
+        trigger_type="scheduler",
+        scheduled_at=getattr(event, "scheduled_run_time", None),
+        error_text=error_text,
+    )
+
+
 async def _start_scheduler(app: Application) -> None:
     """Hook post_init PTB: cattura il loop PTB e avvia APScheduler con il loop corretto."""
     loop = asyncio.get_running_loop()
     scheduler = BackgroundScheduler(daemon=True)
-    scheduler.add_job(_nightly_category_sync, 'cron', hour=3, minute=0, args=[app, loop])
-    scheduler.add_job(_nightly_subscription_job, 'cron', hour=3, minute=5, args=[app, loop])
-    scheduler.add_job(_nightly_retention_cleanup, 'cron', hour=3, minute=10)
-    scheduler.add_job(_trial_expiry_job, 'cron', hour=4, minute=0, args=[app, loop])
-    scheduler.add_job(_daily_dashboard_job, 'cron', hour=8, minute=0, args=[app, loop])
-    scheduler.add_job(_weekly_plan_job, 'cron', day_of_week='mon', hour=8, minute=5, args=[app, loop])
-    scheduler.add_job(_monthly_plan_job, 'cron', day=1, hour=8, minute=0, args=[app, loop])
-    scheduler.add_job(_trial_lifecycle_job, 'cron', hour=9, minute=0, args=[app, loop])
-    scheduler.add_job(_health_check_job, 'interval', hours=4)
-    scheduler.add_job(_disk_space_check_job, 'interval', hours=6)
+    # id espliciti: sono la chiave con cui il listener registra gli esiti in
+    # job_runs e con cui la dashboard confronta lo schedule atteso (no-show).
+    scheduler.add_job(_nightly_category_sync, 'cron', hour=3, minute=0, args=[app, loop], id='nightly_category_sync')
+    scheduler.add_job(_nightly_subscription_job, 'cron', hour=3, minute=5, args=[app, loop], id='nightly_subscription_job')
+    scheduler.add_job(_nightly_retention_cleanup, 'cron', hour=3, minute=10, id='nightly_retention_cleanup')
+    scheduler.add_job(_trial_expiry_job, 'cron', hour=4, minute=0, args=[app, loop], id='trial_expiry_job')
+    scheduler.add_job(_daily_dashboard_job, 'cron', hour=8, minute=0, args=[app, loop], id='daily_dashboard_job')
+    scheduler.add_job(_weekly_plan_job, 'cron', day_of_week='mon', hour=8, minute=5, args=[app, loop], id='weekly_plan_job')
+    scheduler.add_job(_monthly_plan_job, 'cron', day=1, hour=8, minute=0, args=[app, loop], id='monthly_plan_job')
+    scheduler.add_job(_trial_lifecycle_job, 'cron', hour=9, minute=0, args=[app, loop], id='trial_lifecycle_job')
+    scheduler.add_job(_health_check_job, 'interval', hours=4, id='health_check_job')
+    scheduler.add_job(_disk_space_check_job, 'interval', hours=6, id='disk_space_check_job')
+    scheduler.add_listener(
+        _record_scheduler_event,
+        EVENT_JOB_EXECUTED | EVENT_JOB_ERROR | EVENT_JOB_MISSED,
+    )
     scheduler.start()
     logger.info(
         "⏰ Scheduler avviato (sync 03:00, subs 03:05, retention cleanup 03:10, "

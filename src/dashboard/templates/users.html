@@ -1,6 +1,7 @@
 {% extends "base.html" %}
+{% import "_macros.html" as ui %}
 {% block content %}
-<h1 class="page-title">Gestione Utenti</h1>
+<h1 class="page-title">Gestione Utenti {{ ui.info("Elenco di tutti gli utenti registrati (tabella users), dal più recente. Clicca sul Telegram ID o su 'Dettaglio' per la scheda completa. 'Sospendi/Riattiva' cambia is_active, bloccando o ripristinando l'accesso al bot in tempo reale.") }}</h1>
 <p class="page-desc">Lista completa delle utenze autorizzate al bot. Clicca su Toggle per bloccare l'accesso istantaneamente.</p>
 
 <div class="glass-panel data-table-wrapper">
@@ -17,7 +18,7 @@
         <tbody>
             {% for u in users %}
             <tr>
-                <td><code>{{ u.chat_id }}</code></td>
+                <td><a href="{{ url_for('admin.user_detail', chat_id=u.chat_id) }}"><code>{{ u.chat_id }}</code></a></td>
                 <td>@{{ u.username or 'Sconosciuto' }}</td>
                 <td>{{ u.created_at.strftime('%Y-%m-%d %H:%M') }}</td>
                 <td id="status-{{ u.chat_id }}">
@@ -28,6 +29,7 @@
                     {% endif %}
                 </td>
                 <td>
+                    <a href="{{ url_for('admin.user_detail', chat_id=u.chat_id) }}" class="btn-toggle" style="margin-right:0.5rem;">Dettaglio</a>
                     <button class="btn-toggle" onclick="toggleUser('{{ u.chat_id }}')">
                         Sospendi / Riattiva
                     </button>
@@ -42,7 +44,7 @@
     const CSRF_TOKEN = "{{ csrf_token() }}";
 
     async function toggleUser(chatId) {
-        const res = await fetch(`/api/toggle-user/${chatId}`, {
+        const res = await fetch(`/admin/api/toggle-user/${chatId}`, {
             method: 'POST',
             headers: { 'X-CSRFToken': CSRF_TOKEN },
         });

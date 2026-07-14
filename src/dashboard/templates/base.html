@@ -17,10 +17,13 @@
                 <h2>Expensum<span>Admin</span></h2>
             </div>
             <ul class="nav-links">
-                <li><a href="{{ url_for('index') }}" class="{% if request.endpoint == 'index' %}active{% endif %}">📊 Overview</a></li>
-                <li><a href="{{ url_for('users_list') }}" class="{% if request.endpoint == 'users_list' %}active{% endif %}">👥 Utenti</a></li>
-                <li><a href="{{ url_for('feedbacks_list') }}" class="{% if request.endpoint == 'feedbacks_list' %}active{% endif %}">📧 Feedback</a></li>
-                <li><a href="{{ url_for('logs_viewer') }}" class="{% if request.endpoint == 'logs_viewer' %}active{% endif %}">💻 Log Terminal</a></li>
+                <li><a href="{{ url_for('admin.index') }}" class="{% if request.endpoint == 'admin.index' %}active{% endif %}">📊 Overview</a></li>
+                <li><a href="{{ url_for('admin.product_metrics') }}" class="{% if request.endpoint == 'admin.product_metrics' %}active{% endif %}">📈 Prodotto</a></li>
+                <li><a href="{{ url_for('admin.business_metrics') }}" class="{% if request.endpoint == 'admin.business_metrics' %}active{% endif %}">💶 Business</a></li>
+                <li><a href="{{ url_for('admin.jobs_status') }}" class="{% if request.endpoint == 'admin.jobs_status' %}active{% endif %}">⏱️ Job</a></li>
+                <li><a href="{{ url_for('admin.users_list') }}" class="{% if request.endpoint == 'admin.users_list' %}active{% endif %}">👥 Utenti</a></li>
+                <li><a href="{{ url_for('admin.feedbacks_list') }}" class="{% if request.endpoint == 'admin.feedbacks_list' %}active{% endif %}">📧 Feedback</a></li>
+                <li><a href="{{ url_for('admin.logs_viewer') }}" class="{% if request.endpoint == 'admin.logs_viewer' %}active{% endif %}">💻 Log</a></li>
             </ul>
             <div class="nav-footer">
                 <a href="{{ url_for('admin_logout') }}" class="btn-logout">Esci</a>
@@ -31,5 +34,46 @@
             {% block content %}{% endblock %}
         </main>
     </div>
+
+    <!-- Popover unico per i bottoni info (ⓘ): posizionato via JS per non essere
+         tagliato da contenitori con overflow (tabelle, card). -->
+    <div id="info-pop" class="info-pop" role="tooltip"></div>
+    <script>
+    (function () {
+        const pop = document.getElementById('info-pop');
+        let current = null;
+
+        function hide() { pop.classList.remove('open'); current = null; }
+
+        function show(btn) {
+            pop.textContent = btn.dataset.info || '';
+            pop.classList.add('open');
+            const r = btn.getBoundingClientRect();
+            const pw = pop.offsetWidth, ph = pop.offsetHeight;
+            let left = r.left;
+            if (left + pw > window.innerWidth - 8) left = window.innerWidth - pw - 8;
+            if (left < 8) left = 8;
+            let top = r.bottom + 6;
+            if (top + ph > window.innerHeight - 8) top = r.top - ph - 6;
+            pop.style.left = left + 'px';
+            pop.style.top = top + 'px';
+            current = btn;
+        }
+
+        document.addEventListener('click', function (e) {
+            const btn = e.target.closest('.info-btn');
+            if (btn) {
+                e.preventDefault();
+                e.stopPropagation();
+                if (current === btn) { hide(); } else { show(btn); }
+                return;
+            }
+            if (!e.target.closest('#info-pop')) hide();
+        });
+        document.addEventListener('keydown', e => { if (e.key === 'Escape') hide(); });
+        window.addEventListener('scroll', hide, true);
+        window.addEventListener('resize', hide);
+    })();
+    </script>
 </body>
 </html>

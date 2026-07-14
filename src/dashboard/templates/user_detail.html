@@ -1,0 +1,41 @@
+{% extends "base.html" %}
+{% import "_macros.html" as ui %}
+{% block content %}
+{% if detail is none %}
+<h1 class="page-title">Utente non trovato</h1>
+<p class="page-desc">Nessun utente con chat_id <code>{{ chat_id }}</code>.</p>
+<a href="{{ url_for('admin.users_list') }}" class="btn-toggle">← Torna agli utenti</a>
+{% else %}
+<h1 class="page-title">{{ detail.username }} {{ ui.info("Scheda completa del singolo utente: timeline dalla registrazione all'ultima attività, consumo token/costo e stato del piano. Pensata per il supporto e l'analisi individuale. Dati da users, user_plans, llm_usage_events e chat_messages.") }}</h1>
+<p class="page-desc">
+    <code>{{ detail.chat_id }}</code> ·
+    {% if detail.is_active %}<span class="badge active">Attivo</span>{% else %}<span class="badge suspended">Sospeso</span>{% endif %}
+    · backend <strong>{{ detail.storage_backend }}</strong>
+    · piano <strong>{{ detail.plan_type }}</strong>{% if detail.is_trial %} <span class="badge" style="background: var(--accent-info); color:#fff;">trial</span>{% endif %}
+</p>
+
+<div class="stats-grid">
+    <div class="stat-card glass-panel"><div class="stat-label">Registrato {{ ui.info("Data di registrazione dell'utente (users.created_at).") }}</div><div class="stat-value" style="font-size:1.3rem;">{{ detail.created_at.strftime('%Y-%m-%d') if detail.created_at else '—' }}</div></div>
+    <div class="stat-card glass-panel"><div class="stat-label">Spese registrate {{ ui.info("Numero di transazioni confermate dell'utente (chat_messages con metadata: spese, entrate e trasferimenti salvati dopo il click Conferma).") }}</div><div class="stat-value">{{ detail.tx_count }}</div></div>
+    <div class="stat-card glass-panel" style="border-left: 4px solid var(--success)"><div class="stat-label">Tempo alla 1ª spesa {{ ui.info("Giorni tra la registrazione e la prima spesa confermata di questo utente. Il suo tempo di attivazione individuale.") }}</div><div class="stat-value" style="color: var(--success); font-size:1.6rem;">{% if detail.time_to_first_days is not none %}{{ detail.time_to_first_days }} gg{% else %}—{% endif %}</div></div>
+    <div class="stat-card glass-panel" style="border-left: 4px solid var(--danger)"><div class="stat-label">Token totali / costo {{ ui.info("Somma dei token e del costo stimato (USD) di tutte le chiamate LLM dell'utente (llm_usage_events). Quanto ci costa in AI questo singolo utente.") }}</div><div class="stat-value" style="color: var(--danger); font-size:1.4rem;">{{ detail.tokens_total }}</div><span class="stat-label" style="text-transform:none; margin-top:5px">${{ detail.cost_total_usd }}</span></div>
+</div>
+
+<h3 style="margin-top: 2rem; margin-bottom: 1rem; color: var(--text-main);">Dettagli {{ ui.info("Stato tecnico e temporale dell'utente: avanzamento setup/onboarding, prime/ultime attività, scadenze token e trial, feedback inviati. Utile per diagnosticare problemi di un singolo account durante il supporto.") }}</h3>
+<div class="glass-panel data-table-wrapper">
+    <table class="glass-table">
+        <tbody>
+            <tr><td>Setup status</td><td><code>{{ detail.setup_status }}</code></td></tr>
+            <tr><td>Onboarding step</td><td><code>{{ detail.onboarding_step }}</code></td></tr>
+            <tr><td>Onboarding completato</td><td>{{ detail.onboarding_completed_at.strftime('%Y-%m-%d %H:%M') if detail.onboarding_completed_at else '—' }}</td></tr>
+            <tr><td>Prima spesa</td><td>{{ detail.first_tx_at.strftime('%Y-%m-%d %H:%M') if detail.first_tx_at else '—' }}</td></tr>
+            <tr><td>Ultima attività</td><td>{{ detail.last_active.strftime('%Y-%m-%d %H:%M') if detail.last_active else '—' }}</td></tr>
+            <tr><td>Reset token</td><td>{{ detail.tokens_reset_at.strftime('%Y-%m-%d %H:%M') if detail.tokens_reset_at else '—' }}</td></tr>
+            <tr><td>Trial fino a</td><td>{{ detail.trial_ends_at.strftime('%Y-%m-%d %H:%M') if detail.trial_ends_at else '—' }}</td></tr>
+            <tr><td>Feedback inviati</td><td>{{ detail.feedback_count }}</td></tr>
+        </tbody>
+    </table>
+</div>
+<a href="{{ url_for('admin.users_list') }}" class="btn-toggle" style="margin-top:1rem; display:inline-block;">← Torna agli utenti</a>
+{% endif %}
+{% endblock %}

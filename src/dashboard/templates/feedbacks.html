@@ -1,6 +1,7 @@
 {% extends "base.html" %}
+{% import "_macros.html" as ui %}
 {% block content %}
-<h1 class="page-title">Gestione Feedback Utenti</h1>
+<h1 class="page-title">Gestione Feedback Utenti {{ ui.info("Feedback inviati dagli utenti (comando /feedback sul bot), dal più recente. Clicca 'Risolvi' per marcarli come gestiti (status da 'unread' a 'resolved'). Da svuotare regolarmente: in beta sono la voce diretta dei tester.") }}</h1>
 <p class="page-desc">Leggi i ticket aperti in beta tramite il comando `/feedback`.</p>
 
 <div class="glass-panel data-table-wrapper">
@@ -45,7 +46,7 @@
     const CSRF_TOKEN = "{{ csrf_token() }}";
 
     async function resolveFeedback(id) {
-        const res = await fetch(`/api/resolve-feedback/${id}`, {
+        const res = await fetch(`/admin/api/resolve-feedback/${id}`, {
             method: 'POST',
             headers: { 'X-CSRFToken': CSRF_TOKEN },
         });

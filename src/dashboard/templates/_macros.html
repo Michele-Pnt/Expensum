@@ -1,0 +1,8 @@
+{# Macro condivise della dashboard admin. #}
+
+{# Bottone informativo (ⓘ) cliccabile: mostra come si calcola una metrica e cosa
+   significa per Expensum. Il testo viene reso in un popover unico gestito da base.html
+   (posizionato via JS, quindi non viene mai tagliato da tabelle/card con overflow). #}
+{% macro info(text) -%}
+<button type="button" class="info-btn" data-info="{{ text }}" aria-label="Come si calcola e cosa significa">i</button>
+{%- endmacro %}

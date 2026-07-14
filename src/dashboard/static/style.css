@@ -145,3 +145,49 @@ table.glass-table tr:hover { background: rgba(255, 255, 255, 0.02); }
     from { opacity: 0; transform: translateY(8px); }
     to { opacity: 1; transform: translateY(0); }
 }
+
+/* --- Bottone info (ⓘ) + popover: spiegazione calcolo/significato di ogni metrica --- */
+.info-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 16px;
+    height: 16px;
+    margin-left: 6px;
+    padding: 0;
+    border-radius: 50%;
+    border: 1px solid var(--text-secondary, #8b949e);
+    background: transparent;
+    color: var(--text-secondary, #8b949e);
+    font-family: Georgia, 'Times New Roman', serif;
+    font-size: 10px;
+    font-weight: 700;
+    font-style: italic;
+    line-height: 1;
+    cursor: pointer;
+    vertical-align: middle;
+    transition: border-color 0.15s, color 0.15s;
+}
+.info-btn:hover {
+    border-color: var(--accent-primary);
+    color: var(--accent-primary);
+}
+.info-pop {
+    position: fixed;
+    z-index: 2000;
+    max-width: 340px;
+    display: none;
+    padding: 0.75rem 0.9rem;
+    background: #0d1117;
+    border: 1px solid rgba(255, 255, 255, 0.15);
+    border-radius: 8px;
+    box-shadow: 0 8px 30px rgba(0, 0, 0, 0.55);
+    color: #c9d1d9;
+    font-size: 0.8rem;
+    line-height: 1.45;
+    white-space: normal;
+}
+.info-pop.open {
+    display: block;
+    animation: fadeIn 0.12s ease-out;
+}

@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% import "_macros.html" as ui %}
 {% block content %}
 <!-- Tab Navigation -->
 <div style="display: flex; gap: 1rem; margin-bottom: 2rem; border-bottom: 2px solid rgba(255,255,255,0.1); padding-bottom: 1rem;">
@@ -8,13 +9,13 @@
 
 <!-- Tab 1: Dashboard -->
 <div id="tab-dashboard-content">
-<h1 class="page-title">Panoramica Sistema</h1>
+<h1 class="page-title">Panoramica Sistema {{ ui.info("Pagina di overview: salute del server, dimensione della base utenti, qualità dell'AI e costi LLM. È il primo colpo d'occhio quotidiano sullo stato di Expensum. Le metriche token partono dal 2026-05-01 (soglia storica del ledger).") }}</h1>
 <p class="page-desc">Benvenuto Admin. Questa è la salute attuale del tuo agente.</p>
 
 <div class="stats-grid">
     <!-- RAM -->
     <div class="stat-card glass-panel">
-        <div class="stat-label">Uso Memoria Server</div>
+        <div class="stat-label">Uso Memoria Server {{ ui.info("Percentuale di RAM usata sul server, letta con psutil. Il VPS Netcup ha 4 GB: sopra l'80% (rosso) il rischio è che bot e PostgreSQL rallentino o vadano in errore per memoria esaurita.") }}</div>
         <div class="stat-value"
             style="color: {% if sys.ram_percent > 80 %}var(--danger){% else %}var(--accent-primary){% endif %}">
             {{ sys.ram_percent }}%
@@ -23,7 +24,7 @@
     </div>
     <!-- CPU -->
     <div class="stat-card glass-panel">
-        <div class="stat-label">Carico CPU</div>
+        <div class="stat-label">Carico CPU {{ ui.info("Carico CPU istantaneo del server (psutil.cpu_percent). Picchi prolungati sopra l'80% rallentano le risposte del bot e l'elaborazione di foto/voce.") }}</div>
         <div class="stat-value"
             style="color: {% if sys.cpu_percent > 80 %}var(--danger){% else %}var(--accent-primary){% endif %}">
             {{ sys.cpu_percent }}%
@@ -31,13 +32,13 @@
     </div>
     <!-- DB Users -->
     <div class="stat-card glass-panel">
-        <div class="stat-label">Database Users</div>
+        <div class="stat-label">Database Users {{ ui.info("Numero totale di utenti registrati (tabella users). Sotto: gli utenti attivi (is_active=true, non sospesi). È la base installata di Expensum, il denominatore di quasi tutte le altre metriche.") }}</div>
         <div class="stat-value">{{ users_count }}</div>
         <span class="stat-label" style="text-transform:none; margin-top:5px">{{ active_users }} Utenti Attivi</span>
     </div>
     <!-- Feedback -->
     <div class="stat-card glass-panel">
-        <div class="stat-label">Feedback da leggere</div>
+        <div class="stat-label">Feedback da leggere {{ ui.info("Feedback inviati dagli utenti e non ancora gestiti (feedbacks con status='unread'). Da tenere a zero: sono segnalazioni e richieste dirette dai beta tester.") }}</div>
         <div class="stat-value"
             style="color: {% if unread_feedback > 0 %}var(--warning){% else %}var(--success){% endif %}">
             {{ unread_feedback }}
@@ -49,7 +50,7 @@
 <div class="stats-grid">
     <!-- Goal Completion -->
     <div class="stat-card glass-panel" style="border-left: 4px solid var(--success)">
-        <div class="stat-label">Goal Completion (GCR)</div>
+        <div class="stat-label">Goal Completion (GCR) {{ ui.info("goal_completions / (goal_completions + fallbacks) sugli ultimi 10 giorni (tabella daily_metrics). Un parsing spesa confermato dall'utente conta come 'goal'. Misura quanto l'AI risolve le richieste da sola: più alto è, meglio funziona il prodotto.") }}</div>
         <div class="stat-value" style="color: var(--success)">
             {% if goal_completion_rate is not none %}{{ goal_completion_rate }}%{% else %}<span
                 style="font-size:1rem;color:#aaa">N/D</span>{% endif %}
@@ -59,7 +60,7 @@
     </div>
     <!-- Fallback Rate -->
     <div class="stat-card glass-panel" style="border-left: 4px solid var(--warning)">
-        <div class="stat-label">Fallback Rate</div>
+        <div class="stat-label">Fallback Rate {{ ui.info("fallbacks / (goal_completions + fallbacks) sugli ultimi 10 giorni (daily_metrics). È la quota di messaggi che l'AI non ha capito. Sopra ~5% (rosso) segnala un problema di comprensione da investigare.") }}</div>
         <div class="stat-value"
             style="color: {% if fallback_rate is not none and fallback_rate > 5 %}var(--danger){% elif fallback_rate is not none %}var(--warning){% else %}#aaa{% endif %}">
             {% if fallback_rate is not none %}{{ fallback_rate }}%{% else %}<span
@@ -70,7 +71,7 @@
     </div>
     <!-- Engagement -->
     <div class="stat-card glass-panel" style="border-left: 4px solid var(--accent-info)">
-        <div class="stat-label">Messaggi / Utente Attivo</div>
+        <div class="stat-label">Messaggi / Utente Attivo {{ ui.info("Proxy di engagement: somma degli eventi LLM degli ultimi 10 giorni divisa per gli utenti attivi. Non conta i messaggi esatti ma le interazioni con l'AI: più alto = utenti più coinvolti.") }}</div>
         <div class="stat-value" style="color: var(--accent-info)">
             {{ avg_msg_per_user }}
         </div>
@@ -78,7 +79,7 @@
     </div>
     <!-- Cost -->
     <div class="stat-card glass-panel" style="border-left: 4px solid var(--danger)">
-        <div class="stat-label">Stima Costi LLM (30 gg)</div>
+        <div class="stat-label">Stima Costi LLM (30 gg) {{ ui.info("Somma di estimated_cost_amount dal ledger llm_usage_events negli ultimi 30 giorni (in USD). Sotto: il costo totale storico dal 2026-05-01. È la spesa AI reale, da confrontare con i ricavi per la sostenibilità economica.") }}</div>
         <div class="stat-value" style="color: var(--danger)">
             ${{ cost_month }}
         </div>
@@ -87,7 +88,7 @@
 </div>
 
 <div class="chart-container glass-panel">
-    <h3 style="margin-bottom: 1.5rem; color: var(--text-main);">Consumo Token LLM (10 Giorni)</h3>
+    <h3 style="margin-bottom: 1.5rem; color: var(--text-main);">Consumo Token LLM (10 Giorni) {{ ui.info("Token prompt, completion e totali consumati per giorno negli ultimi 10 giorni (llm_usage_events). Mostra il trend di consumo e aiuta a intercettare picchi anomali o utenti che consumano troppo.") }}</h3>
     <div style="position: relative; height: 350px; width: 100%;">
         <canvas id="usageChart"></canvas>
     </div>
@@ -163,31 +164,31 @@
 
 <!-- Tab 2: Token Analytics (90 giorni) -->
 <div id="tab-analytics-content" style="display: none;">
-<h2 style="color: var(--text-main); margin-bottom: 1.5rem;">📊 Analisi Consumo Token (Ultimi 90 Giorni)</h2>
+<h2 style="color: var(--text-main); margin-bottom: 1.5rem;">📊 Analisi Consumo Token (Ultimi 90 Giorni) {{ ui.info("Analisi del consumo LLM sugli ultimi 90 giorni, disaggregata per operazione (expense_parse, voice_transcribe, weekly/monthly_plan) e per piano (free/pro). Fonte: ledger llm_usage_events + tabella user_plans. Serve a capire quali funzioni costano di più e come si comportano free e pro.") }}</h2>
 
 <!-- Analytics Stat Cards -->
 <div class="stats-grid">
     <div class="stat-card glass-panel">
-        <div class="stat-label">Totale Richieste</div>
+        <div class="stat-label">Totale Richieste {{ ui.info("Numero totale di chiamate LLM registrate negli ultimi 90 giorni (righe di llm_usage_events). Calcolato lato browser dai dati del grafico 1.") }}</div>
         <div class="stat-value" id="analytics-total-requests" style="color: var(--accent-primary);">—</div>
     </div>
     <div class="stat-card glass-panel">
-        <div class="stat-label">Avg Token/Richiesta</div>
+        <div class="stat-label">Avg Token/Richiesta {{ ui.info("Media dei token totali per chiamata LLM sui 90 giorni. Indicatore chiave per stimare costi e dimensionare le quote mensili (free 150k, pro 3M).") }}</div>
         <div class="stat-value" id="analytics-avg-tokens" style="color: var(--accent-info);">—</div>
     </div>
     <div class="stat-card glass-panel">
-        <div class="stat-label">Conversion Rate Overall</div>
+        <div class="stat-label">Conversion Rate Overall {{ ui.info("Quota di chiamate LLM 'riuscite' (total_tokens > 0) sul totale. Una chiamata con 0 token indica un parsing fallito o vuoto: valori bassi segnalano problemi di affidabilità dell'AI.") }}</div>
         <div class="stat-value" id="analytics-conversion-overall" style="color: var(--success);">—</div>
     </div>
     <div class="stat-card glass-panel">
-        <div class="stat-label">Operazioni Tracciabili</div>
+        <div class="stat-label">Operazioni Tracciabili {{ ui.info("Numero di tipi di operazione LLM distinti presenti nei dati (es. expense_parse, voice_transcribe, weekly_plan...). Indica quante funzioni AI sono state usate nel periodo.") }}</div>
         <div class="stat-value" id="analytics-operation-count" style="color: var(--warning);">—</div>
     </div>
 </div>
 
 <!-- Grafico 1: Richieste per Tipo (Free vs Pro) -->
 <div class="chart-container glass-panel" style="margin-top: 2rem;">
-    <h3 style="margin-bottom: 1.5rem; color: var(--text-main);">Grafico 1: Numero Richieste per Tipo (Free vs Pro)</h3>
+    <h3 style="margin-bottom: 1.5rem; color: var(--text-main);">Grafico 1: Numero Richieste per Tipo (Free vs Pro) {{ ui.info("Numero di richieste LLM per tipo di operazione, separando utenti free e pro. Mostra quali funzioni pesano di più sul carico e chi le usa davvero.") }}</h3>
     <div style="position: relative; height: 350px; width: 100%;">
         <canvas id="requestsChart"></canvas>
     </div>
@@ -195,7 +196,7 @@
 
 <!-- Grafico 2: Token Medio per Tipo -->
 <div class="chart-container glass-panel" style="margin-top: 2rem;">
-    <h3 style="margin-bottom: 1.5rem; color: var(--text-main);">Grafico 2: Token Medio Consumato per Tipo (Free vs Pro)</h3>
+    <h3 style="margin-bottom: 1.5rem; color: var(--text-main);">Grafico 2: Token Medio Consumato per Tipo (Free vs Pro) {{ ui.info("Token medi consumati per richiesta, per operazione e piano. Serve a capire quali operazioni sono più costose in token (es. i piani mensili vs un semplice parse spesa).") }}</h3>
     <div style="position: relative; height: 350px; width: 100%;">
         <canvas id="tokenStatsChart"></canvas>
     </div>
@@ -203,7 +204,7 @@
 
 <!-- Grafico 3: Conversion Rate per Tipo -->
 <div class="chart-container glass-panel" style="margin-top: 2rem;">
-    <h3 style="margin-bottom: 1.5rem; color: var(--text-main);">Grafico 3: Conversion Rate per Tipo (%)</h3>
+    <h3 style="margin-bottom: 1.5rem; color: var(--text-main);">Grafico 3: Conversion Rate per Tipo (%) {{ ui.info("Percentuale di richieste riuscite (total_tokens > 0) per operazione e piano. Un valore basso su una specifica operazione indica parsing che falliscono lì: dove intervenire per migliorare l'affidabilità.") }}</h3>
     <div style="position: relative; height: 350px; width: 100%;">
         <canvas id="conversionChart"></canvas>
     </div>
@@ -211,7 +212,7 @@
 
 <!-- Tabella Dettagli -->
 <div class="chart-container glass-panel" style="margin-top: 2rem;">
-    <h3 style="margin-bottom: 1.5rem; color: var(--text-main);">Dettagli Operazioni</h3>
+    <h3 style="margin-bottom: 1.5rem; color: var(--text-main);">Dettagli Operazioni {{ ui.info("Dettaglio numerico per ogni operazione LLM: numero richieste, token medi e conversion rate, separati free vs pro. È la vista tabellare dei tre grafici qui sopra.") }}</h3>
     <div id="analyticsTableContainer" style="overflow-x: auto;">
         <table style="width: 100%; border-collapse: collapse; color: #8b949e; font-family: Outfit;">
             <thead>
@@ -287,7 +288,7 @@ function showTab(tabName) {
 function loadUserTokenTable() {
     const tbody = document.getElementById('userTokenTableBody');
     if (!tbody || tbody.dataset.loaded) return;
-    fetch('/api/users/token-usage')
+    fetch('/admin/api/users/token-usage')
         .then(r => r.json())
         .then(rows => {
             if (!rows.length) {

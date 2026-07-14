@@ -293,6 +293,12 @@ def skip_ngrok_interstitial(response):
 # Inizializza la connessione allo storage SQLite
 store = UserStore(db_url=Config.DATABASE_URL)
 
+# Dashboard admin: le route /admin/* vivono nel blueprint admin_bp, che legge lo
+# store condiviso da app.config["STORE"] (nessun import di app.py → nessun ciclo).
+app.config["STORE"] = store
+from src.dashboard.admin_routes import admin_bp  # noqa: E402
+app.register_blueprint(admin_bp)
+
 
 @app.route("/unsubscribe", methods=["GET"])
 def unsubscribe():
@@ -750,28 +756,10 @@ def web_logout():
     return redirect(url_for("web_login"))
 
 
-# --- API e Utilità ---
-def get_system_metrics():
-    """Recupera l'utilizzo di risorse della macchina."""
-    # RAM
-    vmem = psutil.virtual_memory()
-    # CPU (interval=None è essenziale per non causare blocchi o lag del processo su alcuni OS)
-    cpu = psutil.cpu_percent(interval=None)
-    
-    # DB Size
-    db_path = Config.DATABASE_URL.replace("sqlite:///", "")
-    db_size = 0
-    if os.path.exists(db_path):
-        db_size = os.path.getsize(db_path) / (1024 * 1024) # MB
-        
-    return {
-        "cpu_percent": cpu,
-        "ram_percent": vmem.percent,
-        "ram_used_gb": round(vmem.used / (1024**3), 2),
-        "db_size_mb": round(db_size, 2)
-    }
-
 # --- Rotte Web (UI) ---
+# NB: get_system_metrics() e le route /admin di dashboard sono state estratte nel
+# blueprint src/dashboard/admin_routes.py (registrato più in basso). Qui restano
+# solo login/logout admin, accanto al rate limiter e all'audit log.
 
 ADMIN_LOCKOUT_KEY = "admin_login"
 
@@ -779,7 +767,7 @@ ADMIN_LOCKOUT_KEY = "admin_login"
 @app.route("/admin/login", methods=["GET", "POST"])
 def admin_login():
     if session.get("admin_logged_in"):
-        return redirect(url_for("index"))
+        return redirect(url_for("admin.index"))
 
     error = None
     if request.method == "POST":
@@ -812,7 +800,7 @@ def admin_login():
                 extra={"domain": "security", "event": "admin_login_success",
                        "meta": {"ip": request.remote_addr}},
             )
-            return redirect(url_for("index"))
+            return redirect(url_for("admin.index"))
         else:
             error = "Password amministratore errata!"
             track_failed_login(ADMIN_LOCKOUT_KEY, ACCOUNT_LOCKOUT_WINDOW_SECONDS)
@@ -834,316 +822,6 @@ def admin_logout():
     session.pop("admin_logged_in", None)
     return redirect(url_for("admin_login"))
 
-@app.route("/admin", strict_slashes=False)
-@admin_required
-def index():
-    from sqlalchemy import func, text
-    sys_metrics = get_system_metrics()
-    # Soglia storica ledger: solo dati dal 2026-05-01 in avanti
-    LEDGER_EPOCH = datetime(2026, 5, 1)
-
-    with store.Session() as s:
-        # Statistiche utenti
-        users_count = s.query(User).count()
-        active_users = s.query(User).filter(User.is_active == True).count()
-
-        # Statistiche feedback
-        unread_feedback = s.query(Feedback).filter(Feedback.status == "unread").count()
-
-        # --- TOKEN LEDGER KPI (da LEDGER_EPOCH in avanti) ---
-        ten_days_ago = datetime.utcnow() - timedelta(days=10)
-        thirty_days_ago = datetime.utcnow() - timedelta(days=30)
-
-        # Token usati oggi
-        today_start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
-        tokens_today = s.query(
-            func.coalesce(func.sum(LlmUsageEvent.total_tokens), 0)
-        ).filter(LlmUsageEvent.occurred_at >= today_start).scalar() or 0
-
-        # Token usati negli ultimi 30 giorni
-        tokens_month = s.query(
-            func.coalesce(func.sum(LlmUsageEvent.total_tokens), 0)
-        ).filter(
-            LlmUsageEvent.occurred_at >= max(thirty_days_ago, LEDGER_EPOCH)
-        ).scalar() or 0
-
-        # Costo stimato mese corrente
-        cost_month = s.query(
-            func.coalesce(func.sum(LlmUsageEvent.estimated_cost_amount), 0.0)
-        ).filter(
-            LlmUsageEvent.occurred_at >= max(thirty_days_ago, LEDGER_EPOCH)
-        ).scalar() or 0.0
-
-        # Costo totale storico (da LEDGER_EPOCH)
-        cost_total = s.query(
-            func.coalesce(func.sum(LlmUsageEvent.estimated_cost_amount), 0.0)
-        ).filter(
-            LlmUsageEvent.occurred_at >= LEDGER_EPOCH
-        ).scalar() or 0.0
-
-        # Breakdown token per giorno (ultimi 10 giorni) per grafico
-        ledger_rows = s.execute(
-            text(
-                "SELECT DATE(occurred_at) as d, "
-                "SUM(prompt_tokens) as pt, SUM(completion_tokens) as ct, SUM(total_tokens) as tt "
-                "FROM llm_usage_events "
-                "WHERE occurred_at >= :since "
-                "GROUP BY d ORDER BY d"
-            ),
-            {"since": max(ten_days_ago, LEDGER_EPOCH).isoformat()},
-        ).fetchall()
-
-        # Costruisci chart_data 10 giorni
-        chart_data = {}
-        for x in range(10):
-            d = (datetime.utcnow() - timedelta(days=9 - x)).date()
-            chart_data[d.isoformat()] = {"prompt": 0, "completion": 0, "total": 0}
-        for row in ledger_rows:
-            d_str = str(row[0])
-            if d_str in chart_data:
-                chart_data[d_str]["prompt"] += row[1] or 0
-                chart_data[d_str]["completion"] += row[2] or 0
-                chart_data[d_str]["total"] += row[3] or 0
-
-        labels = list(chart_data.keys())
-        data_prompt = [v["prompt"] for v in chart_data.values()]
-        data_completion = [v["completion"] for v in chart_data.values()]
-        data_total = [v["total"] for v in chart_data.values()]
-
-        # Totale messaggi (proxy: eventi ledger ultimi 10gg)
-        total_messages = sum(data_total)
-        avg_msg_per_user = round(total_messages / active_users, 0) if active_users > 0 else 0
-
-        # GCR e Fallback Rate: calcolati dai DailyMetrics (invariato)
-        ten_days_ago_date = datetime.utcnow().date() - timedelta(days=10)
-        ai_metrics = s.query(DailyMetrics).filter(DailyMetrics.metrics_date >= ten_days_ago_date).all()
-        total_completions = sum(m.goal_completions or 0 for m in ai_metrics)
-        total_fallbacks = sum(m.fallbacks or 0 for m in ai_metrics)
-        total_ai_interactions = total_completions + total_fallbacks
-        if total_ai_interactions > 0:
-            goal_completion_rate = round(total_completions / total_ai_interactions * 100, 1)
-            fallback_rate = round(total_fallbacks / total_ai_interactions * 100, 1)
-        else:
-            goal_completion_rate = None
-            fallback_rate = None
-
-        # --- TOKEN ANALYTICS (90 giorni, disaggregato per operazione e plan_type) ---
-        ninety_days_ago = datetime.utcnow() - timedelta(days=90)
-        
-        # Raw query: raggruppa per data, operazione, e plan_type
-        analytics_rows = s.execute(
-            text(
-                "SELECT "
-                "DATE(e.occurred_at) as d, "
-                "e.operation, "
-                "COALESCE(p.plan_type, 'free') as plan_type, "
-                "COUNT(*) as req_count, "
-                "AVG(CAST(e.total_tokens AS FLOAT)) as avg_tokens, "
-                "SUM(CASE WHEN e.total_tokens > 0 THEN 1 ELSE 0 END) as success_count "
-                "FROM llm_usage_events e "
-                "LEFT JOIN user_plans p ON e.chat_id = p.chat_id "
-                "WHERE e.occurred_at >= :since "
-                "GROUP BY DATE(e.occurred_at), e.operation, COALESCE(p.plan_type, 'free') "
-                "ORDER BY d DESC, e.operation, plan_type"
-            ),
-            {"since": max(ninety_days_ago, LEDGER_EPOCH).isoformat()},
-        ).fetchall()
-        
-        # Aggregazione 1: Richieste per tipo (Free vs Pro)
-        requests_by_op_date = {}
-        for row in analytics_rows:
-            date_str = str(row[0])
-            op = row[1]
-            plan = row[2]
-            count = row[3]
-            
-            if op not in requests_by_op_date:
-                requests_by_op_date[op] = {}
-            if date_str not in requests_by_op_date[op]:
-                requests_by_op_date[op][date_str] = {"free": 0, "pro": 0, "total": 0}
-            
-            requests_by_op_date[op][date_str][plan] = count
-            requests_by_op_date[op][date_str]["total"] += count
-        
-        # Aggregazione 2: Token medio per tipo (Free vs Pro)
-        token_stats_by_op = {}
-        for op in set(row[1] for row in analytics_rows):
-            token_stats_by_op[op] = {
-                "free": {"total_tokens": 0, "count": 0, "avg": 0},
-                "pro": {"total_tokens": 0, "count": 0, "avg": 0},
-            }
-        
-        for row in analytics_rows:
-            op = row[1]
-            plan = row[2]
-            count = row[3]
-            avg_tokens = row[4]
-            
-            if avg_tokens and op in token_stats_by_op:
-                token_stats_by_op[op][plan]["total_tokens"] += (avg_tokens * count)
-                token_stats_by_op[op][plan]["count"] += count
-        
-        # Calcola media finale
-        token_stats_display = {}
-        for op, plans in token_stats_by_op.items():
-            token_stats_display[op] = {}
-            grand_total = 0
-            grand_count = 0
-            
-            for plan in ["free", "pro"]:
-                if plans[plan]["count"] > 0:
-                    avg = round(plans[plan]["total_tokens"] / plans[plan]["count"], 0)
-                    token_stats_display[op][plan] = int(avg)
-                    grand_total += plans[plan]["total_tokens"]
-                    grand_count += plans[plan]["count"]
-                else:
-                    token_stats_display[op][plan] = 0
-            
-            token_stats_display[op]["total"] = int(round(grand_total / grand_count, 0)) if grand_count > 0 else 0
-        
-        # Aggregazione 3: Conversion rate per tipo (success = token > 0)
-        conversion_rates_by_op = {}
-        for op in set(row[1] for row in analytics_rows):
-            conversion_rates_by_op[op] = {
-                "free": {"success": 0, "total": 0},
-                "pro": {"success": 0, "total": 0},
-            }
-        
-        for row in analytics_rows:
-            op = row[1]
-            plan = row[2]
-            req_count = row[3]
-            success_count = row[5]
-            
-            if op in conversion_rates_by_op:
-                conversion_rates_by_op[op][plan]["success"] += success_count
-                conversion_rates_by_op[op][plan]["total"] += req_count
-        
-        # Calcola percentuali
-        conversion_display = {}
-        for op, plans in conversion_rates_by_op.items():
-            conversion_display[op] = {}
-            grand_success = 0
-            grand_total = 0
-            
-            for plan in ["free", "pro"]:
-                total = plans[plan]["total"]
-                success = plans[plan]["success"]
-                pct = round(100 * success / total, 1) if total > 0 else 0
-                conversion_display[op][plan] = pct
-                grand_success += success
-                grand_total += total
-            
-            conversion_display[op]["total"] = round(100 * grand_success / grand_total, 1) if grand_total > 0 else 0
-        
-        # Prepara dati per template (serializzati in modo sicuro da Jinja con |tojson)
-        analytics_data = {
-            "requests_by_operation": {k: {str(date): v for date, v in dates.items()} for k, dates in requests_by_op_date.items()},
-            "token_stats": token_stats_display,
-            "conversion_rates": conversion_display,
-        }
-
-    return render_template(
-        "index.html",
-        sys=sys_metrics,
-        users_count=users_count,
-        active_users=active_users,
-        unread_feedback=unread_feedback,
-        # Grafici token ledger
-        chart_labels=labels,
-        chart_prompt=data_prompt,
-        chart_completion=data_completion,
-        chart_total=data_total,
-        # KPI token
-        tokens_today=tokens_today,
-        tokens_month=tokens_month,
-        cost_month=round(cost_month, 4),
-        cost_total=round(cost_total, 4),
-        avg_msg_per_user=avg_msg_per_user,
-        goal_completion_rate=goal_completion_rate,
-        fallback_rate=fallback_rate,
-        # Token Analytics (90 giorni)
-        analytics_data=analytics_data,
-    )
-
-@app.route("/api/users/token-usage")
-@admin_required
-def users_token_usage():
-    """Restituisce il consumo token per ogni utente nel ciclo corrente."""
-    from sqlalchemy import func, text
-    rows = []
-    with store.Session() as s:
-        result = s.execute(text(
-            "SELECT e.chat_id, u.username, "
-            "COUNT(*) as req_count, "
-            "SUM(e.total_tokens) as total_tokens, "
-            "SUM(COALESCE(e.estimated_cost_amount, 0)) as total_cost, "
-            "MAX(e.occurred_at) as last_seen "
-            "FROM llm_usage_events e "
-            "LEFT JOIN users u ON u.chat_id = e.chat_id "
-            "GROUP BY e.chat_id, u.username "
-            "ORDER BY total_tokens DESC"
-        )).fetchall()
-        for r in result:
-            rows.append({
-                "chat_id": r[0],
-                "username": r[1] or r[0],
-                "req_count": r[2],
-                "total_tokens": r[3] or 0,
-                "total_cost_usd": round(r[4] or 0, 6),
-                "last_seen": str(r[5])[:16] if r[5] else "—",
-            })
-    return jsonify(rows)
-
-
-@app.route("/admin/users", strict_slashes=False)
-@admin_required
-def users_list():
-    with store.Session() as s:
-        users = s.query(User).order_by(User.created_at.desc()).all()
-    return render_template("users.html", users=users)
-
-@app.route("/api/toggle-user/<chat_id>", methods=["POST"])
-@admin_required
-def toggle_user(chat_id):
-    with store.Session() as s:
-        user = s.query(User).filter(User.chat_id == chat_id).first()
-        if user:
-            user.is_active = not user.is_active
-            s.commit()
-            return jsonify({"status": "ok", "new_state": user.is_active})
-    return jsonify({"error": "User not found"}), 404
-
-@app.route("/admin/feedbacks", strict_slashes=False)
-@admin_required
-def feedbacks_list():
-    with store.Session() as s:
-        fbs = s.query(Feedback).order_by(Feedback.created_at.desc()).all()
-    return render_template("feedbacks.html", feedbacks=fbs)
-
-@app.route("/api/resolve-feedback/<int:fb_id>", methods=["POST"])
-@admin_required
-def resolve_feedback(fb_id):
-    with store.Session() as s:
-        fb = s.query(Feedback).filter(Feedback.id == fb_id).first()
-        if fb:
-            fb.status = "resolved" if fb.status == "unread" else "unread"
-            s.commit()
-            return jsonify({"status": "ok", "new_state": fb.status})
-    return jsonify({"error": "Feedback not found"}), 404
-
-@app.route("/admin/logs", strict_slashes=False)
-@admin_required
-def logs_viewer():
-    log_file = Config.LOG_DIR / "agent.log"
-    log_lines = []
-    if os.path.exists(log_file):
-        with open(log_file, "r") as f:
-            # Raccogli le ultime 100 righe
-            lines = f.readlines()
-            log_lines = lines[-100:]
-            
-    return render_template("logs.html", log_lines=log_lines)
 
 # --- ROTTE OAUTH (Fase 2) ---
 

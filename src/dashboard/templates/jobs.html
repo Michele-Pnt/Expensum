@@ -1,0 +1,64 @@
+{% extends "base.html" %}
+{% import "_macros.html" as ui %}
+{% block content %}
+<h1 class="page-title">Scheduled Job {{ ui.info("Monitoraggio dei job schedulati (APScheduler nel bot + backup di sistema). Ogni esecuzione è persistita nella tabella job_runs da un listener; la dashboard la confronta con lo schedule atteso per rilevare i 'no-show' (job che dovevano girare ma non risultano). Tutti gli orari sono in UTC.") }}</h1>
+<p class="page-desc">
+    Esito dei job di oggi ({{ jobs.now.strftime('%Y-%m-%d %H:%M') }} UTC).
+    {% if jobs.has_alerts %}<span class="badge suspended">⚠ Attenzione richiesta</span>{% else %}<span class="badge active">Tutto regolare</span>{% endif %}
+</p>
+
+{% macro state_badge(state) -%}
+    {% if state == 'success' %}<span class="badge active">OK</span>
+    {% elif state == 'error' %}<span class="badge suspended">Errore</span>
+    {% elif state == 'missed' %}<span class="badge suspended">No-show</span>
+    {% elif state == 'pending' %}<span class="badge" style="background: var(--accent-info); color:#fff;">Attesa</span>
+    {% else %}<span class="badge" style="background: rgba(255,255,255,0.15);">Non previsto</span>{% endif %}
+{%- endmacro %}
+
+<div class="stats-grid">
+    <div class="stat-card glass-panel" style="border-left: 4px solid var(--success)"><div class="stat-label">OK oggi {{ ui.info("Job andati a buon fine oggi (status='success' in job_runs).") }}</div><div class="stat-value" style="color: var(--success)">{{ jobs.counts.success }}</div></div>
+    <div class="stat-card glass-panel" style="border-left: 4px solid var(--danger)"><div class="stat-label">Errori {{ ui.info("Job terminati con errore oggi (status='error'). L'eccezione è nella colonna Errore della tabella sotto: da investigare subito.") }}</div><div class="stat-value" style="color: var(--danger)">{{ jobs.counts.error }}</div></div>
+    <div class="stat-card glass-panel" style="border-left: 4px solid var(--warning)"><div class="stat-label">No-show {{ ui.info("Job il cui orario previsto è già passato ma di cui non risulta nessuna esecuzione oggi. È il segnale che lo scheduler o l'intero bot potrebbero essere fermi: da controllare con priorità.") }}</div><div class="stat-value" style="color: var(--warning)">{{ jobs.counts.missed }}</div></div>
+    <div class="stat-card glass-panel"><div class="stat-label">In attesa {{ ui.info("Job previsti più tardi nella giornata e non ancora eseguiti. È lo stato normale prima dell'orario schedulato.") }}</div><div class="stat-value">{{ jobs.counts.pending }}</div></div>
+</div>
+
+<h3 style="margin-top: 2rem; margin-bottom: 1rem; color: var(--text-main);">Stato per job {{ ui.info("Per ogni job schedulato: tipo (daily/weekly/monthly/interval), orario atteso oggi, stato odierno, ultima esecuzione, return code (valorizzato solo per i job-processo come il backup pg_dump) ed eventuale messaggio di errore.") }}</h3>
+<div class="glass-panel data-table-wrapper">
+    <table class="glass-table">
+        <thead><tr><th>Job</th><th>Tipo</th><th>Atteso oggi</th><th>Stato</th><th>Ultima esecuzione</th><th>Return code</th><th>Errore</th></tr></thead>
+        <tbody>
+            {% for j in jobs.jobs %}
+            <tr>
+                <td>{{ j.label }}<br><code style="font-size:0.75rem; color: var(--text-secondary)">{{ j.job_id }}</code></td>
+                <td>{{ j.kind }}</td>
+                <td>{% if j.expected_time %}{{ j.expected_time.strftime('%H:%M') }}{% else %}—{% endif %}</td>
+                <td>{{ state_badge(j.state) }}</td>
+                <td>{% if j.last_run %}{{ j.last_run.finished_at.strftime('%m-%d %H:%M') }}{% else %}—{% endif %}</td>
+                <td>{% if j.last_run and j.last_run.return_code is not none %}{{ j.last_run.return_code }}{% else %}—{% endif %}</td>
+                <td style="max-width:220px; overflow:hidden; text-overflow:ellipsis; color: var(--danger); font-size:0.8rem;">{{ j.last_run.error_text if j.last_run and j.last_run.error_text else '' }}</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+
+<h3 style="margin-top: 2rem; margin-bottom: 1rem; color: var(--text-main);">Esecuzioni recenti {{ ui.info("Ultime 50 righe di job_runs, dalla più recente. Storico grezzo di tutte le esecuzioni per verificare andamenti e ricorrenze di errori nel tempo. Retention 90 giorni.") }}</h3>
+<div class="glass-panel data-table-wrapper">
+    <table class="glass-table">
+        <thead><tr><th>Job</th><th>Stato</th><th>Fine</th><th>Return code</th><th>Errore</th></tr></thead>
+        <tbody>
+            {% for r in jobs.recent %}
+            <tr>
+                <td><code>{{ r.job_id }}</code></td>
+                <td>{{ state_badge(r.status) }}</td>
+                <td>{{ r.finished_at.strftime('%Y-%m-%d %H:%M') if r.finished_at else '—' }}</td>
+                <td>{% if r.return_code is not none %}{{ r.return_code }}{% else %}—{% endif %}</td>
+                <td style="max-width:280px; overflow:hidden; text-overflow:ellipsis; color: var(--danger); font-size:0.8rem;">{{ r.error_text or '' }}</td>
+            </tr>
+            {% else %}
+            <tr><td colspan="5" style="text-align:center; color: var(--text-secondary);">Nessuna esecuzione registrata ancora.</td></tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+{% endblock %}

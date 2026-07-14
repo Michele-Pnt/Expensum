@@ -1,0 +1,82 @@
+{% extends "base.html" %}
+{% import "_macros.html" as ui %}
+{% block content %}
+<h1 class="page-title">Business {{ ui.info("Pagina economica: ricavi ricorrenti, conversione a Pro, churn e sostenibilità dei costi AI (unit economics), più il consumo token per tarare le quote dei piani. È la vista per le decisioni su prezzi e limiti.") }}</h1>
+<p class="page-desc">Piani, ricavi, churn, unit economics e consumo token per tarare le quote.</p>
+
+<!-- REVENUE -->
+<div class="stats-grid">
+    <div class="stat-card glass-panel" style="border-left: 4px solid var(--success)">
+        <div class="stat-label">MRR stimato {{ ui.info("Ricavo mensile ricorrente stimato = numero di utenti Pro paganti (plan_type='pro' e NON in trial) × prezzo Pro (variabile d'ambiente PRO_PRICE_EUR). È una stima interna, non un dato di fatturazione reale del gateway di pagamento.") }}</div>
+        <div class="stat-value" style="color: var(--success)">€{{ revenue.mrr_eur }}</div>
+        <span class="stat-label" style="text-transform:none; margin-top:5px">{{ revenue.paying_pro }} pro paganti · €{{ revenue.pro_price_eur }}/mese</span>
+    </div>
+    <div class="stat-card glass-panel" style="border-left: 4px solid var(--accent-primary)">
+        <div class="stat-label">Conversione a Pro {{ ui.info("% di utenti su piano Pro sul totale (free + pro). Sotto: conteggi free / pro / trial attivi. Misura quanto il piano gratuito riesce a convertire in pagante — la leva principale dei ricavi.") }}</div>
+        <div class="stat-value" style="color: var(--accent-primary)">{{ revenue.pro_conversion_pct }}%</div>
+        <span class="stat-label" style="text-transform:none; margin-top:5px">{{ revenue.pro_count }} pro · {{ revenue.free_count }} free · {{ revenue.trials_active }} trial</span>
+    </div>
+    <div class="stat-card glass-panel" style="border-left: 4px solid var(--danger)">
+        <div class="stat-label">Costo LLM / ricavo {{ ui.info("Costo LLM degli ultimi 30 giorni (USD, da llm_usage_events) diviso l'MRR. È la quota di ricavo mangiata dai costi AI: sopra ~30% (rosso) l'economia unitaria è a rischio. Sotto: costo medio per utente. N/D se non c'è ancora MRR.") }}</div>
+        <div class="stat-value" style="color: {% if revenue.cost_revenue_ratio_pct and revenue.cost_revenue_ratio_pct > 30 %}var(--danger){% else %}var(--warning){% endif %}">
+            {% if revenue.cost_revenue_ratio_pct is not none %}{{ revenue.cost_revenue_ratio_pct }}%{% else %}<span style="font-size:1rem;color:#aaa">N/D</span>{% endif %}
+        </div>
+        <span class="stat-label" style="text-transform:none; margin-top:5px">costo 30gg ${{ revenue.llm_cost_30d_usd }} · ${{ revenue.cost_per_user_usd }}/utente</span>
+    </div>
+    <div class="stat-card glass-panel" style="border-left: 4px solid var(--accent-info)">
+        <div class="stat-label">Movimenti piano {{ ui.info("Upgrade (↑) e downgrade (↓) registrati negli ultimi 30 giorni nella tabella plan_changes, più i trial scaduti negli ultimi 90 giorni. Misura la crescita dei paganti e il churn (abbandoni).") }}</div>
+        <div class="stat-value" style="font-size: 1.4rem;">↑{{ revenue.upgrades_30d }} ↓{{ revenue.downgrades_30d }}</div>
+        <span class="stat-label" style="text-transform:none; margin-top:5px">30gg · trial scaduti 90gg: {{ revenue.trial_expired_90d }}</span>
+    </div>
+</div>
+
+<!-- QUOTE TOKEN (mese corrente) -->
+<h3 style="margin-top: 2rem; margin-bottom: 1rem; color: var(--text-main);">Consumo token — mese corrente (per tarare le quote) {{ ui.info("Statistiche del consumo token del mese in corso, aggregando llm_usage_events per utente. Servono a decidere il tetto mensile del piano free (oggi 150k) e Pro (3M) in modo informato, senza penalizzare gli utenti legittimi.") }}</h3>
+<div class="stats-grid">
+    <div class="stat-card glass-panel">
+        <div class="stat-label">Media / utente {{ ui.info("Media dei token consumati questo mese per utente attivo. Sensibile agli outlier: leggere insieme a mediana e P90.") }}</div>
+        <div class="stat-value">{{ monthly.current_month_stats.avg | int }}</div>
+    </div>
+    <div class="stat-card glass-panel">
+        <div class="stat-label">Mediana {{ ui.info("Valore centrale del consumo mensile: metà degli utenti consuma meno, metà di più. Più rappresentativa della media perché non distorta dagli utenti molto pesanti.") }}</div>
+        <div class="stat-value">{{ monthly.current_month_stats.median | int }}</div>
+    </div>
+    <div class="stat-card glass-panel" style="border-left: 4px solid var(--warning)">
+        <div class="stat-label">P90 {{ ui.info("90° percentile: il 90% degli utenti consuma meno di questo valore. È il riferimento ideale per fissare una quota che copra quasi tutti senza sprechi.") }}</div>
+        <div class="stat-value" style="color: var(--warning)">{{ monthly.current_month_stats.p90 | int }}</div>
+    </div>
+    <div class="stat-card glass-panel" style="border-left: 4px solid var(--danger)">
+        <div class="stat-label">Massimo {{ ui.info("Consumo del singolo utente più pesante del mese. Sotto: numero di utenti attivi considerati nelle statistiche. Utile per individuare abusi o casi limite.") }}</div>
+        <div class="stat-value" style="color: var(--danger)">{{ monthly.current_month_stats.max | int }}</div>
+        <span class="stat-label" style="text-transform:none; margin-top:5px">{{ monthly.current_month_stats.active_users }} utenti attivi</span>
+    </div>
+</div>
+
+<!-- TABELLA CONSUMO MENSILE PER UTENTE -->
+<h3 style="margin-top: 2rem; margin-bottom: 1rem; color: var(--text-main);">Consumo token mensile per utente {{ ui.info("Token consumati per mese e per utente negli ultimi 6 mesi (llm_usage_events, bucket per mese calcolati lato server), ordinati per totale decrescente. L'ultima riga è la media per utente attivo di ogni mese. Individua chi consuma troppo e mostra il trend con cui tarare le quote.") }}</h3>
+<div class="glass-panel data-table-wrapper">
+    <table class="glass-table">
+        <thead>
+            <tr>
+                <th>Utente</th>
+                {% for ym in monthly.months %}<th style="text-align:right">{{ ym }}</th>{% endfor %}
+                <th style="text-align:right">Totale</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for u in monthly.per_user %}
+            <tr>
+                <td><a href="{{ url_for('admin.user_detail', chat_id=u.chat_id) }}">{{ u.username }}</a></td>
+                {% for ym in monthly.months %}<td style="text-align:right">{{ u.by_month[ym] }}</td>{% endfor %}
+                <td style="text-align:right"><strong>{{ u.total }}</strong></td>
+            </tr>
+            {% endfor %}
+            <tr style="border-top: 2px solid rgba(255,255,255,0.15);">
+                <td><em>Media utenti attivi</em></td>
+                {% for ym in monthly.months %}<td style="text-align:right"><em>{{ monthly.monthly_avg[ym] | int }}</em></td>{% endfor %}
+                <td></td>
+            </tr>
+        </tbody>
+    </table>
+</div>
+{% endblock %}

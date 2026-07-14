@@ -480,6 +480,36 @@ class TallyLead(Base):
     beta_account_granted_at = Column(DateTime, nullable=True)
 
 
+class JobRun(Base):
+    """Esito di un'esecuzione di job schedulato, per il monitoraggio in dashboard.
+
+    Tabella operativa (nessun dato personale): registra ogni esecuzione dei job
+    APScheduler (via listener EVENT_JOB_EXECUTED/ERROR/MISSED) e dei job di sistema
+    (es. backup pg_dump, che vi scrive il proprio exit code reale). Consente alla
+    dashboard admin di sapere se i job di oggi sono girati e con che esito, e di
+    rilevare i "no-show" (job attesi ma mai eseguiti).
+
+    `error_text` non contiene mai dati liberi utente: solo tipo/messaggio di
+    eccezione, coerente con le regole di logging del progetto.
+    """
+    __tablename__ = "job_runs"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    job_id = Column(String, nullable=False, index=True)        # id logico del job
+    trigger_type = Column(String, nullable=True)               # 'cron'|'interval'|'manual'|'system'
+    scheduled_at = Column(DateTime, nullable=True)             # orario previsto (se noto)
+    started_at = Column(DateTime, nullable=True)
+    finished_at = Column(DateTime, nullable=False, default=datetime.utcnow, index=True)
+    status = Column(String, nullable=False)                    # 'success'|'error'|'missed'
+    duration_ms = Column(Integer, nullable=True)
+    return_code = Column(Integer, nullable=True)               # solo job-processo (es. backup)
+    error_text = Column(String, nullable=True)                 # breve, senza dati sensibili
+
+    __table_args__ = (
+        Index("ix_job_runs_job_finished", "job_id", "finished_at"),
+    )
+
+
 # 5. IL MANAGER DEL DATABASE
 class UserStore:
     def __init__(self, db_url="sqlite:///users.db"):
@@ -2515,6 +2545,57 @@ class UserStore:
         if deleted:
             logger.info("[Cleanup] Rimossi %d chat_messages più vecchi di %d giorni.", deleted, days)
         return deleted
+
+    def cleanup_old_job_runs(self, days: int = 90) -> int:
+        """Rimuove le esecuzioni job più vecchie di `days` giorni.
+
+        La tabella `job_runs` cresce a ogni esecuzione: senza questa pulizia
+        (chiamata dal job notturno di retention) crescerebbe indefinitamente.
+        """
+        cutoff = datetime.utcnow() - timedelta(days=days)
+        with self.Session() as session:
+            deleted = session.query(JobRun).filter(
+                JobRun.finished_at < cutoff
+            ).delete(synchronize_session=False)
+            session.commit()
+        if deleted:
+            logger.info("[Cleanup] Rimosse %d job_runs più vecchie di %d giorni.", deleted, days)
+        return deleted
+
+    def record_job_run(
+        self,
+        job_id: str,
+        status: str,
+        *,
+        trigger_type: str | None = None,
+        scheduled_at: "datetime | None" = None,
+        started_at: "datetime | None" = None,
+        finished_at: "datetime | None" = None,
+        duration_ms: int | None = None,
+        return_code: int | None = None,
+        error_text: str | None = None,
+    ) -> None:
+        """Registra l'esito di un'esecuzione di job schedulato (best-effort).
+
+        Non solleva mai: il monitoraggio non deve poter far fallire un job.
+        `error_text` viene troncato e non deve contenere dati liberi utente.
+        """
+        try:
+            with self.Session() as session:
+                session.add(JobRun(
+                    job_id=job_id,
+                    status=status,
+                    trigger_type=trigger_type,
+                    scheduled_at=scheduled_at,
+                    started_at=started_at,
+                    finished_at=finished_at or datetime.utcnow(),
+                    duration_ms=duration_ms,
+                    return_code=return_code,
+                    error_text=(error_text or "")[:500] or None,
+                ))
+                session.commit()
+        except Exception as exc:  # noqa: BLE001 — monitoraggio best-effort
+            logger.warning("[JobRun] Impossibile registrare l'esito del job %s: %s", job_id, exc)
 
     def get_chat_history(self, chat_id: str, limit: int = 60) -> list[dict]:
         """Ritorna gli ultimi `limit` messaggi della cronologia, in ordine cronologico asc."""
