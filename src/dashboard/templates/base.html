@@ -8,7 +8,11 @@
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600;700;800&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
-    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <!-- Vendorizzato same-origin (src/dashboard/static/vendor/): la CSP di produzione
+         (impostata a livello nginx, fuori da questo repo) ha script-src 'self', coerente
+         con la regola del progetto di non caricare mai script di terze parti nel browser
+         (vedi src/analytics.py). Caricarlo da un CDN esterno veniva bloccato in silenzio. -->
+    <script src="{{ url_for('static', filename='vendor/chart.umd.min.js') }}"></script>
 </head>
 <body>
     <div class="app-container">

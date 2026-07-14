@@ -50,12 +50,34 @@ def _login_admin(client):
     "/admin/feedbacks",
     "/admin/logs",
     "/admin/api/users/token-usage",
+    "/admin/api/overview",
 ])
 def test_admin_routes_return_200_when_authenticated(client, route):
     _seed_app_store()
     _login_admin(client)
     resp = client.get(route)
     assert resp.status_code == 200
+
+
+def test_overview_refresh_json_shape(client):
+    """L'endpoint di auto-refresh deve avere la stessa forma dei dati usati da
+    index() per il render iniziale, così il JS può riusare le stesse funzioni."""
+    _seed_app_store()
+    _login_admin(client)
+    resp = client.get("/admin/api/overview")
+    data = resp.get_json()
+    assert set(data.keys()) == {"sys", "kpis", "analytics_data"}
+    assert "chart_labels" in data["kpis"]
+    assert len(data["kpis"]["chart_labels"]) == 10
+    assert "requests_by_operation" in data["analytics_data"]
+
+
+def test_vendored_chartjs_is_served(client):
+    """Chart.js deve essere servito same-origin (nessuna dipendenza da CDN
+    esterni, bloccata dalla CSP di produzione)."""
+    resp = client.get("/admin/static/vendor/chart.umd.min.js")
+    assert resp.status_code == 200
+    assert b"Chart.js" in resp.data[:100]
 
 
 def test_user_detail_page(client):

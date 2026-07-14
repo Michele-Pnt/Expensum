@@ -114,6 +114,21 @@ def users_token_usage():
         return jsonify(admin_metrics.get_token_usage_per_user(s))
 
 
+@admin_bp.route("/admin/api/overview")
+@_admin_required
+def overview_refresh():
+    """KPI + token ledger + analytics 90gg in JSON, per l'auto-refresh lato client
+    della pagina overview (stesse funzioni usate dal render iniziale di index())."""
+    with _store().Session() as s:
+        kpis = admin_metrics.get_overview_kpis(s)
+        analytics_data = admin_metrics.get_token_analytics_90d(s)
+    return jsonify({
+        "sys": get_system_metrics(),
+        "kpis": kpis,
+        "analytics_data": analytics_data,
+    })
+
+
 # ---------------------------------------------------------------------------
 # Prodotto: retention, timing spese, onboarding, engagement
 # ---------------------------------------------------------------------------
