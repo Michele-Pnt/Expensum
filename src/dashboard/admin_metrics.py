@@ -166,10 +166,19 @@ def get_token_analytics_90d(s: Session) -> dict[str, Any]:
     """Analytics token 90gg disaggregate per operazione e plan_type (free/pro)."""
     ninety_days_ago = datetime.utcnow() - timedelta(days=90)
 
+    # Le stesse espressioni (oggetti, non nuove chiamate) vanno usate sia nel SELECT
+    # sia nel GROUP BY: chiamare due volte func.coalesce(..., "free") crea due bind
+    # parameter distinti per il letterale "free" e Postgres, che confronta le
+    # espressioni GROUP BY/SELECT a livello sintattico prima di sostituire i
+    # parametri, le tratta come diverse e rifiuta la query con GroupingError
+    # (visto in produzione: "column user_plans.plan_type must appear in GROUP BY").
+    day_expr = func.date(LlmUsageEvent.occurred_at)
+    plan_expr = func.coalesce(UserPlan.plan_type, "free")
+
     rows = s.query(
-        func.date(LlmUsageEvent.occurred_at).label("d"),
+        day_expr.label("d"),
         LlmUsageEvent.operation,
-        func.coalesce(UserPlan.plan_type, "free").label("plan_type"),
+        plan_expr.label("plan_type"),
         func.count().label("req_count"),
         func.avg(LlmUsageEvent.total_tokens).label("avg_tokens"),
         func.sum(case((LlmUsageEvent.total_tokens > 0, 1), else_=0)).label("success_count"),
@@ -178,9 +187,9 @@ def get_token_analytics_90d(s: Session) -> dict[str, Any]:
     ).filter(
         LlmUsageEvent.occurred_at >= max(ninety_days_ago, LEDGER_EPOCH)
     ).group_by(
-        func.date(LlmUsageEvent.occurred_at),
+        day_expr,
         LlmUsageEvent.operation,
-        func.coalesce(UserPlan.plan_type, "free"),
+        plan_expr,
     ).all()
 
     requests_by_op: dict[str, dict[str, dict[str, int]]] = {}
