@@ -4,6 +4,7 @@ import React, { createContext, useCallback, useContext, useEffect, useRef, useSt
 import { useRouter } from "next/navigation";
 import { getCsrfToken } from "@/lib/csrf";
 import TelegramLinkStep from "@/components/TelegramLinkStep";
+import { trackTourCompleted, trackTourSkipped, trackTourStarted, trackTourStepViewed } from "@/lib/analytics";
 
 export interface TourStep {
   id: string;
@@ -165,6 +166,12 @@ export function TourProvider({ children }: { children: React.ReactNode }) {
   const isNavigating = useRef(false);
 
   const endTour = useCallback((done: boolean) => {
+    if (done) {
+      trackTourCompleted();
+    } else {
+      const step = TOUR_STEPS[currentStep];
+      if (step) trackTourSkipped(step.id, currentStep);
+    }
     setIsActive(false);
     setCurrentStep(0);
     try {
@@ -188,9 +195,10 @@ export function TourProvider({ children }: { children: React.ReactNode }) {
     } catch {
       // localStorage non disponibile (SSR o privacy mode)
     }
-  }, []);
+  }, [currentStep]);
 
   const startTour = useCallback(() => {
+    trackTourStarted();
     setCurrentStep(0);
     setIsActive(true);
   }, []);
@@ -222,6 +230,7 @@ export function TourProvider({ children }: { children: React.ReactNode }) {
     try { localStorage.setItem(TOUR_STEP_KEY, String(next)); } catch { /* ignore */ }
     setCurrentStep(next);
     navigateToStep(TOUR_STEPS[next]);
+    trackTourStepViewed(TOUR_STEPS[next].id, next);
   }, [currentStep, endTour, navigateToStep]);
 
   const prevStep = useCallback(() => {
@@ -229,6 +238,7 @@ export function TourProvider({ children }: { children: React.ReactNode }) {
     try { localStorage.setItem(TOUR_STEP_KEY, String(next)); } catch { /* ignore */ }
     setCurrentStep(next);
     navigateToStep(TOUR_STEPS[next]);
+    trackTourStepViewed(TOUR_STEPS[next].id, next);
   }, [currentStep, navigateToStep]);
 
   // Controlla il flag localStorage al mount (solo client).

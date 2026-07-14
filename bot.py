@@ -1749,6 +1749,7 @@ async def _process_expense_text(update: Update, context: ContextTypes.DEFAULT_TY
     if not transactions:
         _user_store.increment_ai_metrics(success=False)
         analytics.track(chat_id, "expense_tracking_failed", {"reason": "ai_unavailable", "input_method": "text"})
+        _user_store.record_tx_event(chat_id, "unknown", "text", "failed", "telegram", reason="ai_unavailable")
         await update.message.reply_text(
             "⚠️ Non sono riuscito ad elaborare il messaggio in questo momento.\n"
             "Il servizio AI è temporaneamente sovraccarico — riprova tra qualche secondo! 🔄",
@@ -2094,11 +2095,13 @@ async def _save_to_notion(query, context, chat_id: str, data: dict | None, accou
                 logger.warning("[User %s] Errore cancellazione demo data: %s", chat_id, _de)
 
         input_method = context.user_data.pop("input_method", "text")
+        tx_type = data.get("type", "expense")
         analytics.track(chat_id, "expense_tracked", {
             "input_method": input_method,
             "storage_backend": user_obj.storage_backend if user_obj else "unknown",
-            "transaction_type": data.get("type", "expense"),
+            "transaction_type": tx_type,
         })
+        _user_store.record_tx_event(chat_id, tx_type, input_method, "confirmed", "telegram")
 
         # Aggiorna la dashboard pinnata in background (se esiste)
         try:
@@ -2164,6 +2167,7 @@ async def _save_transfer(query, context, chat_id: str) -> None:
             "storage_backend": user_obj.storage_backend if user_obj else "unknown",
             "transaction_type": "transfer",
         })
+        _user_store.record_tx_event(chat_id, "transfer", input_method, "confirmed", "telegram")
 
         try:
             await _refresh_pinned_dashboard(query._bot, chat_id)
@@ -2276,10 +2280,15 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     if query.data.startswith("mcancel:"):
         tx_id = query.data.split(":", 1)[1]
         pending_expenses = context.user_data.get("pending_expenses", {})
-        if pending_expenses.pop(tx_id, None) is None:
+        cancelled_data = pending_expenses.pop(tx_id, None)
+        if cancelled_data is None:
             await query.edit_message_text("⚠️ Nessuna spesa in sospeso.")
             return
         analytics.track(chat_id, "expense_tracking_failed", {"reason": "user_cancelled", "input_method": "text"})
+        _user_store.record_tx_event(
+            chat_id, cancelled_data.get("type", "expense"), "text", "cancelled", "telegram",
+            reason="user_cancelled",
+        )
         await query.edit_message_text("❌ Operazione annullata.")
         return
 
@@ -2360,6 +2369,9 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             # restano in sospeso, l'utente potrà confermarle appena avrà creato un conto).
             context.user_data.get("pending_expenses", {}).pop(tx_id, None)
             analytics.track(chat_id, "expense_tracking_failed", {"reason": "no_account", "input_method": "text"})
+            _user_store.record_tx_event(
+                chat_id, data.get("type", "expense"), "text", "failed", "telegram", reason="no_account",
+            )
             await query.edit_message_text(
                 "🏦 Non hai ancora nessun conto su Expensum, quindi non posso registrare la spesa.\n\n"
                 "Usa /modify e vai nella tab \"Conti\" per aggiungerne uno, poi rimanda il messaggio della spesa."
@@ -2447,9 +2459,13 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
     if query.data == "cancel":
         input_method = context.user_data.pop("input_method", "text")
-        context.user_data.pop("pending_expense", None)
+        cancelled_data = context.user_data.pop("pending_expense", None)
         context.user_data.pop("waiting_for_amount", None)
         analytics.track(chat_id, "expense_tracking_failed", {"reason": "user_cancelled", "input_method": input_method})
+        _user_store.record_tx_event(
+            chat_id, (cancelled_data or {}).get("type", "expense"), input_method, "cancelled", "telegram",
+            reason="user_cancelled",
+        )
         await query.edit_message_text("❌ Operazione annullata.")
         # Messaggio multi-spesa: annullare una transazione non annulla le altre in coda
         try:
@@ -2487,10 +2503,14 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             # Svuota anche l'eventuale coda multi-spesa: nessuna delle transazioni rilevate
             # sarebbe comunque salvabile finché non esiste un conto.
             input_method = context.user_data.pop("input_method", "text")
+            tx_type_for_failure = data.get("type", "expense")
             context.user_data.pop("pending_expense", None)
             context.user_data.pop("waiting_for_amount", None)
             context.user_data.pop("expense_queue", None)
             analytics.track(chat_id, "expense_tracking_failed", {"reason": "no_account", "input_method": input_method})
+            _user_store.record_tx_event(
+                chat_id, tx_type_for_failure, input_method, "failed", "telegram", reason="no_account",
+            )
             await query.edit_message_text(
                 "🏦 Non hai ancora nessun conto su Expensum, quindi non posso registrare la spesa.\n\n"
                 "Usa /modify e vai nella tab \"Conti\" per aggiungerne uno, poi rimanda il messaggio della spesa."

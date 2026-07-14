@@ -34,6 +34,7 @@ from src.user_store import (
     LlmUsageEvent,
     PlanChange,
     TallyLead,
+    TxEvent,
     User,
     UserPlan,
 )
@@ -765,7 +766,102 @@ def get_jobs_status(s: Session, now: datetime | None = None) -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
-# 12. Drill-down per singolo utente
+# 12. Split successi parsing per tipo transazione x modalità di input
+# ---------------------------------------------------------------------------
+TX_TYPES = ("expense", "income", "transfer")
+INPUT_METHODS = ("text", "voice", "photo", "button")
+
+
+def get_tx_success_by_type_method(s: Session, days: int = 30) -> dict[str, Any]:
+    """Successi/fallimenti di parsing per tipo transazione x modalità di input.
+
+    Successo = l'utente ha cliccato Conferma e la transazione è stata salvata
+    (outcome='confirmed' in tx_events). Aggrega anche cancellati e falliti per
+    calcolare il success-rate. Fonte: tx_events, rispecchiata da bot.py/app.py
+    accanto agli eventi PostHog esistenti.
+    """
+    since = datetime.utcnow() - timedelta(days=days)
+    rows = s.query(
+        TxEvent.tx_type, TxEvent.input_method, TxEvent.outcome, func.count()
+    ).filter(TxEvent.occurred_at >= since).group_by(
+        TxEvent.tx_type, TxEvent.input_method, TxEvent.outcome
+    ).all()
+
+    # matrix[tx_type][input_method] = {"confirmed": n, "cancelled": n, "failed": n}
+    matrix: dict[str, dict[str, dict[str, int]]] = {}
+    seen_types: set[str] = set()
+    seen_methods: set[str] = set()
+    for tx_type, method, outcome, count in rows:
+        seen_types.add(tx_type)
+        seen_methods.add(method)
+        matrix.setdefault(tx_type, {}).setdefault(
+            method, {"confirmed": 0, "cancelled": 0, "failed": 0}
+        )[outcome] = count
+
+    types = [t for t in TX_TYPES if t in seen_types] + sorted(seen_types - set(TX_TYPES))
+    methods = [m for m in INPUT_METHODS if m in seen_methods] + sorted(seen_methods - set(INPUT_METHODS))
+
+    rows_out = []
+    totals_confirmed = totals_all = 0
+    for tx_type in types:
+        for method in methods:
+            cell = matrix.get(tx_type, {}).get(method)
+            if not cell:
+                continue
+            total = sum(cell.values())
+            confirmed = cell.get("confirmed", 0)
+            totals_confirmed += confirmed
+            totals_all += total
+            rows_out.append({
+                "tx_type": tx_type,
+                "input_method": method,
+                "confirmed": confirmed,
+                "cancelled": cell.get("cancelled", 0),
+                "failed": cell.get("failed", 0),
+                "total": total,
+                "success_rate_pct": round(100 * confirmed / total, 1) if total else 0.0,
+            })
+
+    return {
+        "days": days,
+        "rows": rows_out,
+        "types": types,
+        "methods": methods,
+        "overall_success_rate_pct": round(100 * totals_confirmed / totals_all, 1) if totals_all else 0.0,
+        "overall_total": totals_all,
+    }
+
+
+def get_tour_funnel(s: Session) -> dict[str, Any]:
+    """Skip e step di abbandono del tour guidato webapp (10 step demo).
+
+    Fonte: colonne `tour_status`/`tour_step` su `users`, popolate da POST
+    /api/track quando arrivano gli eventi tour_* (solo utenti con sessione
+    autenticata — i visitatori anonimi non hanno mai avviato il tour).
+    """
+    total_started = s.query(User).filter(User.tour_status.isnot(None)).count()
+    completed = s.query(User).filter(User.tour_status == "completed").count()
+    skipped = s.query(User).filter(User.tour_status == "skipped").count()
+    in_progress = s.query(User).filter(User.tour_status == "in_progress").count()
+
+    step_rows = s.query(User.tour_step, func.count()).filter(
+        User.tour_status.in_(["skipped", "in_progress"]), User.tour_step.isnot(None)
+    ).group_by(User.tour_step).all()
+    abandon_by_step = {step: cnt for step, cnt in step_rows}
+
+    return {
+        "total_started": total_started,
+        "completed": completed,
+        "skipped": skipped,
+        "in_progress": in_progress,
+        "completed_pct": round(100 * completed / total_started, 1) if total_started else 0.0,
+        "skipped_pct": round(100 * skipped / total_started, 1) if total_started else 0.0,
+        "abandon_by_step": abandon_by_step,
+    }
+
+
+# ---------------------------------------------------------------------------
+# 13. Drill-down per singolo utente
 # ---------------------------------------------------------------------------
 def get_user_detail(s: Session, chat_id: str) -> dict[str, Any] | None:
     """Timeline completa del singolo utente per la pagina di drill-down/supporto."""

@@ -242,6 +242,13 @@ class User(Base):
     # Flag demo data — True se l'utente ha caricato dati fittizi da esplorare
     has_demo_data = Column(Boolean, default=False, nullable=False)
 
+    # Stato tour guidato webapp (10 step demo, vedi frontend/src/context/TourContext.tsx).
+    # Prima non era persistito da nessuna parte (solo localStorage del browser): questi
+    # campi arrivano da /api/track lato server, quando l'utente ha una sessione valida.
+    tour_step = Column(String, nullable=True)          # ultimo step id raggiunto
+    tour_status = Column(String, nullable=True)        # 'in_progress'|'completed'|'skipped'
+    tour_completed_at = Column(DateTime, nullable=True)
+
     def __repr__(self):
         return f"<User(chat_id={self.chat_id}, username='{self.username}')>"
 
@@ -507,6 +514,34 @@ class JobRun(Base):
 
     __table_args__ = (
         Index("ix_job_runs_job_finished", "job_id", "finished_at"),
+    )
+
+
+class TxEvent(Base):
+    """Esito di un tentativo di registrazione transazione (spesa/entrata/trasferimento).
+
+    Rispecchia in Postgres gli eventi già inviati a PostHog via `analytics.track`
+    (`expense_tracked` / `expense_tracking_failed`), così la dashboard admin può
+    interrogarli senza dipendere dal vendor esterno. "Successo" = l'utente ha
+    cliccato Conferma e la transazione è stata salvata (`outcome='confirmed'`).
+
+    Cross-canale: `source` distingue Telegram e webapp. `reason` è breve e senza
+    dati liberi utente (stessi valori già usati per PostHog: 'user_cancelled',
+    'no_account', 'ai_unavailable', 'save_error').
+    """
+    __tablename__ = "tx_events"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    chat_id = Column(String, ForeignKey("users.chat_id"), nullable=False, index=True)
+    occurred_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
+    tx_type = Column(String, nullable=False)         # 'expense'|'income'|'transfer'|'unknown'
+    input_method = Column(String, nullable=False)    # 'text'|'voice'|'photo'|'button'
+    outcome = Column(String, nullable=False)         # 'confirmed'|'cancelled'|'failed'
+    source = Column(String, nullable=False)          # 'telegram'|'webapp'
+    reason = Column(String, nullable=True)           # solo per cancelled/failed
+
+    __table_args__ = (
+        Index("ix_tx_events_type_method_occurred", "tx_type", "input_method", "occurred_at"),
     )
 
 
@@ -2596,6 +2631,63 @@ class UserStore:
                 session.commit()
         except Exception as exc:  # noqa: BLE001 — monitoraggio best-effort
             logger.warning("[JobRun] Impossibile registrare l'esito del job %s: %s", job_id, exc)
+
+    def record_tx_event(
+        self,
+        chat_id: str,
+        tx_type: str,
+        input_method: str,
+        outcome: str,
+        source: str,
+        reason: str | None = None,
+    ) -> None:
+        """Registra l'esito di un tentativo di registrazione transazione (best-effort).
+
+        Chiamata accanto a `analytics.track` nei punti in cui il bot/webapp già
+        emettono `expense_tracked`/`expense_tracking_failed` verso PostHog: non
+        sostituisce quell'invio, lo rispecchia in Postgres per la dashboard admin.
+        Non solleva mai: il tracking non deve poter interrompere il salvataggio.
+        """
+        try:
+            with self.Session() as session:
+                session.add(TxEvent(
+                    chat_id=chat_id,
+                    tx_type=tx_type or "unknown",
+                    input_method=input_method or "text",
+                    outcome=outcome,
+                    source=source,
+                    reason=(reason or "")[:200] or None,
+                ))
+                session.commit()
+        except Exception as exc:  # noqa: BLE001 — tracking best-effort
+            logger.warning("[TxEvent] Impossibile registrare l'evento per %s: %s", chat_id, exc)
+
+    def record_tour_event(self, chat_id: str, event: str, step_id: str | None) -> None:
+        """Persiste lo stato del tour guidato webapp sull'utente (best-effort).
+
+        Chiamata da POST /api/track quando arriva un evento 'tour_*' con una
+        sessione autenticata valida. Non sostituisce l'invio a PostHog, lo
+        rispecchia: prima lo stato del tour viveva solo in localStorage del
+        browser, quindi la dashboard admin non poteva sapere chi lo salta o a
+        quale step si ferma.
+        """
+        try:
+            with self.Session() as session:
+                user = session.query(User).filter(User.chat_id == chat_id).first()
+                if not user:
+                    return
+                if step_id:
+                    user.tour_step = step_id
+                if event == "tour_started":
+                    user.tour_status = "in_progress"
+                elif event == "tour_completed":
+                    user.tour_status = "completed"
+                    user.tour_completed_at = datetime.utcnow()
+                elif event == "tour_skipped":
+                    user.tour_status = "skipped"
+                session.commit()
+        except Exception as exc:  # noqa: BLE001 — tracking best-effort
+            logger.warning("[TourEvent] Impossibile registrare l'evento tour per %s: %s", chat_id, exc)
 
     def get_chat_history(self, chat_id: str, limit: int = 60) -> list[dict]:
         """Ritorna gli ultimi `limit` messaggi della cronologia, in ordine cronologico asc."""

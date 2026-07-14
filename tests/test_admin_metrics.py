@@ -15,6 +15,7 @@ from src.user_store import (
     LlmUsageEvent,
     PlanChange,
     TallyLead,
+    TxEvent,
     User,
     UserPlan,
 )
@@ -169,3 +170,111 @@ def test_record_and_cleanup_job_runs(mock_db_session):
     with mock_db_session.Session() as s:
         remaining = s.query(JobRun).count()
     assert remaining == 1  # solo db_backup resta
+
+
+def test_tx_success_by_type_method(mock_db_session):
+    with mock_db_session.Session() as s:
+        s.add(User(chat_id="u1", username="Alice", created_at=NOW))
+        s.add(TxEvent(chat_id="u1", tx_type="expense", input_method="text",
+                      outcome="confirmed", source="telegram", occurred_at=NOW))
+        s.add(TxEvent(chat_id="u1", tx_type="expense", input_method="text",
+                      outcome="confirmed", source="telegram", occurred_at=NOW))
+        s.add(TxEvent(chat_id="u1", tx_type="expense", input_method="text",
+                      outcome="failed", source="telegram", reason="no_account", occurred_at=NOW))
+        s.add(TxEvent(chat_id="u1", tx_type="expense", input_method="photo",
+                      outcome="confirmed", source="telegram", occurred_at=NOW))
+        s.add(TxEvent(chat_id="u1", tx_type="transfer", input_method="button",
+                      outcome="cancelled", source="telegram", reason="user_cancelled", occurred_at=NOW))
+        s.commit()
+    with mock_db_session.Session() as s:
+        res = m.get_tx_success_by_type_method(s)
+
+    by_key = {(r["tx_type"], r["input_method"]): r for r in res["rows"]}
+    text_row = by_key[("expense", "text")]
+    assert text_row["confirmed"] == 2
+    assert text_row["failed"] == 1
+    assert text_row["total"] == 3
+    assert text_row["success_rate_pct"] == pytest.approx(66.7, abs=0.1)
+
+    photo_row = by_key[("expense", "photo")]
+    assert photo_row["success_rate_pct"] == 100.0
+
+    transfer_row = by_key[("transfer", "button")]
+    assert transfer_row["cancelled"] == 1
+    assert transfer_row["success_rate_pct"] == 0.0
+
+    assert res["overall_total"] == 5
+    assert res["overall_success_rate_pct"] == pytest.approx(60.0, abs=0.1)
+
+
+def test_tx_success_respects_days_window(mock_db_session):
+    with mock_db_session.Session() as s:
+        s.add(User(chat_id="u1", created_at=NOW))
+        s.add(TxEvent(chat_id="u1", tx_type="expense", input_method="text",
+                      outcome="confirmed", source="telegram", occurred_at=NOW - timedelta(days=40)))
+        s.commit()
+    with mock_db_session.Session() as s:
+        res = m.get_tx_success_by_type_method(s, days=30)
+    assert res["overall_total"] == 0  # fuori dalla finestra di 30gg
+
+
+def test_record_tx_event(mock_db_session):
+    with mock_db_session.Session() as s:
+        s.add(User(chat_id="u1", created_at=NOW))
+        s.commit()
+    mock_db_session.record_tx_event("u1", "expense", "voice", "confirmed", "telegram")
+    with mock_db_session.Session() as s:
+        events = s.query(TxEvent).filter(TxEvent.chat_id == "u1").all()
+    assert len(events) == 1
+    assert events[0].tx_type == "expense"
+    assert events[0].input_method == "voice"
+    assert events[0].outcome == "confirmed"
+    assert events[0].source == "telegram"
+
+
+def test_tour_funnel(mock_db_session):
+    with mock_db_session.Session() as s:
+        s.add(User(chat_id="u1", created_at=NOW, tour_status="completed",
+                   tour_step="tour-complete", tour_completed_at=NOW))
+        s.add(User(chat_id="u2", created_at=NOW, tour_status="skipped", tour_step="analytics-tabs"))
+        s.add(User(chat_id="u3", created_at=NOW, tour_status="in_progress", tour_step="chat-input"))
+        s.add(User(chat_id="u4", created_at=NOW))  # mai avviato il tour
+        s.commit()
+    with mock_db_session.Session() as s:
+        res = m.get_tour_funnel(s)
+
+    assert res["total_started"] == 3  # u4 non conta: tour_status is None
+    assert res["completed"] == 1
+    assert res["skipped"] == 1
+    assert res["in_progress"] == 1
+    assert res["completed_pct"] == pytest.approx(33.3, abs=0.1)
+    assert res["abandon_by_step"] == {"analytics-tabs": 1, "chat-input": 1}
+    assert "tour-complete" not in res["abandon_by_step"]  # completati esclusi
+
+
+def test_record_tour_event(mock_db_session):
+    with mock_db_session.Session() as s:
+        s.add(User(chat_id="u1", created_at=NOW))
+        s.commit()
+
+    mock_db_session.record_tour_event("u1", "tour_started", None)
+    with mock_db_session.Session() as s:
+        u = s.query(User).filter(User.chat_id == "u1").first()
+        assert u.tour_status == "in_progress"
+        assert u.tour_completed_at is None
+
+    mock_db_session.record_tour_event("u1", "tour_step_viewed", "analytics-tabs")
+    with mock_db_session.Session() as s:
+        u = s.query(User).filter(User.chat_id == "u1").first()
+        assert u.tour_step == "analytics-tabs"
+        assert u.tour_status == "in_progress"  # invariato da un semplice step-view
+
+    mock_db_session.record_tour_event("u1", "tour_completed", "tour-complete")
+    with mock_db_session.Session() as s:
+        u = s.query(User).filter(User.chat_id == "u1").first()
+        assert u.tour_status == "completed"
+        assert u.tour_completed_at is not None
+
+
+def test_record_tour_event_unknown_user_is_noop(mock_db_session):
+    mock_db_session.record_tour_event("does_not_exist", "tour_started", None)  # non deve sollevare

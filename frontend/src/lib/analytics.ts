@@ -168,6 +168,26 @@ export function trackFirstExpenseTracked(inputMethod: InputMethod) {
 }
 
 // ---------------------------------------------------------------------------
+// Tour guidato webapp
+// ---------------------------------------------------------------------------
+
+export function trackTourStarted() {
+  void sendEvent("tour_started");
+}
+
+export function trackTourStepViewed(stepId: string, stepIndex: number) {
+  void sendEvent("tour_step_viewed", { step_id: stepId, step_index: stepIndex });
+}
+
+export function trackTourSkipped(stepId: string, stepIndex: number) {
+  void sendEvent("tour_skipped", { step_id: stepId, step_index: stepIndex });
+}
+
+export function trackTourCompleted() {
+  void sendEvent("tour_completed");
+}
+
+// ---------------------------------------------------------------------------
 // Report
 // ---------------------------------------------------------------------------
 

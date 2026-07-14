@@ -126,12 +126,16 @@ def product_metrics():
         timing = admin_metrics.get_expense_timing(s)
         onboarding = admin_metrics.get_onboarding_funnel(s)
         engagement = admin_metrics.get_engagement_acquisition(s)
+        tx_success = admin_metrics.get_tx_success_by_type_method(s)
+        tour = admin_metrics.get_tour_funnel(s)
     return render_template(
         "product.html",
         retention=retention,
         timing=timing,
         onboarding=onboarding,
         engagement=engagement,
+        tx_success=tx_success,
+        tour=tour,
     )
 
 

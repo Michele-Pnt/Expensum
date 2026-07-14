@@ -86,6 +86,37 @@
     </table>
 </div>
 
+<!-- TOUR GUIDATO WEBAPP -->
+<h3 style="margin-top: 2rem; margin-bottom: 1rem; color: var(--text-main);">Tour guidato webapp {{ ui.info("Il tour è la sequenza di 10 step demo che mostra le funzioni della webapp a un nuovo utente. Diverso dal wizard preferenze qui sopra: quello raccoglie dati, questo insegna a usare il prodotto. Fonte: users.tour_status/tour_step, popolati da /api/track quando l'utente è autenticato.") }}</h3>
+<div class="stats-grid">
+    <div class="stat-card glass-panel" style="border-left: 4px solid var(--success)">
+        <div class="stat-label">Tour completato {{ ui.info("% di utenti che hanno avviato il tour e sono arrivati fino all'ultimo step (tour_status='completed') sul totale di chi l'ha avviato.") }}</div>
+        <div class="stat-value" style="color: var(--success)">{{ tour.completed_pct }}%</div>
+        <span class="stat-label" style="text-transform:none; margin-top:5px">{{ tour.completed }} / {{ tour.total_started }} avviati</span>
+    </div>
+    <div class="stat-card glass-panel" style="border-left: 4px solid var(--warning)">
+        <div class="stat-label">Tour saltato {{ ui.info("% di utenti che hanno cliccato 'salta' durante il tour (tour_status='skipped'), sul totale di chi l'ha avviato. La tabella sotto mostra a quale step lo hanno interrotto.") }}</div>
+        <div class="stat-value" style="color: var(--warning)">{{ tour.skipped_pct }}%</div>
+        <span class="stat-label" style="text-transform:none; margin-top:5px">{{ tour.skipped }} utenti</span>
+    </div>
+    <div class="stat-card glass-panel">
+        <div class="stat-label">In corso {{ ui.info("Utenti che hanno avviato il tour ma non risultano né completato né saltato: probabilmente hanno chiuso il browser a metà. La tabella sotto mostra dove si sono fermati.") }}</div>
+        <div class="stat-value">{{ tour.in_progress }}</div>
+    </div>
+</div>
+<div class="glass-panel data-table-wrapper" style="margin-top: 1rem;">
+    <table class="glass-table">
+        <thead><tr><th>Step di abbandono {{ ui.info("Ultimo step visto dagli utenti che hanno saltato il tour o sono rimasti a metà (non chi lo ha completato). Individua lo step del tour che perde più persone.") }}</th><th>Utenti</th></tr></thead>
+        <tbody>
+            {% for step, cnt in tour.abandon_by_step.items() %}
+            <tr><td><code>{{ step }}</code></td><td>{{ cnt }}</td></tr>
+            {% else %}
+            <tr><td colspan="2" style="text-align:center; color: var(--text-secondary);">Nessun dato ancora (tracking appena introdotto).</td></tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+
 <!-- ENGAGEMENT -->
 <h3 style="margin-top: 2rem; margin-bottom: 1rem; color: var(--text-main);">Engagement & acquisizione {{ ui.info("Quanto l'app viene usata (utenti attivi) e come cresce la base utenti (nuove registrazioni, waitlist, backend scelto). Fonte: llm_usage_events, users e tally_leads.") }}</h3>
 <div class="stats-grid">
@@ -109,5 +140,35 @@
             {% for backend, cnt in engagement.storage_backend.items() %}{{ backend }}: {{ cnt }}{% if not loop.last %} · {% endif %}{% endfor %}
         </div>
     </div>
+</div>
+
+<!-- SUCCESSI PARSING PER TIPO x MODALITÀ -->
+<h3 style="margin-top: 2rem; margin-bottom: 1rem; color: var(--text-main);">Successi parsing per tipo x modalità (ultimi {{ tx_success.days }}gg) {{ ui.info("Per ogni combinazione di tipo transazione (spesa/entrata/trasferimento) e modalità di input (testo/voce/foto/bottone): quante conferme, annullamenti e fallimenti. Successo = l'utente ha cliccato Conferma e la transazione è stata salvata. Fonte: tx_events, rispecchiata da bot.py/webapp accanto a PostHog. Individua dove il parsing AI è meno affidabile (es. foto vs testo).") }}</h3>
+<div class="stats-grid">
+    <div class="stat-card glass-panel" style="border-left: 4px solid var(--success)">
+        <div class="stat-label">Success rate complessivo {{ ui.info("% di tentativi conclusi con conferma sul totale (confermati + annullati + falliti) negli ultimi " ~ tx_success.days ~ " giorni.") }}</div>
+        <div class="stat-value" style="color: var(--success)">{{ tx_success.overall_success_rate_pct }}%</div>
+        <span class="stat-label" style="text-transform:none; margin-top:5px">{{ tx_success.overall_total }} tentativi totali</span>
+    </div>
+</div>
+<div class="glass-panel data-table-wrapper" style="margin-top: 1rem;">
+    <table class="glass-table">
+        <thead><tr><th>Tipo</th><th>Modalità</th><th>Confermate</th><th>Annullate</th><th>Fallite</th><th>Totale</th><th>Success rate</th></tr></thead>
+        <tbody>
+            {% for r in tx_success.rows %}
+            <tr>
+                <td><code>{{ r.tx_type }}</code></td>
+                <td><code>{{ r.input_method }}</code></td>
+                <td>{{ r.confirmed }}</td>
+                <td>{{ r.cancelled }}</td>
+                <td>{{ r.failed }}</td>
+                <td>{{ r.total }}</td>
+                <td><strong style="color: {% if r.success_rate_pct >= 80 %}var(--success){% elif r.success_rate_pct >= 50 %}var(--warning){% else %}var(--danger){% endif %}">{{ r.success_rate_pct }}%</strong></td>
+            </tr>
+            {% else %}
+            <tr><td colspan="7" style="text-align:center; color: var(--text-secondary);">Nessun dato ancora (tabella tx_events appena introdotta).</td></tr>
+            {% endfor %}
+        </tbody>
+    </table>
 </div>
 {% endblock %}

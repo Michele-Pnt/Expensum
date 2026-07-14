@@ -151,7 +151,8 @@ def api_track():
         return jsonify({"error": "invalid properties"}), 400
 
     anonymous_id = data.get("anonymous_id")
-    distinct_id = _get_session_chat_id() or anonymous_id
+    session_chat_id = _get_session_chat_id()
+    distinct_id = session_chat_id or anonymous_id
     if not distinct_id or not isinstance(distinct_id, str) or len(distinct_id) > 128:
         return jsonify({"error": "missing distinct id"}), 400
 
@@ -162,6 +163,12 @@ def api_track():
             return jsonify({"ok": True})
         analytics.track(distinct_id, event, properties)
         analytics.track_ga4(distinct_id, event, properties)
+        # Il tour guidato webapp prima viveva solo in localStorage: questi eventi
+        # rispecchiano lo stato in Postgres (solo per sessioni autenticate, mai
+        # per visitatori anonimi) così la dashboard admin sa chi lo salta e a
+        # quale step si ferma. Vedi frontend/src/context/TourContext.tsx.
+        if session_chat_id and event.startswith("tour_"):
+            store.record_tour_event(session_chat_id, event, properties.get("step_id"))
     if consent.get("marketing"):
         event_id = data.get("event_id") or str(uuid.uuid4())
         analytics.track_meta(event, event_id, properties)
@@ -2611,10 +2618,15 @@ def api_chat_confirm():
             "storage_backend": user.storage_backend,
             "transaction_type": parsed_type,
         })
+        store.record_tx_event(chat_id, parsed_type, input_method, "confirmed", "webapp")
         if _is_first_expense:
             analytics.track(chat_id, "first_expense_tracked", {"input_method": input_method})
     else:
         analytics.track(chat_id, "expense_tracking_failed", {"reason": "save_error"})
+        store.record_tx_event(
+            chat_id, parsed_type, data.get("input_method", "text"), "failed", "webapp",
+            reason="save_error",
+        )
 
     amount_str = f"€{float(parsed.get('amount', 0)):.2f}"
     if parsed_type == "expense":
