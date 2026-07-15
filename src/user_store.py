@@ -33,6 +33,7 @@ from sqlalchemy import (
     JSON,
     func,
     create_engine,
+    inspect,
     text,
     types,
 )
@@ -2090,8 +2091,24 @@ class UserStore:
 
             if backend == "postgres":
                 # Ordine obbligato dalle FK:
+                # transfers → from_account_id/to_account_id → accounts.id
                 # Expense/Income/Subscription → account_id → accounts.id
                 # Expense/Subscription → category_id → user_categories.id
+                #
+                # "transfers" non ha un modello ORM locale (schema gestito da
+                # Alembic, tabella aggiunta dopo l'ultima sincronizzazione di
+                # src/storage/models.py) — cancellazione via SQL diretto, come
+                # per user_categories sopra. Condizionata all'esistenza della
+                # tabella: gli ambienti di test (SQLite) non la hanno ancora.
+                if inspect(session.connection()).has_table("transfers"):
+                    session.execute(
+                        text(
+                            "DELETE FROM transfers WHERE "
+                            "from_account_id IN (SELECT id FROM accounts WHERE user_id = :uid) "
+                            "OR to_account_id IN (SELECT id FROM accounts WHERE user_id = :uid)"
+                        ),
+                        {"uid": chat_id},
+                    )
                 session.query(Expense).filter(Expense.user_id == chat_id).delete()
                 session.query(Income).filter(Income.user_id == chat_id).delete()
                 session.query(Subscription).filter(Subscription.user_id == chat_id).delete()
