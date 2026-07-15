@@ -7,12 +7,17 @@
 <!-- REVENUE -->
 <div class="stats-grid">
     <div class="stat-card glass-panel" style="border-left: 4px solid var(--success)">
-        <div class="stat-label">MRR stimato {{ ui.info("Ricavo mensile ricorrente stimato = numero di utenti Pro paganti (plan_type='pro' e NON in trial) × prezzo Pro (variabile d'ambiente PRO_PRICE_EUR). È una stima interna, non un dato di fatturazione reale del gateway di pagamento.") }}</div>
+        <div class="stat-label">MRR stimato {{ ui.info("Ricavo mensile ricorrente stimato = numero di pro PAGANTI REALI (esclusi i grant beta amministrativi, reason='beta_default') × prezzo Pro (variabile d'ambiente PRO_PRICE_EUR). Prima del lancio pubblico lo Stripe webhook è uno stub inerte: senza questa esclusione tutti gli utenti pro sarebbero grant beta, non ricavo vero. È comunque una stima interna, non un dato di fatturazione reale.") }}</div>
         <div class="stat-value" style="color: var(--success)">€{{ revenue.mrr_eur }}</div>
-        <span class="stat-label" style="text-transform:none; margin-top:5px">{{ revenue.paying_pro }} pro paganti · €{{ revenue.pro_price_eur }}/mese</span>
+        <span class="stat-label" style="text-transform:none; margin-top:5px">{{ revenue.real_paying_pro }} paganti reali · €{{ revenue.pro_price_eur }}/mese</span>
+    </div>
+    <div class="stat-card glass-panel" style="border-left: 4px solid var(--warning)">
+        <div class="stat-label">Pro beta grant {{ ui.info("Utenti su piano Pro concesso manualmente (script/admin, non un pagamento — vedi scripts/upgrade_beta_users_to_pro.py e la registrazione web in fase beta). Non contano per l'MRR. Se in futuro pagano per davvero, l'ultimo cambio piano registrato li sposta automaticamente tra i paganti reali.") }}</div>
+        <div class="stat-value" style="color: var(--warning)">{{ revenue.beta_grant_pro }}</div>
+        <span class="stat-label" style="text-transform:none; margin-top:5px">su {{ revenue.pro_count }} pro totali</span>
     </div>
     <div class="stat-card glass-panel" style="border-left: 4px solid var(--accent-primary)">
-        <div class="stat-label">Conversione a Pro {{ ui.info("% di utenti su piano Pro sul totale (free + pro). Sotto: conteggi free / pro / trial attivi. Misura quanto il piano gratuito riesce a convertire in pagante — la leva principale dei ricavi.") }}</div>
+        <div class="stat-label">Conversione a Pro {{ ui.info("% di utenti su piano Pro (paganti reali + beta grant) sul totale (free + pro). Include anche i grant beta perché misura l'uso del tier Pro, non il ricavo — per il ricavo vero guarda MRR stimato. Sotto: conteggi free / pro / trial attivi.") }}</div>
         <div class="stat-value" style="color: var(--accent-primary)">{{ revenue.pro_conversion_pct }}%</div>
         <span class="stat-label" style="text-transform:none; margin-top:5px">{{ revenue.pro_count }} pro · {{ revenue.free_count }} free · {{ revenue.trials_active }} trial</span>
     </div>

@@ -79,5 +79,41 @@
         window.addEventListener('resize', hide);
     })();
     </script>
+
+    <!-- Toggle giorni/ore riutilizzabile: qualunque card con .time-value
+         (data-days/data-hours) e opzionalmente .time-sub (data-avg-days/
+         data-avg-hours/data-suffix) ottiene un toggle funzionante senza JS
+         dedicato — un solo handler delegato per tutta la dashboard. -->
+    <script>
+    (function () {
+        document.addEventListener('click', function (e) {
+            const btn = e.target.closest('.unit-toggle button[data-unit]');
+            if (!btn) return;
+            const card = btn.closest('.stat-card');
+            if (!card) return;
+            const unit = btn.dataset.unit;
+            const unitLabel = unit === 'hours' ? 'h' : 'gg';
+
+            card.querySelectorAll('.unit-toggle button[data-unit]').forEach(
+                b => b.classList.toggle('active', b === btn)
+            );
+
+            const valueEl = card.querySelector('.time-value');
+            if (valueEl) {
+                const num = unit === 'hours' ? valueEl.dataset.hours : valueEl.dataset.days;
+                const numEl = valueEl.querySelector('.time-value-num');
+                const unitEl = valueEl.querySelector('.time-value-unit');
+                if (numEl) numEl.textContent = num;
+                if (unitEl) unitEl.textContent = ' ' + unitLabel;
+            }
+
+            const subEl = card.querySelector('.time-sub');
+            if (subEl) {
+                const avg = unit === 'hours' ? subEl.dataset.avgHours : subEl.dataset.avgDays;
+                subEl.textContent = 'media ' + avg + ' ' + unitLabel + ' · ' + subEl.dataset.suffix;
+            }
+        });
+    })();
+    </script>
 </body>
 </html>

@@ -63,6 +63,49 @@ def _month_key(dt: datetime) -> str:
     return f"{dt.year:04d}-{dt.month:02d}"
 
 
+MAX_USAGE_CHART_DAYS = 180
+
+
+def get_usage_chart(s: Session, days: int = 10, now: datetime | None = None) -> dict[str, list]:
+    """Token consumati per giorno negli ultimi `days` giorni (grafico "Consumo Token LLM").
+
+    Estratta da get_overview_kpis così il periodo è selezionabile a runtime (selettore
+    10gg/1mese/2mesi/N a scelta in dashboard) senza duplicare la logica di bucketing.
+    `days` è limitato a MAX_USAGE_CHART_DAYS per evitare query e payload spropositati
+    se un admin digita un numero enorme nel campo "a scelta".
+    """
+    now = now or datetime.utcnow()
+    days = max(1, min(days, MAX_USAGE_CHART_DAYS))
+    since = now - timedelta(days=days)
+
+    rows = s.query(
+        func.date(LlmUsageEvent.occurred_at),
+        func.sum(LlmUsageEvent.prompt_tokens),
+        func.sum(LlmUsageEvent.completion_tokens),
+        func.sum(LlmUsageEvent.total_tokens),
+    ).filter(
+        LlmUsageEvent.occurred_at >= max(since, LEDGER_EPOCH)
+    ).group_by(func.date(LlmUsageEvent.occurred_at)).all()
+
+    chart_data: dict[str, dict[str, int]] = {}
+    for x in range(days):
+        d = (now - timedelta(days=days - 1 - x)).date()
+        chart_data[d.isoformat()] = {"prompt": 0, "completion": 0, "total": 0}
+    for d_val, pt, ct, tt in rows:
+        d_str = str(d_val)
+        if d_str in chart_data:
+            chart_data[d_str]["prompt"] += int(pt or 0)
+            chart_data[d_str]["completion"] += int(ct or 0)
+            chart_data[d_str]["total"] += int(tt or 0)
+
+    return {
+        "chart_labels": list(chart_data.keys()),
+        "chart_prompt": [v["prompt"] for v in chart_data.values()],
+        "chart_completion": [v["completion"] for v in chart_data.values()],
+        "chart_total": [v["total"] for v in chart_data.values()],
+    }
+
+
 # ---------------------------------------------------------------------------
 # 1. KPI di overview + grafico ledger token (estratto da index())
 # ---------------------------------------------------------------------------
@@ -73,7 +116,6 @@ def get_overview_kpis(s: Session) -> dict[str, Any]:
     orchestratore. Ritorna un dict serializzabile per il template.
     """
     now = datetime.utcnow()
-    ten_days_ago = now - timedelta(days=10)
     thirty_days_ago = now - timedelta(days=30)
     today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
 
@@ -98,30 +140,11 @@ def get_overview_kpis(s: Session) -> dict[str, Any]:
     ).filter(LlmUsageEvent.occurred_at >= LEDGER_EPOCH).scalar() or 0.0
 
     # Breakdown token per giorno (ultimi 10 giorni) per il grafico line.
-    rows = s.query(
-        func.date(LlmUsageEvent.occurred_at),
-        func.sum(LlmUsageEvent.prompt_tokens),
-        func.sum(LlmUsageEvent.completion_tokens),
-        func.sum(LlmUsageEvent.total_tokens),
-    ).filter(
-        LlmUsageEvent.occurred_at >= max(ten_days_ago, LEDGER_EPOCH)
-    ).group_by(func.date(LlmUsageEvent.occurred_at)).all()
-
-    chart_data: dict[str, dict[str, int]] = {}
-    for x in range(10):
-        d = (now - timedelta(days=9 - x)).date()
-        chart_data[d.isoformat()] = {"prompt": 0, "completion": 0, "total": 0}
-    for d_val, pt, ct, tt in rows:
-        d_str = str(d_val)
-        if d_str in chart_data:
-            chart_data[d_str]["prompt"] += int(pt or 0)
-            chart_data[d_str]["completion"] += int(ct or 0)
-            chart_data[d_str]["total"] += int(tt or 0)
-
-    labels = list(chart_data.keys())
-    data_prompt = [v["prompt"] for v in chart_data.values()]
-    data_completion = [v["completion"] for v in chart_data.values()]
-    data_total = [v["total"] for v in chart_data.values()]
+    chart = get_usage_chart(s, days=10, now=now)
+    labels = chart["chart_labels"]
+    data_prompt = chart["chart_prompt"]
+    data_completion = chart["chart_completion"]
+    data_total = chart["chart_total"]
 
     total_messages = sum(data_total)
     avg_msg_per_user = round(total_messages / active_users, 0) if active_users > 0 else 0
@@ -195,6 +218,14 @@ def get_token_analytics_90d(s: Session) -> dict[str, Any]:
     requests_by_op: dict[str, dict[str, dict[str, int]]] = {}
     token_stats: dict[str, dict[str, Any]] = {}
     conversion: dict[str, dict[str, Any]] = {}
+    # Totali grezzi su TUTTE le righe (non per-operazione): servono per l'overall
+    # conversion rate mostrato nelle stat card in alto nel tab. In precedenza il
+    # frontend tentava di ricalcolarlo sommando strutture annidate per operazione/
+    # data ma non sommava mai i successi (variabile mai incrementata): il totale
+    # restava sempre 0. Calcolarlo qui, una volta sola, elimina quel bug alla radice.
+    overall_requests = 0
+    overall_success = 0
+    overall_token_weighted = 0.0
 
     operations = {r[1] for r in rows}
     for op in operations:
@@ -213,9 +244,12 @@ def get_token_analytics_90d(s: Session) -> dict[str, Any]:
         if avg_tokens:
             token_stats[op][plan]["tt"] += float(avg_tokens) * req_count
             token_stats[op][plan]["cnt"] += req_count
+            overall_token_weighted += float(avg_tokens) * req_count
 
         conversion[op][plan]["ok"] += int(success_count or 0)
         conversion[op][plan]["tot"] += req_count
+        overall_requests += req_count
+        overall_success += int(success_count or 0)
 
     token_display: dict[str, dict[str, int]] = {}
     for op, plans in token_stats.items():
@@ -244,6 +278,12 @@ def get_token_analytics_90d(s: Session) -> dict[str, Any]:
         "requests_by_operation": requests_by_op,
         "token_stats": token_display,
         "conversion_rates": conv_display,
+        "overall": {
+            "total_requests": overall_requests,
+            "avg_tokens": int(round(overall_token_weighted / overall_requests, 0)) if overall_requests else 0,
+            "conversion_rate_pct": round(100 * overall_success / overall_requests, 1) if overall_requests else 0.0,
+            "operation_count": len(operations),
+        },
     }
 
 
@@ -553,7 +593,29 @@ def get_funnel_revenue(s: Session) -> dict[str, Any]:
     paying_pro = s.query(UserPlan).filter(
         UserPlan.plan_type == "pro", UserPlan.is_trial.is_(False)
     ).count()
-    mrr = round(paying_pro * PRO_PRICE_EUR, 2)
+
+    # Distingue i pro "beta grant" (concessi manualmente da script/admin, reason
+    # payment_reference="beta_default" — vedi scripts/upgrade_beta_users_to_pro.py
+    # e la registrazione web in fase beta) dai pro pagati per davvero via Stripe.
+    # Prima del lancio pubblico lo Stripe webhook è uno stub inerte: senza questa
+    # distinzione MRR/conversione contavano come "ricavo" utenti che non hanno
+    # mai pagato nulla. Si guarda l'ultimo plan_change verso "pro" di ciascun
+    # utente attualmente pro (non l'eventuale primo), così un utente beta che in
+    # futuro converte per davvero smette di essere contato come grant.
+    pro_chat_ids = [row[0] for row in s.query(UserPlan.chat_id).filter(
+        UserPlan.plan_type == "pro", UserPlan.is_trial.is_(False)
+    ).all()]
+    latest_pro_reason: dict[str, str | None] = {}
+    if pro_chat_ids:
+        change_rows = s.query(PlanChange.chat_id, PlanChange.reason).filter(
+            PlanChange.to_plan == "pro", PlanChange.chat_id.in_(pro_chat_ids)
+        ).order_by(PlanChange.changed_at.asc()).all()
+        for chat_id, reason in change_rows:
+            latest_pro_reason[chat_id] = reason  # l'ultimo in ordine asc sovrascrive
+
+    beta_grant_pro = sum(1 for cid in pro_chat_ids if latest_pro_reason.get(cid) == "beta_default")
+    real_paying_pro = paying_pro - beta_grant_pro
+    mrr = round(real_paying_pro * PRO_PRICE_EUR, 2)
 
     def _changes(change_type: str, since: datetime) -> int:
         return s.query(PlanChange).filter(
@@ -579,6 +641,8 @@ def get_funnel_revenue(s: Session) -> dict[str, Any]:
         "free_count": free_count,
         "pro_count": pro_count,
         "paying_pro": paying_pro,
+        "beta_grant_pro": beta_grant_pro,
+        "real_paying_pro": real_paying_pro,
         "trials_active": trials_active,
         "pro_conversion_pct": round(100 * pro_count / total_users, 1) if total_users else 0.0,
         "mrr_eur": mrr,
@@ -839,6 +903,69 @@ def get_tx_success_by_type_method(s: Session, days: int = 30) -> dict[str, Any]:
         "overall_success_rate_pct": round(100 * totals_confirmed / totals_all, 1) if totals_all else 0.0,
         "overall_total": totals_all,
     }
+
+
+def get_source_breakdown_90d(s: Session) -> dict[str, Any]:
+    """Richieste/token/costo LLM negli ultimi 90gg, per canale (Telegram vs webapp).
+
+    Il canale non è una colonna: si deriva dal prefisso di chat_id ('web_...' per
+    gli account webapp, sia registrati direttamente sia collegati a Telegram —
+    vedi src/dashboard/app.py::web_register e user_store.py, entrambi generano
+    `f"web_{uuid.uuid4().hex}"`). Nessuna migration necessaria: il prefisso è
+    già presente su ogni riga storica del ledger.
+    """
+    ninety_days_ago = datetime.utcnow() - timedelta(days=90)
+    source_expr = case(
+        (LlmUsageEvent.chat_id.like("web\\_%", escape="\\"), "webapp"),
+        else_="telegram",
+    )
+
+    rows = s.query(
+        source_expr.label("source"),
+        func.count().label("req_count"),
+        func.sum(LlmUsageEvent.total_tokens).label("total_tokens"),
+        func.sum(func.coalesce(LlmUsageEvent.estimated_cost_amount, 0)).label("cost"),
+    ).filter(
+        LlmUsageEvent.occurred_at >= max(ninety_days_ago, LEDGER_EPOCH)
+    ).group_by(source_expr).all()
+
+    by_source = {
+        "telegram": {"requests": 0, "total_tokens": 0, "cost_usd": 0.0},
+        "webapp": {"requests": 0, "total_tokens": 0, "cost_usd": 0.0},
+    }
+    for source, req_count, total_tokens, cost in rows:
+        by_source[source] = {
+            "requests": req_count,
+            "total_tokens": int(total_tokens or 0),
+            "cost_usd": _f(cost, 4),
+        }
+    return by_source
+
+
+def get_input_method_breakdown_90d(s: Session) -> dict[str, Any]:
+    """Richieste/token LLM negli ultimi 90gg, per modalità di input (testo/voce/foto).
+
+    Fonte: llm_usage_events.input_method (colonna aggiunta il 2026-07-14, NON
+    retroattiva: le righe precedenti hanno input_method=NULL, etichettate qui
+    "n/d" insieme alle operazioni per cui la modalità non si applica — es. i
+    report weekly_plan/monthly_plan, generati su comando, non da un input utente
+    testo/voce/foto).
+    """
+    ninety_days_ago = datetime.utcnow() - timedelta(days=90)
+
+    rows = s.query(
+        LlmUsageEvent.input_method,
+        func.count().label("req_count"),
+        func.sum(LlmUsageEvent.total_tokens).label("total_tokens"),
+    ).filter(
+        LlmUsageEvent.occurred_at >= max(ninety_days_ago, LEDGER_EPOCH)
+    ).group_by(LlmUsageEvent.input_method).all()
+
+    by_method: dict[str, dict[str, int]] = {}
+    for method, req_count, total_tokens in rows:
+        key = method or "n/d"
+        by_method[key] = {"requests": req_count, "total_tokens": int(total_tokens or 0)}
+    return by_method
 
 
 def get_tour_funnel(s: Session) -> dict[str, Any]:

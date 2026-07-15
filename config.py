@@ -73,6 +73,9 @@ class Config:
     # Vertex AI — trascrizione voce GDPR compliant (dati in EU)
     GOOGLE_CLOUD_PROJECT: str = os.getenv("GOOGLE_CLOUD_PROJECT", "")
     VERTEX_AI_LOCATION: str = os.getenv("VERTEX_AI_LOCATION", "europe-west3")
+    # Service account key (JSON minificato) incollata direttamente in .env, alternativa
+    # alle Application Default Credentials basate su file quando non disponibili (es. VPS)
+    GOOGLE_APPLICATION_CREDENTIALS_JSON: str = os.getenv("GOOGLE_APPLICATION_CREDENTIALS_JSON", "")
 
     # --- TELEGRAM ---
     TELEGRAM_BOT_TOKEN: str = os.getenv("TELEGRAM_BOT_TOKEN", "")

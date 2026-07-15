@@ -37,10 +37,11 @@
 
 <div class="glass-panel data-table-wrapper">
     <table class="glass-table">
-        <thead><tr><th>Timestamp</th><th>Livello</th><th>Dominio</th><th>Evento</th><th>Meta</th></tr></thead>
+        <thead><tr><th></th><th>Timestamp</th><th>Livello</th><th>Dominio</th><th>Evento</th><th>Meta</th></tr></thead>
         <tbody>
             {% for e in entries %}
-            <tr>
+            <tr class="log-row-summary" onclick="toggleLogRow(this)">
+                <td><span class="log-expand-caret">▶</span></td>
                 <td style="white-space:nowrap; font-size:0.8rem;">{{ e.timestamp }}</td>
                 <td>
                     {% if e.level in ['ERROR', 'CRITICAL'] %}<span class="badge suspended">{{ e.level }}</span>
@@ -51,10 +52,33 @@
                 <td>{{ e.event }}</td>
                 <td style="font-size:0.75rem; color: var(--text-secondary); max-width:360px; overflow:hidden; text-overflow:ellipsis;">{{ e.meta }}</td>
             </tr>
+            <tr class="log-row-detail">
+                <td colspan="6">
+                    <pre>{{ {
+                        "timestamp": e.timestamp,
+                        "level": e.level,
+                        "domain": e.domain,
+                        "logger": e.logger,
+                        "event": e.event,
+                        "chat_id": e.chat_id,
+                        "meta": e.meta,
+                        "exc_info": e.exc_info,
+                    } | tojson(indent=2) }}</pre>
+                </td>
+            </tr>
             {% else %}
-            <tr><td colspan="5" style="text-align:center; color: var(--text-secondary);">Nessuna riga (file vuoto o filtro senza risultati).</td></tr>
+            <tr><td colspan="6" style="text-align:center; color: var(--text-secondary);">Nessuna riga (file vuoto o filtro senza risultati).</td></tr>
             {% endfor %}
         </tbody>
     </table>
 </div>
+<script>
+function toggleLogRow(summaryRow) {
+    summaryRow.classList.toggle('expanded');
+    const detailRow = summaryRow.nextElementSibling;
+    if (detailRow && detailRow.classList.contains('log-row-detail')) {
+        detailRow.classList.toggle('open');
+    }
+}
+</script>
 {% endblock %}

@@ -444,6 +444,12 @@ class LlmUsageEvent(Base):
     provider = Column(String, nullable=False)
     model = Column(String, nullable=False)
     operation = Column(String, nullable=False)
+    # Modalità di input dell'utente: 'text'|'voice'|'photo'. NULL sulle righe
+    # storiche precedenti a questa colonna (non retroattivo: non era catturata
+    # prima). Serve a distinguere testo/voce/foto nei grafici admin, cosa che
+    # 'operation' da sola non permette (es. 'expense_parse' mescola testo e foto,
+    # 'chat_parse' lato webapp mescola tutte e tre le modalità).
+    input_method = Column(String, nullable=True)
     prompt_tokens = Column(Integer, nullable=False, default=0)
     completion_tokens = Column(Integer, nullable=False, default=0)
     total_tokens = Column(Integer, nullable=False, default=0)
@@ -2443,6 +2449,7 @@ class UserStore:
         operation: str,
         thinking_tokens: int | None = None,
         cached_tokens: int | None = None,
+        input_method: str | None = None,
     ) -> "LlmUsageEvent":
         """Registra il consumo reale dopo una chiamata AI e finalizza la reservation.
 
@@ -2493,6 +2500,7 @@ class UserStore:
                 provider=provider,
                 model=model,
                 operation=operation,
+                input_method=input_method,
                 prompt_tokens=prompt_tokens,
                 completion_tokens=completion_tokens,
                 total_tokens=total_tokens,

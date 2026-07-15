@@ -66,7 +66,7 @@ def test_overview_refresh_json_shape(client):
     _login_admin(client)
     resp = client.get("/admin/api/overview")
     data = resp.get_json()
-    assert set(data.keys()) == {"sys", "kpis", "analytics_data"}
+    assert set(data.keys()) == {"sys", "kpis", "analytics_data", "source_breakdown", "input_method_breakdown"}
     assert "chart_labels" in data["kpis"]
     assert len(data["kpis"]["chart_labels"]) == 10
     assert "requests_by_operation" in data["analytics_data"]
@@ -78,6 +78,26 @@ def test_vendored_chartjs_is_served(client):
     resp = client.get("/admin/static/vendor/chart.umd.min.js")
     assert resp.status_code == 200
     assert b"Chart.js" in resp.data[:100]
+
+
+def test_logs_viewer_rows_are_expandable(client, tmp_path, monkeypatch):
+    """Ogni riga di log deve avere una riga di dettaglio associata (JSON completo,
+    incl. exc_info) che si apre al click, non solo il meta troncato in tabella."""
+    from config import Config
+    log_file = tmp_path / "app.jsonl"
+    log_file.write_text(
+        '{"ts": "2026-07-15T09:00:00.000Z", "level": "ERROR", "domain": "app", '
+        '"logger": "financial_agent.bot", "event": "boom", "meta": {"k": "v"}, '
+        '"exc_info": "Traceback...\\nValueError: x"}\n'
+    )
+    monkeypatch.setattr(Config, "LOG_DIR", tmp_path)
+    _login_admin(client)
+    resp = client.get("/admin/logs")
+    assert resp.status_code == 200
+    html = resp.data.decode()
+    assert "log-row-detail" in html
+    assert "toggleLogRow" in html
+    assert "Traceback" in html
 
 
 def test_user_detail_page(client):

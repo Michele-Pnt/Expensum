@@ -90,10 +90,48 @@
 </div>
 
 <div class="chart-container glass-panel">
-    <h3 style="margin-bottom: 1.5rem; color: var(--text-main);">Consumo Token LLM (10 Giorni) {{ ui.info("Token prompt, completion e totali consumati per giorno negli ultimi 10 giorni (llm_usage_events). Mostra il trend di consumo e aiuta a intercettare picchi anomali o utenti che consumano troppo. Si aggiorna da solo ogni 5 minuti mentre la pagina resta aperta.") }}</h3>
+    <div style="display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:0.75rem; margin-bottom: 1.5rem;">
+        <h3 style="margin:0; color: var(--text-main);">Consumo Token LLM (<span id="usageChartPeriodLabel">10 Giorni</span>) {{ ui.info("Token prompt, completion e totali consumati per giorno nel periodo selezionato (llm_usage_events). Mostra il trend di consumo e aiuta a intercettare picchi anomali o utenti che consumano troppo. Si aggiorna da solo ogni 5 minuti mentre la pagina resta aperta.") }}</h3>
+        <div style="display:flex; align-items:center; gap:0.4rem; flex-wrap:wrap;">
+            <button type="button" class="period-btn" data-days="10" onclick="setUsageChartPeriod(10)">10gg</button>
+            <button type="button" class="period-btn" data-days="30" onclick="setUsageChartPeriod(30)">1 mese</button>
+            <button type="button" class="period-btn" data-days="60" onclick="setUsageChartPeriod(60)">2 mesi</button>
+            <input type="number" id="usageChartCustomDays" min="1" max="180" placeholder="gg" style="width:60px; padding:0.3rem; background:transparent; border:1px solid rgba(255,255,255,0.15); border-radius:4px; color:var(--text-main);">
+            <button type="button" class="period-btn" onclick="setUsageChartPeriodCustom()">Vai</button>
+        </div>
+    </div>
     <div style="position: relative; height: 350px; width: 100%;">
         <canvas id="usageChart"></canvas>
     </div>
+</div>
+
+<!-- Split Telegram vs Webapp (90gg) -->
+<div class="stats-grid" style="margin-top: 1.5rem;">
+    <div class="stat-card glass-panel">
+        <div class="stat-label">Richieste da Telegram (90gg) {{ ui.info("Richieste LLM originate da chat_id numerici (bot Telegram), ultimi 90 giorni. Il canale si distingue dal prefisso del chat_id: gli account webapp iniziano sempre con 'web_'.") }}</div>
+        <div class="stat-value" id="src-telegram-requests" style="font-size:1.6rem;">{{ source_breakdown.telegram.requests }}</div>
+        <span class="stat-label" id="src-telegram-tokens" style="text-transform:none; margin-top:5px">{{ source_breakdown.telegram.total_tokens }} token · ${{ source_breakdown.telegram.cost_usd }}</span>
+    </div>
+    <div class="stat-card glass-panel">
+        <div class="stat-label">Richieste da Webapp (90gg) {{ ui.info("Richieste LLM originate da chat_id con prefisso 'web_' (utenti webapp, sia registrati direttamente sia collegati a Telegram), ultimi 90 giorni.") }}</div>
+        <div class="stat-value" id="src-webapp-requests" style="font-size:1.6rem;">{{ source_breakdown.webapp.requests }}</div>
+        <span class="stat-label" id="src-webapp-tokens" style="text-transform:none; margin-top:5px">{{ source_breakdown.webapp.total_tokens }} token · ${{ source_breakdown.webapp.cost_usd }}</span>
+    </div>
+</div>
+
+<!-- Split per modalità di input (90gg) -->
+<h3 style="margin-top: 1.5rem; margin-bottom: 1rem; color: var(--text-main);">Richieste per modalità di input (90gg) {{ ui.info("Numero di richieste LLM e token consumati per modalità (testo/voce/foto), ultimi 90 giorni. 'n/d' raggruppa le righe storiche precedenti all'introduzione di questo campo (14 luglio 2026, non retroattivo) e le operazioni per cui la modalità non si applica (es. i report weekly/monthly_plan, generati su comando).") }}</h3>
+<div class="glass-panel data-table-wrapper" id="inputMethodTableWrapper">
+    <table class="glass-table">
+        <thead><tr><th>Modalità</th><th>Richieste</th><th>Token totali</th></tr></thead>
+        <tbody id="inputMethodTableBody">
+            {% for method, data in input_method_breakdown.items() %}
+            <tr><td><code>{{ method }}</code></td><td>{{ data.requests }}</td><td>{{ data.total_tokens }}</td></tr>
+            {% else %}
+            <tr><td colspan="3" style="text-align:center; color: var(--text-secondary);">Nessun dato</td></tr>
+            {% endfor %}
+        </tbody>
+    </table>
 </div>
 
 <script>
@@ -458,38 +496,16 @@ function populateAnalyticsTable() {
 }
 
 function updateAnalyticsStats() {
-    const operations = Object.keys(analyticsData.token_stats);
-    
-    // Total requests
-    let totalRequests = 0;
-    let totalTokens = 0;
-    let totalSuccesses = 0;
-    
-    for (const op of operations) {
-        for (const date in analyticsData.requests_by_operation[op] || {}) {
-            totalRequests += analyticsData.requests_by_operation[op][date].total || 0;
-        }
-        totalTokens += (analyticsData.token_stats[op]?.total || 0) * totalRequests;
-    }
-    
-    // Recalculate for correct total
-    totalTokens = 0;
-    totalRequests = 0;
-    for (const op of operations) {
-        for (const date in analyticsData.requests_by_operation[op] || {}) {
-            const requestsThisOp = analyticsData.requests_by_operation[op][date].total || 0;
-            totalRequests += requestsThisOp;
-            totalTokens += (analyticsData.token_stats[op]?.total || 0) * (requestsThisOp > 0 ? 1 : 0);
-        }
-    }
-    
-    const avgTokens = totalRequests > 0 ? Math.round(totalTokens / totalRequests) : 0;
-    const conversionOverall = totalRequests > 0 ? (totalSuccesses / totalRequests * 100).toFixed(1) : 0;
-    
-    document.getElementById('analytics-total-requests').textContent = totalRequests;
-    document.getElementById('analytics-avg-tokens').textContent = avgTokens;
-    document.getElementById('analytics-conversion-overall').textContent = conversionOverall + '%';
-    document.getElementById('analytics-operation-count').textContent = operations.length;
+    // Totali calcolati lato server (admin_metrics.get_token_analytics_90d) sulle
+    // righe grezze, non ricostruiti qui: il vecchio codice sommava strutture
+    // annidate per operazione/data ma non incrementava mai i successi, quindi la
+    // conversion rate risultava sempre 0% indipendentemente dai dati reali.
+    const overall = analyticsData.overall || { total_requests: 0, avg_tokens: 0, conversion_rate_pct: 0, operation_count: 0 };
+
+    document.getElementById('analytics-total-requests').textContent = overall.total_requests;
+    document.getElementById('analytics-avg-tokens').textContent = overall.avg_tokens;
+    document.getElementById('analytics-conversion-overall').textContent = overall.conversion_rate_pct + '%';
+    document.getElementById('analytics-operation-count').textContent = overall.operation_count;
 }
 
 // ---------------------------------------------------------------------------
@@ -575,12 +591,82 @@ function updateAnalyticsChartsIfInitialized() {
     }
 }
 
+function updateSourceBreakdown(sourceBreakdown) {
+    if (!sourceBreakdown) return;
+    const setText = (id, val) => { const el = document.getElementById(id); if (el) el.textContent = val; };
+    setText('src-telegram-requests', sourceBreakdown.telegram.requests);
+    setText('src-telegram-tokens', sourceBreakdown.telegram.total_tokens + ' token · $' + sourceBreakdown.telegram.cost_usd);
+    setText('src-webapp-requests', sourceBreakdown.webapp.requests);
+    setText('src-webapp-tokens', sourceBreakdown.webapp.total_tokens + ' token · $' + sourceBreakdown.webapp.cost_usd);
+}
+
+function updateInputMethodTable(inputMethodBreakdown) {
+    const tbody = document.getElementById('inputMethodTableBody');
+    if (!tbody || !inputMethodBreakdown) return;
+    const methods = Object.keys(inputMethodBreakdown);
+    if (!methods.length) {
+        tbody.innerHTML = '<tr><td colspan="3" style="text-align:center; color: var(--text-secondary);">Nessun dato</td></tr>';
+        return;
+    }
+    tbody.innerHTML = methods.map(method => {
+        const d = inputMethodBreakdown[method];
+        return `<tr><td><code>${method}</code></td><td>${d.requests}</td><td>${d.total_tokens}</td></tr>`;
+    }).join('');
+}
+
+// ---------------------------------------------------------------------------
+// Selettore periodo per il grafico "Consumo Token LLM": 10gg/1mese/2mesi/N a
+// scelta. currentUsageChartDays è anche riusato dall'auto-refresh periodico,
+// così il grafico continua ad aggiornarsi sul periodo scelto dall'admin.
+// ---------------------------------------------------------------------------
+let currentUsageChartDays = 10;
+
+function _periodLabel(days) {
+    if (days === 10) return '10 Giorni';
+    if (days === 30) return '1 Mese';
+    if (days === 60) return '2 Mesi';
+    return days + ' Giorni';
+}
+
+function _setActivePeriodButton(days) {
+    document.querySelectorAll('.period-btn[data-days]').forEach(btn => {
+        btn.classList.toggle('active', parseInt(btn.dataset.days, 10) === days);
+    });
+}
+
+function _fetchUsageChartPeriod(days) {
+    currentUsageChartDays = days;
+    _setActivePeriodButton(days);
+    const label = document.getElementById('usageChartPeriodLabel');
+    if (label) label.textContent = _periodLabel(days) + ' — caricamento...';
+    fetch('/admin/api/overview?days=' + encodeURIComponent(days))
+        .then(r => r.json())
+        .then(data => {
+            updateUsageChart(data.kpis);
+            if (label) label.textContent = _periodLabel(days);
+        })
+        .catch(() => { if (label) label.textContent = _periodLabel(days) + ' — errore caricamento'; });
+}
+
+function setUsageChartPeriod(days) {
+    _fetchUsageChartPeriod(days);
+}
+
+function setUsageChartPeriodCustom() {
+    const input = document.getElementById('usageChartCustomDays');
+    const days = parseInt(input?.value, 10);
+    if (!days || days < 1) return;
+    _fetchUsageChartPeriod(Math.min(days, 180));
+}
+
 function refreshOverview() {
-    fetch('/admin/api/overview')
+    fetch('/admin/api/overview?days=' + encodeURIComponent(currentUsageChartDays))
         .then(r => r.json())
         .then(data => {
             applyKpis(data.kpis, data.sys);
             updateUsageChart(data.kpis);
+            updateSourceBreakdown(data.source_breakdown);
+            updateInputMethodTable(data.input_method_breakdown);
             analyticsData = data.analytics_data;
             updateAnalyticsChartsIfInitialized();
             populateAnalyticsTable();
@@ -603,6 +689,7 @@ function refreshOverview() {
         });
 }
 
+document.addEventListener('DOMContentLoaded', () => _setActivePeriodButton(10));
 setInterval(refreshOverview, REFRESH_INTERVAL_MS);
 </script>
 {% endblock %}

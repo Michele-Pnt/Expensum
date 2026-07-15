@@ -98,10 +98,14 @@ def index():
     with _store().Session() as s:
         kpis = admin_metrics.get_overview_kpis(s)
         analytics_data = admin_metrics.get_token_analytics_90d(s)
+        source_breakdown = admin_metrics.get_source_breakdown_90d(s)
+        input_method_breakdown = admin_metrics.get_input_method_breakdown_90d(s)
     return render_template(
         "index.html",
         sys=get_system_metrics(),
         analytics_data=analytics_data,
+        source_breakdown=source_breakdown,
+        input_method_breakdown=input_method_breakdown,
         **kpis,
     )
 
@@ -118,14 +122,30 @@ def users_token_usage():
 @_admin_required
 def overview_refresh():
     """KPI + token ledger + analytics 90gg in JSON, per l'auto-refresh lato client
-    della pagina overview (stesse funzioni usate dal render iniziale di index())."""
+    della pagina overview (stesse funzioni usate dal render iniziale di index()).
+
+    Il parametro opzionale `?days=N` sovrascrive il periodo del grafico "Consumo
+    Token LLM" (default 10, selettore 10gg/1mese/2mesi/N a scelta in dashboard);
+    tutto il resto del payload (KPI, analytics 90gg) resta sui periodi standard.
+    """
+    try:
+        chart_days = int(request.args.get("days", 10))
+    except (TypeError, ValueError):
+        chart_days = 10
+
     with _store().Session() as s:
         kpis = admin_metrics.get_overview_kpis(s)
+        if chart_days != 10:
+            kpis.update(admin_metrics.get_usage_chart(s, days=chart_days))
         analytics_data = admin_metrics.get_token_analytics_90d(s)
+        source_breakdown = admin_metrics.get_source_breakdown_90d(s)
+        input_method_breakdown = admin_metrics.get_input_method_breakdown_90d(s)
     return jsonify({
         "sys": get_system_metrics(),
         "kpis": kpis,
         "analytics_data": analytics_data,
+        "source_breakdown": source_breakdown,
+        "input_method_breakdown": input_method_breakdown,
     })
 
 
@@ -272,6 +292,8 @@ def _parse_log_line(line: str) -> dict[str, Any] | None:
         "event": record.get("event", ""),
         "meta": record.get("meta", {}),
         "chat_id": record.get("chat_id"),
+        "logger": record.get("logger", ""),
+        "exc_info": record.get("exc_info"),
     }
 
 

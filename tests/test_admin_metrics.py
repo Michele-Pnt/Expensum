@@ -58,6 +58,110 @@ def _seed(store):
         s.commit()
 
 
+def test_token_analytics_90d_overall_conversion_rate(mock_db_session):
+    """Regressione: l'overall conversion rate calcolato lato server deve riflettere
+    i successi reali, non restare bloccato a 0% come faceva il vecchio JS lato
+    client (variabile totalSuccesses mai incrementata)."""
+    with mock_db_session.Session() as s:
+        s.add(User(chat_id="u1", username="Alice", created_at=NOW))
+        s.add(UserPlan(chat_id="u1", plan_type="free", is_trial=False,
+                       tokens_total=150_000, tokens_reset_at=NOW + timedelta(days=10)))
+        # 3 richieste riuscite (total_tokens > 0), 1 fallita (total_tokens = 0)
+        for i in range(3):
+            s.add(LlmUsageEvent(chat_id="u1", occurred_at=NOW - timedelta(days=i),
+                                provider="mistral", model="small", operation="expense_parse",
+                                prompt_tokens=100, completion_tokens=50, total_tokens=150,
+                                estimated_cost_amount=0.001, request_key=f"ok{i}"))
+        s.add(LlmUsageEvent(chat_id="u1", occurred_at=NOW, provider="mistral", model="small",
+                            operation="expense_parse", prompt_tokens=0, completion_tokens=0,
+                            total_tokens=0, estimated_cost_amount=0.0, request_key="fail1"))
+        s.commit()
+    with mock_db_session.Session() as s:
+        res = m.get_token_analytics_90d(s)
+
+    assert res["overall"]["total_requests"] == 4
+    assert res["overall"]["conversion_rate_pct"] == 75.0
+    assert res["overall"]["avg_tokens"] > 0
+    assert res["overall"]["operation_count"] == 1
+
+
+def test_usage_chart_custom_period(mock_db_session):
+    """Il selettore periodo (10gg/1mese/2mesi/N a scelta) chiama get_usage_chart
+    con `days` diverso da 10: verifica che il bucketing rispetti la finestra."""
+    with mock_db_session.Session() as s:
+        s.add(User(chat_id="u1", created_at=NOW))
+        # Un evento a 5 giorni fa (dentro sia 10gg che 30gg), uno a 40 giorni fa
+        # (fuori dalla finestra 10gg/30gg, dentro i 60gg).
+        s.add(LlmUsageEvent(chat_id="u1", occurred_at=NOW - timedelta(days=5),
+                            provider="mistral", model="small", operation="expense_parse",
+                            total_tokens=100, request_key="recent"))
+        s.add(LlmUsageEvent(chat_id="u1", occurred_at=NOW - timedelta(days=40),
+                            provider="mistral", model="small", operation="expense_parse",
+                            total_tokens=200, request_key="old"))
+        s.commit()
+    with mock_db_session.Session() as s:
+        chart_10 = m.get_usage_chart(s, days=10, now=NOW)
+        chart_60 = m.get_usage_chart(s, days=60, now=NOW)
+
+    assert len(chart_10["chart_labels"]) == 10
+    assert sum(chart_10["chart_total"]) == 100  # solo l'evento recente
+    assert len(chart_60["chart_labels"]) == 60
+    assert sum(chart_60["chart_total"]) == 300  # entrambi gli eventi
+
+
+def test_usage_chart_caps_max_days(mock_db_session):
+    with mock_db_session.Session() as s:
+        chart = m.get_usage_chart(s, days=99999, now=NOW)
+    assert len(chart["chart_labels"]) == m.MAX_USAGE_CHART_DAYS
+
+
+def test_source_breakdown_telegram_vs_webapp(mock_db_session):
+    """Il canale si deriva dal prefisso 'web_' del chat_id, senza colonna dedicata."""
+    with mock_db_session.Session() as s:
+        s.add(User(chat_id="123456", created_at=NOW))
+        s.add(User(chat_id="web_abc123", created_at=NOW))
+        s.add(LlmUsageEvent(chat_id="123456", occurred_at=NOW, provider="mistral",
+                            model="small", operation="expense_parse", total_tokens=100,
+                            estimated_cost_amount=0.01, request_key="tg1"))
+        s.add(LlmUsageEvent(chat_id="123456", occurred_at=NOW, provider="gemini",
+                            model="gemini", operation="voice_transcribe", total_tokens=50,
+                            estimated_cost_amount=0.005, request_key="tg2"))
+        s.add(LlmUsageEvent(chat_id="web_abc123", occurred_at=NOW, provider="mistral",
+                            model="small", operation="chat_parse", total_tokens=300,
+                            estimated_cost_amount=0.02, request_key="web1"))
+        s.commit()
+    with mock_db_session.Session() as s:
+        res = m.get_source_breakdown_90d(s)
+
+    assert res["telegram"]["requests"] == 2
+    assert res["telegram"]["total_tokens"] == 150
+    assert res["webapp"]["requests"] == 1
+    assert res["webapp"]["total_tokens"] == 300
+
+
+def test_input_method_breakdown_90d(mock_db_session):
+    """input_method distingue testo/voce/foto; le righe storiche (NULL, prima
+    della colonna aggiunta il 2026-07-14) finiscono in 'n/d'."""
+    with mock_db_session.Session() as s:
+        s.add(User(chat_id="u1", created_at=NOW))
+        s.add(LlmUsageEvent(chat_id="u1", occurred_at=NOW, provider="mistral", model="small",
+                            operation="expense_parse", input_method="text", total_tokens=100,
+                            request_key="t1"))
+        s.add(LlmUsageEvent(chat_id="u1", occurred_at=NOW, provider="gemini", model="gemini",
+                            operation="voice_transcribe", input_method="voice", total_tokens=50,
+                            request_key="v1"))
+        s.add(LlmUsageEvent(chat_id="u1", occurred_at=NOW, provider="mistral", model="small",
+                            operation="weekly_plan", input_method=None, total_tokens=200,
+                            request_key="p1"))
+        s.commit()
+    with mock_db_session.Session() as s:
+        res = m.get_input_method_breakdown_90d(s)
+
+    assert res["text"] == {"requests": 1, "total_tokens": 100}
+    assert res["voice"] == {"requests": 1, "total_tokens": 50}
+    assert res["n/d"] == {"requests": 1, "total_tokens": 200}
+
+
 def test_overview_kpis(mock_db_session):
     _seed(mock_db_session)
     with mock_db_session.Session() as s:
@@ -110,6 +214,32 @@ def test_funnel_revenue(mock_db_session, monkeypatch):
     assert f["paying_pro"] == 1
     assert f["mrr_eur"] == 5.0
     assert f["upgrades_30d"] == 1
+
+
+def test_funnel_revenue_excludes_beta_grants_from_mrr(mock_db_session, monkeypatch):
+    """Un utente pro con reason='beta_default' (grant amministrativo, non un vero
+    pagamento — vedi scripts/upgrade_beta_users_to_pro.py) non deve contribuire
+    all'MRR, ma resta visibile come pro_count/beta_grant_pro."""
+    monkeypatch.setattr(m, "PRO_PRICE_EUR", 5.0)
+    with mock_db_session.Session() as s:
+        s.add(User(chat_id="beta1", created_at=NOW))
+        s.add(User(chat_id="paid1", created_at=NOW))
+        s.add(UserPlan(chat_id="beta1", plan_type="pro", is_trial=False,
+                       tokens_total=3_000_000, tokens_reset_at=NOW + timedelta(days=10)))
+        s.add(UserPlan(chat_id="paid1", plan_type="pro", is_trial=False,
+                       tokens_total=3_000_000, tokens_reset_at=NOW + timedelta(days=10)))
+        s.add(PlanChange(chat_id="beta1", from_plan="free", to_plan="pro",
+                         change_type="upgrade", changed_at=NOW, reason="beta_default"))
+        s.add(PlanChange(chat_id="paid1", from_plan="free", to_plan="pro",
+                         change_type="upgrade", changed_at=NOW, reason="stripe_evt_123"))
+        s.commit()
+    with mock_db_session.Session() as s:
+        f = m.get_funnel_revenue(s)
+
+    assert f["pro_count"] == 2
+    assert f["beta_grant_pro"] == 1
+    assert f["real_paying_pro"] == 1
+    assert f["mrr_eur"] == 5.0  # solo paid1, non beta1
 
 
 def test_engagement_acquisition(mock_db_session):

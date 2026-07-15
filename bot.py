@@ -38,7 +38,6 @@ from src.privacy_export import build_export_json, build_csv_rows, CSV_HEADER
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, InputFile, Update, WebAppInfo
 from telegram.constants import ParseMode
 from telegram.request import HTTPXRequest
-from google import genai
 from google.genai import types
 from telegram.ext import (
     Application,
@@ -61,6 +60,7 @@ from src.storage.postgres_storage import PostgresStorage
 from src.rate_limiter import is_rate_limited
 from src.user_store import UserStore, User
 from src.ocr_client import OcrClient, OCRError
+from src.vertex_ai_client import get_vertex_ai_client
 from src.category_sync import refresh_category_averages
 from src.budget_alert import check_expense_budget_alert
 from src.dashboard_message import build_dashboard_text
@@ -1702,6 +1702,12 @@ async def _process_expense_text(update: Update, context: ContextTypes.DEFAULT_TY
     # 🛡️ DIFESA 3: Wrapping sicuro dell'input — isoliamo il contenuto utente dal prompt di sistema
     # Questo rende molto più difficile la Prompt Injection
     safe_input = f"[INIZIO INPUT UTENTE]\n{message_text}\n[FINE INPUT UTENTE]"
+    # Già impostato dal chiamante (testo/voce/foto) prima di arrivare qui, non
+    # ancora "pop"-ato: lo leggiamo (senza consumarlo) per taggare il ledger.
+    input_method = context.user_data.get("input_method", "text")
+    # Già impostato dal chiamante (testo/voce/foto) prima di arrivare qui, non
+    # ancora "pop"-ato: lo leggiamo (senza consumarlo) per taggare il ledger.
+    input_method = context.user_data.get("input_method", "text")
 
     message_id = update.effective_message.message_id if update.effective_message else "no-message"
     request_key = build_request_key(chat_id, "expense_parse", message_id, safe_input)
@@ -1737,6 +1743,7 @@ async def _process_expense_text(update: Update, context: ContextTypes.DEFAULT_TY
                 provider=normalized_usage.get("provider", "mistral"),
                 model=normalized_usage.get("model", Config.MISTRAL_SMALL_MODEL),
                 operation="expense_parse",
+                input_method=input_method,
             )
         except Exception as _e:
             logger.warning("[User %s] finalize_llm_usage fallita: %s", chat_id, _e)
@@ -1848,11 +1855,7 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             logger.warning("[User %s] Reservation fallita per voice_transcribe: %s", chat_id, e)
 
         # Vertex AI: dati audio processati in EU (europe-west3), GDPR compliant
-        client = genai.Client(
-            vertexai=True,
-            project=Config.GOOGLE_CLOUD_PROJECT,
-            location=Config.VERTEX_AI_LOCATION,
-        )
+        client = get_vertex_ai_client()
         with open(temp_path, "rb") as f:
             audio_bytes = f.read()
 
@@ -1915,6 +1918,7 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                     model=transcription_usage.get("model", Config.GEMINI_MODEL),
                     operation="voice_transcribe",
                     thinking_tokens=transcription_usage.get("thinking_tokens"),
+                    input_method="voice",
                 )
             except Exception as e:
                 logger.warning("[User %s] finalize_llm_usage voice fallita: %s", chat_id, e)

@@ -23,7 +23,7 @@
 </div>
 <div class="glass-panel data-table-wrapper" style="margin-top: 1rem;">
     <table class="glass-table">
-        <thead><tr><th>Cohort retention {{ ui.info("Retention per coorte: tra gli utenti il cui account ha almeno N giorni di vita (idonei), quanti sono rimasti attivi fino ad almeno N giorni dopo la registrazione. È la retention 'vera' che dice se l'app trattiene nel tempo, non solo se ha molti iscritti recenti.") }}</th><th>Idonei (account ≥ Ngg)</th><th>Rimasti attivi</th><th>%</th></tr></thead>
+        <thead><tr><th>Cohort retention {{ ui.info("Retention per coorte: per ogni riga (giorno 7/14/60), tra gli utenti il cui account ha almeno quel numero di giorni di vita (idonei), quanti sono rimasti attivi fino ad almeno quel numero di giorni dopo la registrazione. È la retention 'vera' che dice se l'app trattiene nel tempo, non solo se ha molti iscritti recenti.") }}</th><th>Idonei {{ ui.info("Utenti il cui account ha almeno l'anzianità indicata dalla riga (es. per 'Giorno 14', account registrati da almeno 14 giorni). Sono l'unica base su cui ha senso misurare quella riga: un account più giovane non ha ancora avuto il tempo di rientrare nella statistica.") }}</th><th>Rimasti attivi</th><th>%</th></tr></thead>
         <tbody>
             {% for n in [7, 14, 60] %}
             <tr>
@@ -41,14 +41,20 @@
 <h3 style="margin-top: 2rem; margin-bottom: 1rem; color: var(--text-main);">Tempi di registrazione spese {{ ui.info("Misura la velocità di attivazione e la frequenza d'uso. Le transazioni confermate sono contate in modo cross-backend da chat_messages (una riga per spesa/entrata/trasferimento salvato dopo il click Conferma), quindi valgono sia per gli utenti Notion sia per quelli PostgreSQL.") }}</h3>
 <div class="stats-grid">
     <div class="stat-card glass-panel" style="border-left: 4px solid var(--success)">
-        <div class="stat-label">Tempo alla prima spesa (mediana) {{ ui.info("Mediana del tempo tra la registrazione dell'utente e la sua prima spesa confermata. È il tempo di attivazione: più è breve, più l'onboarding porta l'utente a usare davvero il prodotto.") }}</div>
-        <div class="stat-value" style="color: var(--success)">{{ timing.time_to_first_expense.median_days }}<span style="font-size:1rem"> gg</span></div>
-        <span class="stat-label" style="text-transform:none; margin-top:5px">media {{ timing.time_to_first_expense.avg_days }} gg · {{ timing.time_to_first_expense.count }} utenti</span>
+        <div class="stat-label">Tempo alla prima spesa (mediana) {{ ui.info("Mediana del tempo tra la registrazione dell'utente e la sua prima spesa confermata. È il tempo di attivazione: più è breve, più l'onboarding porta l'utente a usare davvero il prodotto. Usa il toggle gg/h per cambiare unità.") }}</div>
+        <div class="stat-value time-value" data-days="{{ timing.time_to_first_expense.median_days }}" data-hours="{{ timing.time_to_first_expense.median_hours }}" style="color: var(--success)">
+            <span class="time-value-num">{{ timing.time_to_first_expense.median_days }}</span><span class="time-value-unit" style="font-size:1rem"> gg</span>
+            <span class="unit-toggle"><button type="button" class="active" data-unit="days">gg</button><button type="button" data-unit="hours">h</button></span>
+        </div>
+        <span class="stat-label time-sub" data-avg-days="{{ timing.time_to_first_expense.avg_days }}" data-avg-hours="{{ timing.time_to_first_expense.avg_hours }}" data-suffix="{{ timing.time_to_first_expense.count }} utenti" style="text-transform:none; margin-top:5px">media {{ timing.time_to_first_expense.avg_days }} gg · {{ timing.time_to_first_expense.count }} utenti</span>
     </div>
     <div class="stat-card glass-panel" style="border-left: 4px solid var(--accent-info)">
-        <div class="stat-label">Intervallo tra spese (mediana) {{ ui.info("Mediana del tempo tra due spese confermate consecutive dello stesso utente. Misura la frequenza d'uso: intervalli brevi indicano un'abitudine consolidata di tracciare le spese.") }}</div>
-        <div class="stat-value" style="color: var(--accent-info)">{{ timing.interval_between_expenses.median_hours }}<span style="font-size:1rem"> h</span></div>
-        <span class="stat-label" style="text-transform:none; margin-top:5px">media {{ timing.interval_between_expenses.avg_hours }} h · {{ timing.interval_between_expenses.count }} intervalli</span>
+        <div class="stat-label">Intervallo tra spese (mediana) {{ ui.info("Mediana del tempo tra due spese confermate consecutive dello stesso utente. Misura la frequenza d'uso: intervalli brevi indicano un'abitudine consolidata di tracciare le spese. Usa il toggle gg/h per cambiare unità.") }}</div>
+        <div class="stat-value time-value" data-days="{{ timing.interval_between_expenses.median_days }}" data-hours="{{ timing.interval_between_expenses.median_hours }}" style="color: var(--accent-info)">
+            <span class="time-value-num">{{ timing.interval_between_expenses.median_hours }}</span><span class="time-value-unit" style="font-size:1rem"> h</span>
+            <span class="unit-toggle"><button type="button" data-unit="days">gg</button><button type="button" class="active" data-unit="hours">h</button></span>
+        </div>
+        <span class="stat-label time-sub" data-avg-days="{{ timing.interval_between_expenses.avg_days }}" data-avg-hours="{{ timing.interval_between_expenses.avg_hours }}" data-suffix="{{ timing.interval_between_expenses.count }} intervalli" style="text-transform:none; margin-top:5px">media {{ timing.interval_between_expenses.avg_hours }} h · {{ timing.interval_between_expenses.count }} intervalli</span>
     </div>
     <div class="stat-card glass-panel">
         <div class="stat-label">Utenti con almeno 1 spesa {{ ui.info("Numero di utenti che hanno registrato almeno una transazione confermata. Sotto: quanti non ne hanno mai registrata nessuna — utenti registrati ma mai attivati, il primo punto di abbandono da recuperare.") }}</div>

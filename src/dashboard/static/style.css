@@ -191,3 +191,75 @@ table.glass-table tr:hover { background: rgba(255, 255, 255, 0.02); }
     display: block;
     animation: fadeIn 0.12s ease-out;
 }
+
+/* --- Bottoni selettore periodo (grafico Consumo Token LLM) --- */
+.period-btn {
+    padding: 0.3rem 0.7rem;
+    border-radius: 4px;
+    border: 1px solid rgba(255, 255, 255, 0.15);
+    background: transparent;
+    color: var(--text-secondary, #8b949e);
+    font-size: 0.8rem;
+    font-family: inherit;
+    cursor: pointer;
+    transition: border-color 0.15s, color 0.15s, background 0.15s;
+}
+.period-btn:hover {
+    border-color: var(--accent-primary);
+    color: var(--accent-primary);
+}
+.period-btn.active {
+    background: var(--accent-primary);
+    border-color: var(--accent-primary);
+    color: white;
+}
+
+/* --- Toggle unità temporale (giorni/ore) sulle card con valori di tempo --- */
+.unit-toggle {
+    display: inline-flex;
+    margin-left: 6px;
+    border-radius: 4px;
+    overflow: hidden;
+    border: 1px solid rgba(255, 255, 255, 0.15);
+    vertical-align: middle;
+}
+.unit-toggle button {
+    padding: 1px 6px;
+    border: none;
+    background: transparent;
+    color: var(--text-secondary, #8b949e);
+    font-size: 0.65rem;
+    font-family: inherit;
+    cursor: pointer;
+}
+.unit-toggle button.active {
+    background: var(--accent-primary);
+    color: white;
+}
+
+/* --- Righe log espandibili --- */
+.log-row-summary { cursor: pointer; }
+.log-row-summary:hover { background: rgba(255, 255, 255, 0.03); }
+.log-row-detail { display: none; }
+.log-row-detail.open { display: table-row; }
+.log-row-detail pre {
+    margin: 0;
+    padding: 0.75rem;
+    background: #0d1117;
+    border-radius: 6px;
+    white-space: pre-wrap;
+    word-break: break-word;
+    font-size: 0.78rem;
+    color: #c9d1d9;
+    max-height: 400px;
+    overflow-y: auto;
+}
+.log-expand-caret {
+    display: inline-block;
+    transition: transform 0.15s;
+    margin-right: 6px;
+    color: var(--text-secondary, #8b949e);
+}
+.log-row-summary.expanded .log-expand-caret {
+    transform: rotate(90deg);
+}

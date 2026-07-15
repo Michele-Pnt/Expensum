@@ -2241,13 +2241,18 @@ def _resolve_account_hint(hint: str | None, accounts: list[dict]) -> dict | None
     return None
 
 
-def _chat_parse_text(chat_id: str, text: str, skip_length_check: bool = False) -> tuple[list[dict] | None, dict | None, str]:
+def _chat_parse_text(
+    chat_id: str, text: str, skip_length_check: bool = False, input_method: str = "text",
+) -> tuple[list[dict] | None, dict | None, str]:
     """Valida, sanitizza e lancia il parsing LLM (multi-transazione) su un messaggio testuale.
 
     Ritorna (results, usage, error_reply). Se error_reply è non-None il chiamante
     deve restituire un errore al client senza procedere. `results` è una lista di
     transazioni rilevate (può contenerne più di una, es. scontrino con più voci).
     skip_length_check=True per testo OCR (generato dal sistema, non digitato dall'utente).
+    input_method taggato nel ledger token: 'text' (default, chat scritta),
+    'voice' (dopo trascrizione) o 'photo' (dopo OCR scontrino) — impostato dal
+    chiamante, che sa da quale endpoint (/api/chat/message|voice|photo) proviene.
     """
     from src.expense_parser import ExpenseParser
     from src.rate_limiter import is_rate_limited
@@ -2311,6 +2316,7 @@ def _chat_parse_text(chat_id: str, text: str, skip_length_check: bool = False) -
                 prompt_tokens=usage.get("prompt_tokens", 0),
                 completion_tokens=usage.get("completion_tokens", 0),
                 total_tokens=usage.get("total_tokens", 0),
+                input_method=input_method,
             )
         except Exception:
             pass
@@ -2688,8 +2694,9 @@ def api_chat_voice():
     # Trascrizione Gemini Vertex AI
     transcribed = ""
     try:
-        from google import genai
         from google.genai import types as genai_types
+
+        from src.vertex_ai_client import get_vertex_ai_client
 
         audio_bytes = audio_file.read()
         if len(audio_bytes) > max_bytes:
@@ -2701,11 +2708,7 @@ def api_chat_voice():
         if len(audio_bytes) < 100:
             return jsonify({"ok": False, "reply": "⚠️ Audio troppo corto o vuoto.", "saved": False})
 
-        client_ai = genai.Client(
-            vertexai=True,
-            project=Config.GOOGLE_CLOUD_PROJECT,
-            location=Config.VERTEX_AI_LOCATION,
-        )
+        client_ai = get_vertex_ai_client()
         audio_part = genai_types.Part.from_bytes(data=audio_bytes, mime_type="audio/webm")
         response = client_ai.models.generate_content(
             model=Config.GEMINI_MODEL,
@@ -2723,7 +2726,7 @@ def api_chat_voice():
     if not transcribed:
         return jsonify({"ok": False, "reply": "⚠️ Non sono riuscito a trascrivere l'audio. Parla più chiaramente o scrivi il messaggio.", "saved": False})
 
-    results, _usage, error_reply = _chat_parse_text(chat_id, transcribed)
+    results, _usage, error_reply = _chat_parse_text(chat_id, transcribed, input_method="voice")
 
     user_text = f"🎤 {transcribed}"
     try:
@@ -2807,7 +2810,7 @@ def api_chat_photo():
             "banned": True,
         })
 
-    results, _usage, error_reply = _chat_parse_text(chat_id, ocr_text, skip_length_check=True)
+    results, _usage, error_reply = _chat_parse_text(chat_id, ocr_text, skip_length_check=True, input_method="photo")
 
     user_text = f"📷 {ocr_text[:200]}"
     try:
