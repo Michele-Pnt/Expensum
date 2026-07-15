@@ -942,6 +942,49 @@ def get_source_breakdown_90d(s: Session) -> dict[str, Any]:
     return by_source
 
 
+def get_provider_cost_breakdown_90d(s: Session) -> dict[str, Any]:
+    """Richieste/token/costo LLM negli ultimi 90gg, per provider AI (Mistral/Gemini/...).
+
+    `provider`/`model` sono colonne dirette di llm_usage_events (sempre valorizzate,
+    NOT NULL), nessuna derivazione necessaria. Nota: le foto (OCR scontrini) NON
+    generano un costo provider proprio — l'estrazione testo è Tesseract locale
+    (gratuito, gira sul VPS), non una chiamata AI; il testo estratto passa poi dallo
+    stesso parser Mistral del testo digitato, quindi il suo costo finisce già sotto
+    'mistral'. Solo la trascrizione vocale (Gemini/Vertex AI) e il parsing testo
+    (Mistral) hanno un costo AI diretto e distinto.
+    """
+    ninety_days_ago = datetime.utcnow() - timedelta(days=90)
+
+    rows = s.query(
+        LlmUsageEvent.provider,
+        LlmUsageEvent.model,
+        func.count().label("req_count"),
+        func.sum(LlmUsageEvent.total_tokens).label("total_tokens"),
+        func.sum(func.coalesce(LlmUsageEvent.estimated_cost_amount, 0)).label("cost"),
+    ).filter(
+        LlmUsageEvent.occurred_at >= max(ninety_days_ago, LEDGER_EPOCH)
+    ).group_by(LlmUsageEvent.provider, LlmUsageEvent.model).order_by(
+        func.sum(func.coalesce(LlmUsageEvent.estimated_cost_amount, 0)).desc()
+    ).all()
+
+    total_cost = 0.0
+    out_rows = []
+    for provider, model, req_count, total_tokens, cost in rows:
+        cost_usd = _f(cost, 4)
+        total_cost += cost_usd
+        out_rows.append({
+            "provider": provider,
+            "model": model,
+            "requests": req_count,
+            "total_tokens": int(total_tokens or 0),
+            "cost_usd": cost_usd,
+        })
+    for row in out_rows:
+        row["cost_share_pct"] = round(100 * row["cost_usd"] / total_cost, 1) if total_cost else 0.0
+
+    return {"rows": out_rows, "total_cost_usd": round(total_cost, 4)}
+
+
 def get_input_method_breakdown_90d(s: Session) -> dict[str, Any]:
     """Richieste/token LLM negli ultimi 90gg, per modalità di input (testo/voce/foto).
 

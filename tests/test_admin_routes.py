@@ -66,7 +66,10 @@ def test_overview_refresh_json_shape(client):
     _login_admin(client)
     resp = client.get("/admin/api/overview")
     data = resp.get_json()
-    assert set(data.keys()) == {"sys", "kpis", "analytics_data", "source_breakdown", "input_method_breakdown"}
+    assert set(data.keys()) == {
+        "sys", "kpis", "analytics_data", "source_breakdown",
+        "input_method_breakdown", "provider_cost_breakdown",
+    }
     assert "chart_labels" in data["kpis"]
     assert len(data["kpis"]["chart_labels"]) == 10
     assert "requests_by_operation" in data["analytics_data"]

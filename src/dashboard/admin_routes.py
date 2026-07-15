@@ -100,12 +100,14 @@ def index():
         analytics_data = admin_metrics.get_token_analytics_90d(s)
         source_breakdown = admin_metrics.get_source_breakdown_90d(s)
         input_method_breakdown = admin_metrics.get_input_method_breakdown_90d(s)
+        provider_cost_breakdown = admin_metrics.get_provider_cost_breakdown_90d(s)
     return render_template(
         "index.html",
         sys=get_system_metrics(),
         analytics_data=analytics_data,
         source_breakdown=source_breakdown,
         input_method_breakdown=input_method_breakdown,
+        provider_cost_breakdown=provider_cost_breakdown,
         **kpis,
     )
 
@@ -140,12 +142,14 @@ def overview_refresh():
         analytics_data = admin_metrics.get_token_analytics_90d(s)
         source_breakdown = admin_metrics.get_source_breakdown_90d(s)
         input_method_breakdown = admin_metrics.get_input_method_breakdown_90d(s)
+        provider_cost_breakdown = admin_metrics.get_provider_cost_breakdown_90d(s)
     return jsonify({
         "sys": get_system_metrics(),
         "kpis": kpis,
         "analytics_data": analytics_data,
         "source_breakdown": source_breakdown,
         "input_method_breakdown": input_method_breakdown,
+        "provider_cost_breakdown": provider_cost_breakdown,
     })
 
 

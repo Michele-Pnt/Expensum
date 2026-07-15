@@ -139,6 +139,40 @@ def test_source_breakdown_telegram_vs_webapp(mock_db_session):
     assert res["webapp"]["total_tokens"] == 300
 
 
+def test_provider_cost_breakdown_90d(mock_db_session):
+    """Costo/richieste/token per provider AI (mistral testo, gemini voce), con
+    quota % sul costo totale. Le foto non generano un provider proprio (OCR
+    locale gratuito): il loro costo, se c'è, finisce sotto mistral via il
+    parsing testo post-OCR — qui simulato con un secondo evento mistral."""
+    with mock_db_session.Session() as s:
+        s.add(User(chat_id="u1", created_at=NOW))
+        s.add(LlmUsageEvent(chat_id="u1", occurred_at=NOW, provider="mistral",
+                            model="mistral-small-latest", operation="expense_parse",
+                            input_method="text", total_tokens=100,
+                            estimated_cost_amount=0.03, request_key="m1"))
+        s.add(LlmUsageEvent(chat_id="u1", occurred_at=NOW, provider="mistral",
+                            model="mistral-small-latest", operation="expense_parse",
+                            input_method="photo", total_tokens=150,
+                            estimated_cost_amount=0.02, request_key="m2"))
+        s.add(LlmUsageEvent(chat_id="u1", occurred_at=NOW, provider="gemini",
+                            model="gemini-2.0-flash", operation="voice_transcribe",
+                            input_method="voice", total_tokens=200,
+                            estimated_cost_amount=0.05, request_key="g1"))
+        s.commit()
+    with mock_db_session.Session() as s:
+        res = m.get_provider_cost_breakdown_90d(s)
+
+    assert res["total_cost_usd"] == pytest.approx(0.10, abs=1e-6)
+    by_provider = {r["provider"]: r for r in res["rows"]}
+    assert by_provider["mistral"]["requests"] == 2
+    assert by_provider["mistral"]["cost_usd"] == pytest.approx(0.05, abs=1e-6)
+    assert by_provider["mistral"]["cost_share_pct"] == 50.0
+    assert by_provider["gemini"]["cost_usd"] == pytest.approx(0.05, abs=1e-6)
+    assert by_provider["gemini"]["cost_share_pct"] == 50.0
+    # Ordinato per costo decrescente
+    assert res["rows"][0]["cost_usd"] >= res["rows"][-1]["cost_usd"]
+
+
 def test_input_method_breakdown_90d(mock_db_session):
     """input_method distingue testo/voce/foto; le righe storiche (NULL, prima
     della colonna aggiunta il 2026-07-14) finiscono in 'n/d'."""

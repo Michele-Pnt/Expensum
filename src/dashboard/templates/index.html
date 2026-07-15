@@ -134,6 +134,28 @@
     </table>
 </div>
 
+<!-- Costo per provider AI (90gg) -->
+<h3 style="margin-top: 1.5rem; margin-bottom: 1rem; color: var(--text-main);">Costo per provider AI (90gg) {{ ui.info("Costo stimato e token consumati per ciascun provider (Mistral per il parsing testo, Gemini/Vertex AI per la trascrizione vocale), ultimi 90 giorni, con quota % sul costo totale. Le foto NON generano un costo provider proprio: l'OCR scontrini è Tesseract locale (gratuito, gira sul VPS) — il testo estratto passa poi dallo stesso parser Mistral del testo digitato, quindi il suo costo è già incluso lì dentro.") }}</h3>
+<div class="glass-panel data-table-wrapper" id="providerCostTableWrapper">
+    <table class="glass-table">
+        <thead><tr><th>Provider</th><th>Modello</th><th>Richieste</th><th>Token totali</th><th>Costo stimato</th><th>Quota</th></tr></thead>
+        <tbody id="providerCostTableBody">
+            {% for row in provider_cost_breakdown.rows %}
+            <tr>
+                <td><code>{{ row.provider }}</code></td>
+                <td style="font-size:0.8rem; color: var(--text-secondary);">{{ row.model }}</td>
+                <td>{{ row.requests }}</td>
+                <td>{{ row.total_tokens }}</td>
+                <td>${{ row.cost_usd }}</td>
+                <td>{{ row.cost_share_pct }}%</td>
+            </tr>
+            {% else %}
+            <tr><td colspan="6" style="text-align:center; color: var(--text-secondary);">Nessun dato</td></tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+
 <script>
     const ctx = document.getElementById('usageChart').getContext('2d');
 
@@ -614,6 +636,25 @@ function updateInputMethodTable(inputMethodBreakdown) {
     }).join('');
 }
 
+function updateProviderCostTable(providerCostBreakdown) {
+    const tbody = document.getElementById('providerCostTableBody');
+    if (!tbody || !providerCostBreakdown) return;
+    const rows = providerCostBreakdown.rows || [];
+    if (!rows.length) {
+        tbody.innerHTML = '<tr><td colspan="6" style="text-align:center; color: var(--text-secondary);">Nessun dato</td></tr>';
+        return;
+    }
+    tbody.innerHTML = rows.map(r => `
+        <tr>
+            <td><code>${r.provider}</code></td>
+            <td style="font-size:0.8rem; color: var(--text-secondary);">${r.model}</td>
+            <td>${r.requests}</td>
+            <td>${r.total_tokens}</td>
+            <td>$${r.cost_usd}</td>
+            <td>${r.cost_share_pct}%</td>
+        </tr>`).join('');
+}
+
 // ---------------------------------------------------------------------------
 // Selettore periodo per il grafico "Consumo Token LLM": 10gg/1mese/2mesi/N a
 // scelta. currentUsageChartDays è anche riusato dall'auto-refresh periodico,
@@ -667,6 +708,7 @@ function refreshOverview() {
             updateUsageChart(data.kpis);
             updateSourceBreakdown(data.source_breakdown);
             updateInputMethodTable(data.input_method_breakdown);
+            updateProviderCostTable(data.provider_cost_breakdown);
             analyticsData = data.analytics_data;
             updateAnalyticsChartsIfInitialized();
             populateAnalyticsTable();
