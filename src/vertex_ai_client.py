@@ -17,7 +17,11 @@ def get_vertex_ai_client() -> genai.Client:
     credentials = None
     if Config.GOOGLE_APPLICATION_CREDENTIALS_JSON:
         info = json.loads(Config.GOOGLE_APPLICATION_CREDENTIALS_JSON)
-        credentials = service_account.Credentials.from_service_account_info(info)
+        # Scope esplicito obbligatorio: senza, la libreria usa un JWT self-signed
+        # con audience di default, che Vertex AI rifiuta con "invalid_scope".
+        credentials = service_account.Credentials.from_service_account_info(
+            info, scopes=["https://www.googleapis.com/auth/cloud-platform"]
+        )
 
     return genai.Client(
         vertexai=True,
