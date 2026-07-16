@@ -19,9 +19,10 @@ from __future__ import annotations
 import os
 import statistics
 from collections import defaultdict
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from sqlalchemy import case, func
 from sqlalchemy.orm import Session
@@ -719,6 +720,15 @@ def get_engagement_acquisition(s: Session, signup_days: int = 30) -> dict[str, A
 # ---------------------------------------------------------------------------
 # 11. Stato scheduled job (esiti + no-show)
 # ---------------------------------------------------------------------------
+# Timezone in cui sono espressi gli orari di JOB_SCHEDULE: deve restare allineata
+# al `timezone="Europe/Rome"` passato a BackgroundScheduler in bot.py::_start_scheduler
+# (e al job schedule per scheduled job, anch'esso in local timezone).
+# `now` in questo modulo è sempre naive-UTC (datetime.utcnow()): l'orario locale va
+# quindi convertito in UTC prima di essere confrontato, altrimenti "atteso oggi" e la
+# rilevazione no-show sono sfasati dell'offset CET/CEST (1h o 2h a seconda del periodo
+# dell'anno).
+SCHEDULER_TZ = ZoneInfo("Europe/Rome")
+
 # Schedule atteso, mirror di bot.py::_start_scheduler + del scheduled job
 # (scheduled job). Serve a rilevare i job attesi ma mai eseguiti oggi ("no-show").
 JOB_SCHEDULE: list[dict[str, Any]] = [
@@ -802,9 +812,14 @@ def get_jobs_status(s: Session, now: datetime | None = None) -> dict[str, Any]:
                 expected_today = True
 
             if expected_today:
-                expected_time = now.replace(
-                    hour=spec["hour"], minute=spec["minute"], second=0, microsecond=0
+                # JOB_SCHEDULE è in ora locale (Europe/Rome, come il cron reale):
+                # si localizza sulla data odierna e si converte in UTC naive per
+                # confrontarla con `now`, che è sempre UTC.
+                local_expected = datetime(
+                    today.year, today.month, today.day,
+                    spec["hour"], spec["minute"], tzinfo=SCHEDULER_TZ,
                 )
+                expected_time = local_expected.astimezone(timezone.utc).replace(tzinfo=None)
 
             tr = today_run.get(job_id)
             if not expected_today:

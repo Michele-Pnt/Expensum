@@ -2812,6 +2812,7 @@ def _daily_dashboard_job(app: Application, loop: asyncio.AbstractEventLoop) -> N
         future.result(timeout=300)
     except Exception as e:
         logger.error(f"[DailyDashboard] Errore job: {e}")
+        raise
 
 
 def _weekly_plan_job(app: Application, loop: asyncio.AbstractEventLoop) -> None:
@@ -2844,6 +2845,7 @@ def _weekly_plan_job(app: Application, loop: asyncio.AbstractEventLoop) -> None:
         future.result(timeout=300)
     except Exception as e:
         logger.error(f"[WeeklyPlan] Errore job: {e}")
+        raise
 
 
 def _monthly_plan_job(app: Application, loop: asyncio.AbstractEventLoop) -> None:
@@ -2885,6 +2887,7 @@ def _monthly_plan_job(app: Application, loop: asyncio.AbstractEventLoop) -> None
         future.result(timeout=1800)
     except Exception as e:
         logger.error(f"[MonthlyReport] Errore job: {e}")
+        raise
 
 
 def _trial_expiry_job(app: Application, loop: asyncio.AbstractEventLoop) -> None:
@@ -3014,6 +3017,7 @@ def _trial_lifecycle_job(app: Application, loop: asyncio.AbstractEventLoop) -> N
         future.result(timeout=300)
     except Exception as e:
         logger.error(f"[TrialLifecycle] Errore job: {e}")
+        raise
 
 
 def _nightly_subscription_job(app: Application, loop: asyncio.AbstractEventLoop) -> None:
@@ -3094,6 +3098,7 @@ def _nightly_subscription_job(app: Application, loop: asyncio.AbstractEventLoop)
         future.result(timeout=600)
     except Exception as e:
         logger.error(f"[NightlySubs] Errore job: {e}")
+        raise
 
 
 def _nightly_retention_cleanup() -> None:
@@ -3201,7 +3206,10 @@ def _record_scheduler_event(event) -> None:
 async def _start_scheduler(app: Application) -> None:
     """Hook post_init PTB: cattura il loop PTB e avvia APScheduler con il loop corretto."""
     loop = asyncio.get_running_loop()
-    scheduler = BackgroundScheduler(daemon=True)
+    # Timezone esplicita (non affidarsi al fuso locale del sistema): gli orari sotto
+    # sono pensati in ora italiana e admin_metrics.SCHEDULER_TZ deve restare allineato
+    # per il calcolo "atteso oggi"/no-show nella dashboard.
+    scheduler = BackgroundScheduler(daemon=True, timezone="Europe/Rome")
     # id espliciti: sono la chiave con cui il listener registra gli esiti in
     # job_runs e con cui la dashboard confronta lo schedule atteso (no-show).
     scheduler.add_job(_nightly_category_sync, 'cron', hour=3, minute=0, args=[app, loop], id='nightly_category_sync')
