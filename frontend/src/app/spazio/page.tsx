@@ -10,6 +10,7 @@ import {
 } from "@mui/material";
 import { Plus, Pencil, Trash2, Check, X } from "lucide-react";
 import { getCsrfToken } from "@/lib/csrf";
+import { formatDateIt } from "@/lib/date";
 
 // ---------------------------------------------------------------------------
 // Tipi
@@ -155,6 +156,14 @@ export default function SpazioPage() {
   const [catSortBy, setCatSortBy] = useState<"name" | "budget">("name");
   const [catSortDir, setCatSortDir] = useState<"asc" | "desc">("asc");
 
+  // Trasferimenti: filtri data (server-side) + ricerca/conto/sort (client-side)
+  const [transStart, setTransStart] = useState(monthStartIso());
+  const [transEnd, setTransEnd] = useState(todayIso());
+  const [transSearch, setTransSearch] = useState("");
+  const [transAccId, setTransAccId] = useState("");
+  const [transSortBy, setTransSortBy] = useState<"date" | "name" | "amount">("date");
+  const [transSortDir, setTransSortDir] = useState<"asc" | "desc">("desc");
+
   // Loading
   const [loading, setLoading] = useState<Record<string, boolean>>({});
 
@@ -276,7 +285,7 @@ export default function SpazioPage() {
     }
   }, [incPage, incRowsPP, incStart, incEnd, incSearch, incType, incAccId, incSortBy, incSortDir]);
 
-  const fetchTransfers = useCallback(async (start = monthStartIso(), end = todayIso()) => {
+  const fetchTransfers = useCallback(async (start = transStart, end = transEnd) => {
     setLoading(l => ({ ...l, transfers: true }));
     try {
       const params = new URLSearchParams({ start, end });
@@ -286,7 +295,7 @@ export default function SpazioPage() {
     } finally {
       setLoading(l => ({ ...l, transfers: false }));
     }
-  }, []);
+  }, [transStart, transEnd]);
 
   // Carica tutto al mount e poi su cambio tab
   useEffect(() => { fetchAccounts(); fetchCategories(); fetchSubscriptions(); fetchSuggestions(); }, [fetchAccounts, fetchCategories, fetchSubscriptions, fetchSuggestions]);
@@ -481,6 +490,23 @@ export default function SpazioPage() {
     return r;
   }, [categories, catSearch, catSortBy, catSortDir]);
 
+  const filteredTransfers = useMemo(() => {
+    const q = transSearch.toLowerCase();
+    const accId = transAccId ? Number(transAccId) : null;
+    let r = transfers
+      .filter(t => t.name.toLowerCase().includes(q))
+      .filter(t => !accId || t.from_account_id === accId || t.to_account_id === accId);
+    r = [...r].sort((a, b) => {
+      const v = transSortBy === "amount"
+        ? (a.amount ?? 0) - (b.amount ?? 0)
+        : transSortBy === "date"
+          ? a.date.localeCompare(b.date)
+          : a.name.localeCompare(b.name, "it");
+      return transSortDir === "asc" ? v : -v;
+    });
+    return r;
+  }, [transfers, transSearch, transAccId, transSortBy, transSortDir]);
+
   // ---------------------------------------------------------------------------
   // Render tabelle
   // ---------------------------------------------------------------------------
@@ -673,7 +699,7 @@ export default function SpazioPage() {
                       ? <Chip label={row.sub_type} size="small" sx={{ fontSize: "0.7rem", textTransform: "capitalize" }} />
                       : <span style={{ color: "#9CA3AF" }}>—</span>}
                   </TableCell>
-                  <TableCell sx={{ ...CELL_SX, color: "#6B7280" }}>{row.last_billed ?? "—"}</TableCell>
+                  <TableCell sx={{ ...CELL_SX, color: "#6B7280" }}>{formatDateIt(row.last_billed)}</TableCell>
                   <TableCell sx={{ ...CELL_SX, color: "#6B7280" }}>{row.account_name || "—"}</TableCell>
                   <TableCell sx={CELL_SX}>
                     <RowActions
@@ -743,7 +769,7 @@ export default function SpazioPage() {
             <TableBody>
               {expenses.map(row => (
                 <TableRow key={row.id} hover>
-                  <TableCell sx={{ ...CELL_SX, color: "#6B7280" }}>{row.date}</TableCell>
+                  <TableCell sx={{ ...CELL_SX, color: "#6B7280" }}>{formatDateIt(row.date)}</TableCell>
                   <TableCell sx={CELL_SX}>{row.name}</TableCell>
                   <TableCell sx={{ ...CELL_SX, textAlign: "right", color: ACCENT, fontWeight: 600 }}>
                     {fmtCurrency(row.amount)}
@@ -861,7 +887,7 @@ export default function SpazioPage() {
             <TableBody>
               {incomes.map(row => (
                 <TableRow key={row.id} hover>
-                  <TableCell sx={{ ...CELL_SX, color: "#6B7280" }}>{row.date}</TableCell>
+                  <TableCell sx={{ ...CELL_SX, color: "#6B7280" }}>{formatDateIt(row.date)}</TableCell>
                   <TableCell sx={CELL_SX}>{row.name}</TableCell>
                   <TableCell sx={{ ...CELL_SX, textAlign: "right", color: PRIMARY, fontWeight: 600 }}>
                     {fmtCurrency(row.amount)}
@@ -905,9 +931,26 @@ export default function SpazioPage() {
 
   function renderTransfers() {
     const accName = (id: number) => accounts.find(a => a.id === id)?.name ?? "—";
+    function handleTransSort(field: string) {
+      const f = field as "date" | "name" | "amount";
+      const newDir: "asc" | "desc" = transSortBy === f ? (transSortDir === "asc" ? "desc" : "asc") : "asc";
+      setTransSortBy(f); setTransSortDir(newDir);
+    }
     return (
       <Box>
         <TabToolbar label="Trasferimenti" onAdd={() => openAdd("transfer")} loading={loading.transfers}>
+          <SearchInput value={transSearch} onChange={setTransSearch} placeholder="Cerca trasferimento..." />
+          <FilterSelect
+            label="Conto"
+            value={transAccId}
+            onChange={setTransAccId}
+            options={accounts.map(a => ({ value: String(a.id), label: a.name }))}
+          />
+          <DateRangeFilter
+            start={transStart} end={transEnd}
+            onStart={v => { setTransStart(v); fetchTransfers(v, transEnd); }}
+            onEnd={v => { setTransEnd(v); fetchTransfers(transStart, v); }}
+          />
           {accounts.length < 2 && (
             <Typography variant="caption" sx={{ color: "#9CA3AF" }}>
               Servono almeno due conti per creare un trasferimento
@@ -918,17 +961,17 @@ export default function SpazioPage() {
           <Table size="small" sx={{ minWidth: 600 }}>
             <TableHead>
               <TableRow>
-                <TableCell sx={HEAD_SX}>Data</TableCell>
-                <TableCell sx={HEAD_SX}>Descrizione</TableCell>
+                <SortableHead label="Data" field="date" sortBy={transSortBy} sortDir={transSortDir} onSort={handleTransSort} />
+                <SortableHead label="Descrizione" field="name" sortBy={transSortBy} sortDir={transSortDir} onSort={handleTransSort} />
                 <TableCell sx={HEAD_SX}>Da</TableCell>
                 <TableCell sx={HEAD_SX}>A</TableCell>
-                <TableCell sx={{ ...HEAD_SX, textAlign: "right" }}>Importo</TableCell>
+                <SortableHead label="Importo" field="amount" sortBy={transSortBy} sortDir={transSortDir} onSort={handleTransSort} sx={{ textAlign: "right" }} />
               </TableRow>
             </TableHead>
             <TableBody>
-              {transfers.map(row => (
+              {filteredTransfers.map(row => (
                 <TableRow key={row.id} hover>
-                  <TableCell sx={{ ...CELL_SX, color: "#6B7280" }}>{row.date}</TableCell>
+                  <TableCell sx={{ ...CELL_SX, color: "#6B7280" }}>{formatDateIt(row.date)}</TableCell>
                   <TableCell sx={CELL_SX}>{row.name}</TableCell>
                   <TableCell sx={{ ...CELL_SX, color: "#6B7280" }}>{accName(row.from_account_id)}</TableCell>
                   <TableCell sx={{ ...CELL_SX, color: "#6B7280" }}>{accName(row.to_account_id)}</TableCell>
@@ -937,7 +980,7 @@ export default function SpazioPage() {
                   </TableCell>
                 </TableRow>
               ))}
-              {!loading.transfers && transfers.length === 0 && <EmptyRow colSpan={5} />}
+              {!loading.transfers && filteredTransfers.length === 0 && <EmptyRow colSpan={5} />}
             </TableBody>
           </Table>
         </TableContainer>
