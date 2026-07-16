@@ -126,7 +126,9 @@ class PostgresStorage(FinancialStorage):
         rows = self._session.query(UserCategory).filter(
             UserCategory.user_id == self._user_id
         ).all()
-        return [r.name for r in rows]
+        names = [r.name for r in rows]
+        self._commit()
+        return names
 
     def create_category(self, name: str, monthly_budget: float | None = None) -> dict:
         """Crea una nuova categoria per l'utente."""
@@ -143,7 +145,7 @@ class PostgresStorage(FinancialStorage):
         ).filter(
             UserCategory.user_id == self._user_id
         ).all()
-        return [
+        result = [
             {
                 "id": cat.id,
                 "name": cat.name,
@@ -152,6 +154,8 @@ class PostgresStorage(FinancialStorage):
             }
             for cat, link in rows
         ]
+        self._commit()
+        return result
 
     def update_category(self, cat_id: int, name: str | None = None,
                         monthly_budget: float | None = None) -> dict | None:
@@ -161,6 +165,7 @@ class PostgresStorage(FinancialStorage):
             UserCategory.user_id == self._user_id,
         ).first()
         if not row:
+            self._commit()
             return None
         if name is not None:
             row.name = name
@@ -176,6 +181,7 @@ class PostgresStorage(FinancialStorage):
             UserCategory.user_id == self._user_id,
         ).first()
         if not row:
+            self._commit()
             return False
         # Elimina link Notion se presente
         link = self._session.query(UserCategoryNotionLink).filter_by(category_id=cat_id).first()
@@ -239,7 +245,7 @@ class PostgresStorage(FinancialStorage):
             Expense.expense_date >= start_date,
             Expense.expense_date <= end_date,
         ).all()
-        return [
+        result = [
             {
                 "id": exp.id,
                 "date": exp.expense_date,
@@ -251,6 +257,8 @@ class PostgresStorage(FinancialStorage):
             }
             for exp, cat in rows
         ]
+        self._commit()
+        return result
 
     # ------------------------------------------------------------------ income
 
@@ -294,7 +302,7 @@ class PostgresStorage(FinancialStorage):
             Income.income_date >= start_date,
             Income.income_date <= end_date,
         ).all()
-        return [
+        result = [
             {
                 "id": r.id,
                 "date": r.income_date,
@@ -305,6 +313,8 @@ class PostgresStorage(FinancialStorage):
             }
             for r in rows
         ]
+        self._commit()
+        return result
 
     # ------------------------------------------------------------------ accounts
 
@@ -313,7 +323,7 @@ class PostgresStorage(FinancialStorage):
         rows = self._session.query(Account).filter(
             Account.user_id == self._user_id
         ).all()
-        return [
+        result = [
             {
                 "id": r.id,
                 "name": r.name,
@@ -324,6 +334,8 @@ class PostgresStorage(FinancialStorage):
             }
             for r in rows
         ]
+        self._commit()
+        return result
 
     def create_account(self, name: str, initial_balance: float = 0.0,
                        account_type: str | None = None) -> dict:
@@ -354,6 +366,7 @@ class PostgresStorage(FinancialStorage):
             Account.user_id == self._user_id,
         ).first()
         if not row:
+            self._commit()
             return None
         if name is not None:
             row.name = name
@@ -376,6 +389,7 @@ class PostgresStorage(FinancialStorage):
             Account.user_id == self._user_id,
         ).first()
         if not row:
+            self._commit()
             return False
         self._session.delete(row)
         self._commit()
@@ -423,7 +437,7 @@ class PostgresStorage(FinancialStorage):
             Transfer.transfer_date >= start_date,
             Transfer.transfer_date <= end_date,
         ).all()
-        return [
+        result = [
             {
                 "id": r.id,
                 "date": r.transfer_date,
@@ -434,6 +448,8 @@ class PostgresStorage(FinancialStorage):
             }
             for r in rows
         ]
+        self._commit()
+        return result
 
     # ------------------------------------------------------------------ monthly balances
 
@@ -494,6 +510,7 @@ class PostgresStorage(FinancialStorage):
                 "label": f"{_month_name[d.month]} {d.year}",
                 "net_savings": inc - exp,
             })
+        self._commit()
         return result
 
     # ------------------------------------------------------------------ subscriptions
@@ -503,7 +520,7 @@ class PostgresStorage(FinancialStorage):
         rows = self._session.query(Subscription).filter(
             Subscription.user_id == self._user_id
         ).all()
-        return [
+        result = [
             {
                 "id": r.id,
                 "name": r.name,
@@ -515,6 +532,8 @@ class PostgresStorage(FinancialStorage):
             }
             for r in rows
         ]
+        self._commit()
+        return result
 
     def create_subscription(
         self,
@@ -566,6 +585,7 @@ class PostgresStorage(FinancialStorage):
             Subscription.user_id == self._user_id,
         ).first()
         if not row:
+            self._commit()
             return None
         if name is not None:
             row.name = name
@@ -597,6 +617,7 @@ class PostgresStorage(FinancialStorage):
             Subscription.user_id == self._user_id,
         ).first()
         if not row:
+            self._commit()
             return False
         self._session.delete(row)
         self._commit()
@@ -642,7 +663,7 @@ class PostgresStorage(FinancialStorage):
         order = sort_col.asc() if sort_dir == "asc" else sort_col.desc()
         total = base_q.count()
         rows = base_q.order_by(order).limit(limit).offset(offset).all()
-        return [
+        result = [
             {
                 "id": exp.id,
                 "date": exp.expense_date.isoformat(),
@@ -654,7 +675,9 @@ class PostgresStorage(FinancialStorage):
                 "account_id": exp.account_id,
             }
             for exp, cat, acc in rows
-        ], total
+        ]
+        self._commit()
+        return result, total
 
     def update_expense(self, expense_id: int, **kwargs) -> dict | None:
         """Aggiorna una spesa (name, amount, date, category_id, account_id)."""
@@ -663,6 +686,7 @@ class PostgresStorage(FinancialStorage):
             Expense.user_id == self._user_id,
         ).first()
         if not row:
+            self._commit()
             return None
         if "name" in kwargs and kwargs["name"] is not None:
             row.name = kwargs["name"]
@@ -684,6 +708,7 @@ class PostgresStorage(FinancialStorage):
             Expense.user_id == self._user_id,
         ).first()
         if not row:
+            self._commit()
             return False
         self._session.delete(row)
         self._commit()
@@ -725,7 +750,7 @@ class PostgresStorage(FinancialStorage):
         total = base_q.count()
         rows = base_q.order_by(order).limit(limit).offset(offset).all()
         acc_map = {a["id"]: a["name"] for a in self.fetch_accounts()}
-        return [
+        result = [
             {
                 "id": r.id,
                 "date": r.income_date.isoformat(),
@@ -736,7 +761,9 @@ class PostgresStorage(FinancialStorage):
                 "account_id": r.account_id,
             }
             for r in rows
-        ], total
+        ]
+        self._commit()
+        return result, total
 
     def update_income(self, income_id: int, **kwargs) -> dict | None:
         """Aggiorna un'entrata (name, amount, date, income_type, account_id)."""
@@ -745,6 +772,7 @@ class PostgresStorage(FinancialStorage):
             Income.user_id == self._user_id,
         ).first()
         if not row:
+            self._commit()
             return None
         if "name" in kwargs and kwargs["name"] is not None:
             row.name = kwargs["name"]
@@ -766,6 +794,7 @@ class PostgresStorage(FinancialStorage):
             Income.user_id == self._user_id,
         ).first()
         if not row:
+            self._commit()
             return False
         self._session.delete(row)
         self._commit()
@@ -780,8 +809,7 @@ class PostgresStorage(FinancialStorage):
         count = len(rows)
         for row in rows:
             self._session.delete(row)
-        if count:
-            self._commit()
+        self._commit()
         return count
 
     def fetch_subscriptions_with_account_name(self) -> list[dict]:
@@ -820,14 +848,16 @@ class PostgresStorage(FinancialStorage):
             name = cat.name if cat else (exp.category_name or "Altro")
             totals[name] = totals.get(name, 0.0) + float(exp.amount)
 
-        return {name: round(total / 3, 2) for name, total in totals.items()}
+        result = {name: round(total / 3, 2) for name, total in totals.items()}
+        self._commit()
+        return result
 
     def fetch_categories_full(self) -> list[dict]:
         """Restituisce categorie con id, name e monthly_budget come float."""
         rows = self._session.query(UserCategory).filter(
             UserCategory.user_id == self._user_id
         ).all()
-        return [
+        result = [
             {
                 "id": r.id,
                 "name": r.name,
@@ -835,6 +865,8 @@ class PostgresStorage(FinancialStorage):
             }
             for r in rows
         ]
+        self._commit()
+        return result
 
     # ------------------------------------------------------------------ reports
 
@@ -884,8 +916,11 @@ class PostgresStorage(FinancialStorage):
             SavedReport.share_token == share_token
         ).first()
         if not row:
+            self._commit()
             return None
-        return self._report_to_dict(row)
+        result = self._report_to_dict(row)
+        self._commit()
+        return result
 
     def get_reports_for_user(self, user_id: str, limit: int = 24) -> list[dict]:
         """Lista report dell'utente, ordinati per data decrescente."""
@@ -896,7 +931,9 @@ class PostgresStorage(FinancialStorage):
             .limit(limit)
             .all()
         )
-        return [self._report_to_dict(r) for r in rows]
+        result = [self._report_to_dict(r) for r in rows]
+        self._commit()
+        return result
 
     @staticmethod
     def _report_to_dict(row: SavedReport) -> dict:

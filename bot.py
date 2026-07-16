@@ -125,10 +125,43 @@ _notion: NotionFinanceClient | None = None
 _parser: ExpenseParser | None = None
 
 # Inizializziamo il database utenti (usando l'URL che abbiamo messo in Config)
-_user_store = UserStore(db_url=Config.DATABASE_URL)
+# pool_size/max_overflow dimensionati per il traffico bot (vedi analisi 2026-07-16:
+# max_connections Postgres=30 condiviso con la dashboard, che ha il suo pool separato)
+_user_store = UserStore(db_url=Config.DATABASE_URL, pool_size=10, max_overflow=5)
+
+class _StorageClientCache(TTLCache):
+    """TTLCache che chiude la sessione SQLAlchemy quando una entry scade o viene sfrattata.
+
+    cachetools non chiama mai `close()` sui valori rimossi: senza questo hook, ogni
+    PostgresStorage uscito dalla cache lascia la connessione agganciata al pool finché
+    il garbage collector di CPython non la libera (comportamento non deterministico —
+    vedi incidente QueuePool del 2026-07-16).
+
+    Servono DUE hook distinti perché cachetools usa due percorsi di rimozione diversi:
+    - `expire()` per la scadenza TTL, che internamente chiama `Cache.__delitem__` in modo
+      non polimorfico (bypassa un `__delitem__` sovrascritto in questa sottoclasse);
+    - `popitem()`/`pop()`/`del` per l'eviction da maxsize o la rimozione esplicita, che
+      invece passano da `self.__delitem__` e quindi arrivano già all'override sotto.
+    """
+
+    def _close_if_postgres(self, value) -> None:
+        if isinstance(value, PostgresStorage):
+            value._session.close()
+
+    def expire(self, time=None):
+        expired = super().expire(time)
+        for _key, value in expired:
+            self._close_if_postgres(value)
+        return expired
+
+    def __delitem__(self, key):
+        value = self.get(key)
+        self._close_if_postgres(value)
+        super().__delitem__(key)
+
 
 # Cache client storage: TTL 30 min, max 200 utenti (VPS Hetzner CX23 — 4GB RAM)
-_storage_clients: TTLCache = TTLCache(maxsize=200, ttl=1800)
+_storage_clients: TTLCache = _StorageClientCache(maxsize=200, ttl=1800)
 
 
 def _safe_json_load(raw: str | None) -> dict | None:

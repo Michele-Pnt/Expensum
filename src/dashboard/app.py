@@ -298,7 +298,9 @@ def skip_ngrok_interstitial(response):
     return response
 
 # Inizializza la connessione allo storage SQLite
-store = UserStore(db_url=Config.DATABASE_URL)
+# pool piccolo apposta: dashboard admin, max 2 sessioni concorrenti reali (i due
+# cofounder) — vedi analisi 2026-07-16, il pool va condiviso col bot su max_connections=30
+store = UserStore(db_url=Config.DATABASE_URL, pool_size=3, max_overflow=2)
 
 # Dashboard admin: le route /admin/* vivono nel blueprint admin_bp, che legge lo
 # store condiviso da app.config["STORE"] (nessun import di app.py → nessun ciclo).

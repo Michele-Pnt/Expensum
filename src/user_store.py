@@ -554,7 +554,12 @@ class TxEvent(Base):
 
 # 5. IL MANAGER DEL DATABASE
 class UserStore:
-    def __init__(self, db_url="sqlite:///users.db"):
+    def __init__(
+        self,
+        db_url="sqlite:///users.db",
+        pool_size: int = 5,
+        max_overflow: int = 10,
+    ):
         # create_engine è il "motore" che parla col database fisico
         engine_kwargs = {}
         if db_url.startswith("sqlite"):
@@ -567,6 +572,16 @@ class UserStore:
                 # multi-thread dei job.
                 from sqlalchemy.pool import StaticPool
                 engine_kwargs["poolclass"] = StaticPool
+        else:
+            # pool_size/max_overflow espliciti: bot e dashboard aprono ciascuno il proprio
+            # engine verso lo stesso Postgres (max_connections condiviso e limitato sulla
+            # VPS) — vanno dimensionati per processo, non lasciati al default SQLAlchemy
+            # (5+10), altrimenti la somma dei pool di più processi rischia di saturare
+            # Postgres da sola. pool_pre_ping evita di riusare connessioni cadute in
+            # silenzio (timeout di rete/Postgres) su una VPS piccola.
+            engine_kwargs["pool_size"] = pool_size
+            engine_kwargs["max_overflow"] = max_overflow
+            engine_kwargs["pool_pre_ping"] = True
         self.engine = create_engine(db_url, **engine_kwargs)
         # sessionmaker crea le "sessioni" di lavoro (come aprire una transazione)
         self.Session = sessionmaker(bind=self.engine, expire_on_commit=False)
