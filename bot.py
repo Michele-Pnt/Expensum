@@ -939,8 +939,8 @@ def _build_dashboard_for_user(chat_id: str) -> str:
                 "spent_this_month": spending_by_cat.get(cat_name, 0.0),
                 "average": avg_map.get(cat_name, 0.0),
             })
-        # Ordina per media storica decrescente
-        categories_spending.sort(key=lambda c: c["average"], reverse=True)
+        # Ordina per spesa del mese corrente decrescente
+        categories_spending.sort(key=lambda c: c["spent_this_month"], reverse=True)
 
     return build_dashboard_text(
         accounts=accounts,

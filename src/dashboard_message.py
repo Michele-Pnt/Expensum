@@ -11,9 +11,39 @@ Genera un testo Markdown formattato con:
 import logging
 from datetime import date, datetime, timedelta
 from typing import Optional
-from src.billing_utils import get_next_billing_date
+from src.billing_utils import get_monthly_equivalent, get_next_billing_date
 
 logger = logging.getLogger("financial_agent.dashboard")
+
+# Emoji per categoria di spesa. Fallback su un pallino neutro se la categoria
+# non è mappata esplicitamente.
+_CATEGORY_EMOJI = {
+    "vacanze": "🏖️",
+    "pareggio conti": "⚖️",
+    "palestra": "🏋️",
+    "benzina": "⛽",
+    "regali": "🎁",
+    "integratori": "💊",
+    "extra life": "🎮",
+    "abbonamenti digitali": "📱",
+    "fumo": "🚬",
+    "cene/pranzi": "🍽️",
+    "expensum": "🐷",
+    "movimenti": "🔀",
+    "auto vario": "🚗",
+    "anticipo": "💵",
+    "shopping": "🛍️",
+    "commissioni postepay": "💳",
+    "trasferimento (notion)": "🔁",
+    "tasse uni": "🎓",
+    "senza categoria": "❓",
+    "abbonamenti": "🔁",
+}
+_DEFAULT_CATEGORY_EMOJI = "▪️"
+
+
+def _category_emoji(cat_name: str) -> str:
+    return _CATEGORY_EMOJI.get(cat_name.strip().lower(), _DEFAULT_CATEGORY_EMOJI)
 
 
 def _estimate_next_billing_str(last_billed_str: str | None, sub_type: str | None) -> str:
@@ -92,7 +122,7 @@ def build_dashboard_text(
 
             if amount is not None:
                 amount = float(amount)
-                total_subs += amount
+                total_subs += get_monthly_equivalent(amount, sub_type)
                 lines.append(f"  📌 {name}: *€{amount:,.2f}*")
             else:
                 lines.append(f"  📌 {name}: _importo N/D_")
@@ -118,21 +148,24 @@ def build_dashboard_text(
             cat_name = cat.get("name", "Sconosciuta")
             spent = float(cat.get("spent_this_month") or 0)
             average = float(cat.get("average") or 0)
-            total_spent += spent
 
-            # Indicatore trend: ↗️ sopra media, ↘️ sotto media, ➡️ in media
+            if spent <= 0:
+                # Nessuna spesa questo mese: la voce non aggiunge informazione
+                continue
+
+            total_spent += spent
+            emoji = _category_emoji(cat_name)
+
+            # Indicatore di trend rispetto alla media storica, come nota separata
+            trend_note = ""
             if average > 0:
                 ratio = spent / average
                 if ratio > 1.15:
-                    trend = "🔺"
+                    trend_note = " 🔺"
                 elif ratio < 0.85:
-                    trend = "🔽"
-                else:
-                    trend = "▪️"
-            else:
-                trend = "▪️"
+                    trend_note = " 🔽"
 
-            lines.append(f"  {trend} {cat_name}: *€{spent:,.2f}*")
+            lines.append(f"  {emoji} {cat_name}: *€{spent:,.2f}*{trend_note}")
             if average > 0:
                 lines.append(f"      ↳ Media storica: €{average:,.2f}")
 
