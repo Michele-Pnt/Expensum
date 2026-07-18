@@ -31,6 +31,22 @@ def bind_user(session: Session, user_id: str) -> None:
     session.info[APP_USER_ID_KEY] = str(user_id)
 
 
+def rebind_user(session: Session, user_id: str) -> None:
+    """Come `bind_user`, ma da usare quando sulla sessione sono già state eseguite
+    query (es. lookup di `OAuthSession`/`User` per risolvere un reg_token) prima
+    che lo user_id fosse noto.
+
+    `after_begin` scatta una sola volta, all'inizio della transazione: se `bind_user`
+    arriva a transazione già aperta è troppo tardi, e ogni query RLS-protetta in
+    quella transazione vede `app.user_id` non impostato (fail-closed → 0 righe in
+    SELECT, violazione WITH CHECK in INSERT/UPDATE). Il rollback qui chiude la
+    transazione già aperta (nessuna scrittura pendente in questi flussi) così il
+    binding si applica alla prossima query, che ne apre una nuova.
+    """
+    session.rollback()
+    bind_user(session, user_id)
+
+
 @event.listens_for(Session, "after_begin")
 def _apply_rls_user_id(session: Session, transaction, connection) -> None:
     """All'inizio di ogni transazione imposta `app.user_id` sulla connessione.

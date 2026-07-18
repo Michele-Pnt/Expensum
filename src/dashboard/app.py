@@ -1384,6 +1384,10 @@ def setup_form():
         if not sess:
              return _forbidden_setup_response()
 
+        # Lega la RLS prima di qualsiasi altra query protetta (vedi rls.rebind_user).
+        from src.storage import rls
+        rls.rebind_user(s, sess.chat_id)
+
         user = s.query(User).filter_by(chat_id=sess.chat_id).first()
         if not user:
             return _forbidden_setup_response()
@@ -1550,6 +1554,10 @@ def api_setup_complete():
         sess = s.query(OAuthSession).filter_by(state=reg_token).first()
         if not sess:
             return jsonify({"error": "Access denied"}), 403
+
+        # Lega la RLS prima di qualsiasi altra query protetta (vedi rls.rebind_user).
+        from src.storage import rls
+        rls.rebind_user(s, sess.chat_id)
 
         user = s.query(User).filter_by(chat_id=sess.chat_id).first()
         if not user:
@@ -1878,6 +1886,11 @@ def api_manage_add():
         sess = s.query(OAuthSession).filter_by(state=reg_token).first()
         if not sess:
             return jsonify({"error": "Access denied"}), 403
+
+        # Lega la RLS prima di qualsiasi altra query protetta (vedi rls.rebind_user).
+        from src.storage import rls
+        rls.rebind_user(s, sess.chat_id)
+
         user = s.query(User).filter_by(chat_id=sess.chat_id).first()
         if not user:
             return jsonify({"error": "Access denied"}), 403
@@ -1987,6 +2000,11 @@ def api_manage_remove():
         sess = s.query(OAuthSession).filter_by(state=reg_token).first()
         if not sess:
             return jsonify({"error": "Access denied"}), 403
+
+        # Lega la RLS prima di qualsiasi altra query protetta (vedi rls.rebind_user).
+        from src.storage import rls
+        rls.rebind_user(s, sess.chat_id)
+
         user = s.query(User).filter_by(chat_id=sess.chat_id).first()
         if not user:
             return jsonify({"error": "Access denied"}), 403
@@ -2042,6 +2060,11 @@ def api_manage_update():
         sess = s.query(OAuthSession).filter_by(state=reg_token).first()
         if not sess:
             return jsonify({"error": "Access denied"}), 403
+
+        # Lega la RLS prima di qualsiasi altra query protetta (vedi rls.rebind_user).
+        from src.storage import rls
+        rls.rebind_user(s, sess.chat_id)
+
         user = s.query(User).filter_by(chat_id=sess.chat_id).first()
         if not user:
             return jsonify({"error": "Access denied"}), 403
