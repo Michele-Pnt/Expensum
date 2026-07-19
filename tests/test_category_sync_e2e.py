@@ -109,6 +109,43 @@ class TestSystemCategoriesSeeded:
 # 2. Postgres path — compute_category_averages
 # ---------------------------------------------------------------------------
 
+class _PostgresOnlySession:
+    """Wrappa una Session SQLite reale ma intercetta la query raw di
+    compute_category_averages (sintassi Postgres-only: TO_CHAR/DATE_TRUNC,
+    non eseguibile su SQLite) e la sostituisce con l'equivalente calcolato
+    via ORM, cosi' il test verifica la logica (raggruppamento/aggregazione)
+    senza richiedere un Postgres reale in CI/locale.
+    """
+
+    def __init__(self, session):
+        self._session = session
+
+    def execute(self, stmt, params=None):
+        sql = str(stmt)
+        if "FROM expenses" in sql:
+            return self._fake_category_totals(params or {})
+        return self._session.execute(stmt, params or {})
+
+    def _fake_category_totals(self, params):
+        query = self._session.query(Expense).filter_by(user_id=params["uid"])
+        if "cat" in params:
+            query = query.filter_by(category_name=params["cat"])
+
+        by_cat: dict[str, dict] = {}
+        for exp in query.all():
+            entry = by_cat.setdefault(exp.category_name, {"total": 0.0, "months": set()})
+            entry["total"] += float(exp.amount)
+            entry["months"].add((exp.expense_date.year, exp.expense_date.month))
+
+        rows = [(name, d["total"], len(d["months"])) for name, d in by_cat.items()]
+        result = Mock()
+        result.fetchall.return_value = rows
+        return result
+
+    def __getattr__(self, name):
+        return getattr(self._session, name)
+
+
 class TestComputeCategoryAverages:
     def _add_expenses(self, session, user_id, rows):
         for r in rows:
@@ -146,7 +183,7 @@ class TestComputeCategoryAverages:
             {"date": date(2026, 4, 12), "amount": 70.0, "category": "Alimentari"},
         ])
 
-        compute_category_averages("user_pg", db_session, store)
+        compute_category_averages("user_pg", _PostgresOnlySession(db_session), store)
 
         # 1 mese unico → media = totale / 1
         row = db_session.query(UserCategory).filter_by(user_id="user_pg", name="Alimentari").first()
@@ -161,7 +198,7 @@ class TestComputeCategoryAverages:
             {"date": date(2026, 3, 20), "amount": 90.0, "category": "Trasporti"},
         ])
 
-        compute_category_averages("user_pg", db_session, store)
+        compute_category_averages("user_pg", _PostgresOnlySession(db_session), store)
 
         row = db_session.query(UserCategory).filter_by(user_id="user_pg", name="Trasporti").first()
         assert row is not None
@@ -174,7 +211,7 @@ class TestComputeCategoryAverages:
             {"date": date(2026, 4, 1), "amount": 50.0,  "category": "Cinema"},
         ])
 
-        compute_category_averages("user_pg", db_session, store)
+        compute_category_averages("user_pg", _PostgresOnlySession(db_session), store)
 
         assert self._get_average(db_session, "user_pg", "Alimentari") == pytest.approx(200.0)
         assert self._get_average(db_session, "user_pg", "Cinema") == pytest.approx(50.0)
@@ -185,13 +222,15 @@ class TestComputeCategoryAverages:
             {"date": date(2026, 4, 1), "amount": 100.0, "category": "Salute"},
             {"date": date(2026, 4, 2), "amount": 80.0,  "category": "Farmacia"},
         ])
-        compute_category_averages("user_pg", db_session, store)
+        compute_category_averages("user_pg", _PostgresOnlySession(db_session), store)
 
         # Aggiunge nuova spesa solo su Salute
         self._add_expenses(db_session, "user_pg", [
             {"date": date(2026, 4, 10), "amount": 100.0, "category": "Salute"},
         ])
-        compute_category_averages("user_pg", db_session, store, category_filter="Salute")
+        compute_category_averages(
+            "user_pg", _PostgresOnlySession(db_session), store, category_filter="Salute"
+        )
 
         db_session.expire_all()
         assert self._get_average(db_session, "user_pg", "Salute") == pytest.approx(200.0)    # 100+100 / 1 mese
@@ -205,10 +244,30 @@ class TestComputeCategoryAverages:
         ))
         db_session.commit()
 
-        compute_category_averages("user_pg", db_session, store)
+        compute_category_averages("user_pg", _PostgresOnlySession(db_session), store)
 
         other_cats = db_session.query(UserCategory).filter_by(user_id="user_other").all()
         assert len(other_cats) == 0
+
+    def test_query_uses_postgres_month_syntax(self, db_session, store):
+        """La query non deve più contenere strftime (SQLite): solo TO_CHAR/DATE_TRUNC (Postgres)."""
+        self._seed_user_categories(db_session, "user_pg", ["Alimentari"])
+        self._add_expenses(db_session, "user_pg", [
+            {"date": date(2026, 4, 5), "amount": 30.0, "category": "Alimentari"},
+        ])
+
+        captured = {}
+        real_execute = _PostgresOnlySession.execute
+
+        def spy_execute(self, stmt, params=None):
+            captured["sql"] = str(stmt)
+            return real_execute(self, stmt, params)
+
+        with patch.object(_PostgresOnlySession, "execute", spy_execute):
+            compute_category_averages("user_pg", _PostgresOnlySession(db_session), store)
+
+        assert "strftime" not in captured["sql"]
+        assert "TO_CHAR" in captured["sql"] and "DATE_TRUNC" in captured["sql"]
 
 
 # ---------------------------------------------------------------------------

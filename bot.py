@@ -175,11 +175,20 @@ def _safe_json_load(raw: str | None) -> dict | None:
 
 def _get_storage(chat_id: str) -> FinancialStorage:
       """Ritorna il client di storage specifico per l'utente, creandolo se manca."""                                                                           
-      chat_id = str(chat_id)                                                                                                                                   
-  
-      if chat_id in _storage_clients:                                                                                                                          
-          return _storage_clients[chat_id]
-                                                                                                                                                               
+      chat_id = str(chat_id)
+
+      if chat_id in _storage_clients:
+          cached = _storage_clients[chat_id]
+          if isinstance(cached, PostgresStorage):
+              # La sessione è riusata cross-richiesta (vedi _StorageClientCache sopra),
+              # quindi la identity map di SQLAlchemy può contenere righe caricate PRIMA
+              # di una scrittura fatta da un'altra sessione (es. la webapp Flask) sullo
+              # stesso record. expire_all() forza un refresh alla prossima lettura: con
+              # Postgres in READ COMMITTED la nuova query vede sempre l'ultimo commit,
+              # quindi basta questo — non serve una sessione nuova per operazione.
+              cached._session.expire_all()
+          return cached
+
       user = _user_store.get_user(chat_id)
 
       if user.storage_backend == "postgres":                                                                                                                   

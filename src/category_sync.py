@@ -121,13 +121,14 @@ def compute_category_averages(
     La formula replica quella Notion: totale_spese / numero_mesi_unici_con_spese.
     Se category_filter è specificato, aggiorna solo quella categoria.
     """
+    month_expr = "TO_CHAR(DATE_TRUNC('month', expense_date), 'YYYY-MM')"
     try:
         if category_filter:
             rows = session.execute(
                 text(
                     "SELECT category_name, "
                     "SUM(amount) as total, "
-                    "COUNT(DISTINCT strftime('%Y-%m', expense_date)) as months "
+                    f"COUNT(DISTINCT {month_expr}) as months "
                     "FROM expenses "
                     "WHERE user_id = :uid AND category_name = :cat "
                     "GROUP BY category_name"
@@ -139,7 +140,7 @@ def compute_category_averages(
                 text(
                     "SELECT category_name, "
                     "SUM(amount) as total, "
-                    "COUNT(DISTINCT strftime('%Y-%m', expense_date)) as months "
+                    f"COUNT(DISTINCT {month_expr}) as months "
                     "FROM expenses "
                     "WHERE user_id = :uid "
                     "GROUP BY category_name"
