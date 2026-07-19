@@ -430,6 +430,14 @@
   animation: fadeUp 0.6s 0.3s var(--ease-out) both;
 }
 
+.heroSocialProof {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--color-text-2);
+  margin: 0;
+  opacity: 0.85;
+}
+
 .heroScroll {
   position: absolute;
   bottom: 32px;

@@ -8,8 +8,7 @@
       "comeFunziona": "How it works",
       "prezzi": "Pricing",
       "menu": "Menu",
-      "accedi": "Log in",
-      "registrati": "Sign up"
+      "accedi": "Log in to beta"
     },
     "hero": {
       "pill": "Powered by AI",
@@ -18,7 +17,8 @@
       "subLine1": "Track your expenses via Telegram. AI analyzes them.",
       "subLine2": "You understand your money.",
       "scrollDown": "Scroll down",
-      "mascotAlt": "Moneo, your financial assistant"
+      "mascotAlt": "Moneo, your financial assistant",
+      "socialProof": "{count, number} expenses tracked with Expensum so far"
     },
     "perChi": {
       "titleLine1": "Who Expensum",

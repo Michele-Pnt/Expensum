@@ -8,8 +8,7 @@
       "comeFunziona": "Come funziona",
       "prezzi": "Prezzi",
       "menu": "Menu",
-      "accedi": "Accedi",
-      "registrati": "Registrati"
+      "accedi": "Accedi alla beta"
     },
     "hero": {
       "pill": "Powered by AI",
@@ -18,7 +17,8 @@
       "subLine1": "Traccia le spese via Telegram. L'AI le analizza.",
       "subLine2": "Tu capisci i tuoi soldi.",
       "scrollDown": "Scorri in basso",
-      "mascotAlt": "Moneo, il tuo assistente finanziario"
+      "mascotAlt": "Moneo, il tuo assistente finanziario",
+      "socialProof": "{count, number} spese già tracciate con Expensum"
     },
     "perChi": {
       "titleLine1": "Per chi è pensato",

@@ -2,6 +2,7 @@ import os
 import re
 import sys
 import json
+import time
 import uuid
 import difflib
 import logging
@@ -19,6 +20,7 @@ from flask_limiter.util import get_remote_address
 import psutil
 from datetime import date, datetime, timedelta
 import requests
+from sqlalchemy import func
 from notion_client import Client as NotionClient
 
 ROOT_DIR = Path(__file__).resolve().parents[2]
@@ -124,6 +126,37 @@ def api_csrf_token():
     Usato dalle pagine Next.js che non possono leggere {{ csrf_token() }} via Jinja.
     """
     return jsonify({"csrf_token": generate_csrf()})
+
+
+_public_stats_cache: dict | None = None
+_PUBLIC_STATS_TTL_SECONDS = 300
+
+
+@app.route("/api/public/stats", methods=["GET"])
+@limiter.limit("30 per minute")
+def api_public_stats():
+    """Statistiche pubbliche aggregate per il social proof sulla landing page.
+
+    Nessun dato per-utente: solo il conteggio cross-backend/cross-canale delle
+    transazioni confermate (tx_events.outcome='confirmed', rispecchia sia
+    Postgres sia Notion — vedi docstring di TxEvent). Cache in-memory con TTL
+    perché la rotta è pubblica, non autenticata, e potenzialmente ad alto traffico.
+    """
+    from src.user_store import TxEvent
+
+    global _public_stats_cache
+    now = time.time()
+    if _public_stats_cache and now - _public_stats_cache["ts"] < _PUBLIC_STATS_TTL_SECONDS:
+        return jsonify(_public_stats_cache["data"])
+
+    with store.Session() as s:
+        total_confirmed = s.query(func.count(TxEvent.id)).filter(
+            TxEvent.outcome == "confirmed"
+        ).scalar() or 0
+
+    data = {"total_expenses_tracked": int(total_confirmed)}
+    _public_stats_cache = {"ts": now, "data": data}
+    return jsonify(data)
 
 _TRACK_EVENT_RE = re.compile(r"^[a-z0-9_]{1,64}$")
 
