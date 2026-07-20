@@ -164,6 +164,15 @@ class _StorageClientCache(TTLCache):
 _storage_clients: TTLCache = _StorageClientCache(maxsize=200, ttl=1800)
 
 
+def _track_event(chat_id: str, event: str, properties: dict | None = None) -> None:
+    """Wrapper attorno a analytics.track che tagga sempre platform='telegram'.
+
+    Permette di distinguere in PostHog gli eventi originati dal bot da quelli
+    della webapp, anche per eventi (es. expense_tracked) emessi da entrambi.
+    """
+    analytics.track(chat_id, event, {**(properties or {}), "platform": "telegram"})
+
+
 def _safe_json_load(raw: str | None) -> dict | None:
     if not raw:
         return None
@@ -1138,7 +1147,7 @@ async def cmd_feedback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         return
         
     _user_store.save_feedback(chat_id, text)
-    analytics.track(chat_id, "feedback_submitted")
+    _track_event(chat_id, "feedback_submitted")
     await update.message.reply_text("✅ *Grazie per il tuo feedback!*\n\nIl tuo commento è stato salvato e lo terremo in considerazione per le prossime versioni di Expensum ✨", parse_mode=ParseMode.MARKDOWN)
 
 async def cmd_registra(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1301,7 +1310,7 @@ async def process_accounts_db(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     context.user_data.clear()
     logger.info(f"[User {chat_id}] Registrazione completata con tutti i DB.")
-    analytics.track(chat_id, "user_signed_up", {"auth_method": "telegram", "storage_backend": "notion"})
+    _track_event(chat_id, "user_signed_up", {"auth_method": "telegram", "storage_backend": "notion"})
     await update.message.reply_text(
         "🎊 *Configurazione completata!*\n\n"
         "Ora puoi usare il bot per tracciare le tue finanze. Scrivi una spesa in modo naturale!",
@@ -1797,7 +1806,7 @@ async def _process_expense_text(update: Update, context: ContextTypes.DEFAULT_TY
 
     if not transactions:
         _user_store.increment_ai_metrics(success=False)
-        analytics.track(chat_id, "expense_tracking_failed", {"reason": "ai_unavailable", "input_method": "text"})
+        _track_event(chat_id, "expense_tracking_failed", {"reason": "ai_unavailable", "input_method": "text"})
         _user_store.record_tx_event(chat_id, "unknown", "text", "failed", "telegram", reason="ai_unavailable")
         await update.message.reply_text(
             "⚠️ Non sono riuscito ad elaborare il messaggio in questo momento.\n"
@@ -2142,7 +2151,7 @@ async def _save_to_notion(query, context, chat_id: str, data: dict | None, accou
 
         input_method = context.user_data.pop("input_method", "text")
         tx_type = data.get("type", "expense")
-        analytics.track(chat_id, "expense_tracked", {
+        _track_event(chat_id, "expense_tracked", {
             "input_method": input_method,
             "storage_backend": user_obj.storage_backend if user_obj else "unknown",
             "transaction_type": tx_type,
@@ -2208,7 +2217,7 @@ async def _save_transfer(query, context, chat_id: str) -> None:
 
         input_method = context.user_data.pop("input_method", "text")
         user_obj = _user_store.get_user(chat_id)
-        analytics.track(chat_id, "expense_tracked", {
+        _track_event(chat_id, "expense_tracked", {
             "input_method": input_method,
             "storage_backend": user_obj.storage_backend if user_obj else "unknown",
             "transaction_type": "transfer",
@@ -2330,7 +2339,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         if cancelled_data is None:
             await query.edit_message_text("⚠️ Nessuna spesa in sospeso.")
             return
-        analytics.track(chat_id, "expense_tracking_failed", {"reason": "user_cancelled", "input_method": "text"})
+        _track_event(chat_id, "expense_tracking_failed", {"reason": "user_cancelled", "input_method": "text"})
         _user_store.record_tx_event(
             chat_id, cancelled_data.get("type", "expense"), "text", "cancelled", "telegram",
             reason="user_cancelled",
@@ -2414,7 +2423,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             # Nessun conto configurato: blocca solo questa transazione (le altre in parallelo
             # restano in sospeso, l'utente potrà confermarle appena avrà creato un conto).
             context.user_data.get("pending_expenses", {}).pop(tx_id, None)
-            analytics.track(chat_id, "expense_tracking_failed", {"reason": "no_account", "input_method": "text"})
+            _track_event(chat_id, "expense_tracking_failed", {"reason": "no_account", "input_method": "text"})
             _user_store.record_tx_event(
                 chat_id, data.get("type", "expense"), "text", "failed", "telegram", reason="no_account",
             )
@@ -2507,7 +2516,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         input_method = context.user_data.pop("input_method", "text")
         cancelled_data = context.user_data.pop("pending_expense", None)
         context.user_data.pop("waiting_for_amount", None)
-        analytics.track(chat_id, "expense_tracking_failed", {"reason": "user_cancelled", "input_method": input_method})
+        _track_event(chat_id, "expense_tracking_failed", {"reason": "user_cancelled", "input_method": input_method})
         _user_store.record_tx_event(
             chat_id, (cancelled_data or {}).get("type", "expense"), input_method, "cancelled", "telegram",
             reason="user_cancelled",
@@ -2553,7 +2562,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             context.user_data.pop("pending_expense", None)
             context.user_data.pop("waiting_for_amount", None)
             context.user_data.pop("expense_queue", None)
-            analytics.track(chat_id, "expense_tracking_failed", {"reason": "no_account", "input_method": input_method})
+            _track_event(chat_id, "expense_tracking_failed", {"reason": "no_account", "input_method": input_method})
             _user_store.record_tx_event(
                 chat_id, tx_type_for_failure, input_method, "failed", "telegram", reason="no_account",
             )
@@ -2805,7 +2814,7 @@ def _daily_dashboard_job(app: Application, loop: asyncio.AbstractEventLoop) -> N
 
                 # Salva
                 _user_store.set_pinned_dashboard_msg_id(chat_id, msg.message_id)
-                analytics.track(chat_id, "notification_sent", {"notification_type": "daily_dashboard"})
+                _track_event(chat_id, "notification_sent", {"notification_type": "daily_dashboard"})
                 sent += 1
                 logger.info(f"[DailyDashboard] Dashboard inviata a {chat_id}")
 
@@ -2840,7 +2849,7 @@ def _weekly_plan_job(app: Application, loop: asyncio.AbstractEventLoop) -> None:
             chat_id = user.chat_id
             try:
                 await _build_and_send_weekly_plan(chat_id=chat_id, bot=bot)
-                analytics.track(chat_id, "notification_sent", {"notification_type": "weekly_plan"})
+                _track_event(chat_id, "notification_sent", {"notification_type": "weekly_plan"})
                 sent += 1
                 logger.info(f"[WeeklyPlan] Piano inviato a {chat_id}")
             except Exception as e:
@@ -2882,7 +2891,7 @@ def _monthly_plan_job(app: Application, loop: asyncio.AbstractEventLoop) -> None
                 await main_module.run_agent(
                     target_year, target_month, dry_run=False, chat_id=chat_id, shared_store=_user_store,
                 )
-                analytics.track(chat_id, "notification_sent", {"notification_type": "monthly_report"})
+                _track_event(chat_id, "notification_sent", {"notification_type": "monthly_report"})
                 sent += 1
                 logger.info(f"[MonthlyReport] Report inviato a {chat_id}")
             except Exception as e:
@@ -2919,7 +2928,7 @@ def _trial_expiry_job(app: Application, loop: asyncio.AbstractEventLoop) -> None
     for user in expired:
         try:
             _user_store.set_user_plan(user.chat_id, "free", payment_reference="trial_expired")
-            analytics.track(user.chat_id, "trial_expired", {})
+            _track_event(user.chat_id, "trial_expired", {})
             downgraded += 1
         except Exception as e:
             logger.error(f"[TrialExpiry] Errore downgrade per {user.chat_id}: {e}")
@@ -2992,7 +3001,7 @@ def _trial_lifecycle_job(app: Application, loop: asyncio.AbstractEventLoop) -> N
                         reply_markup=markup,
                     )
                     _user_store.record_lifecycle_event(chat_id, step, "telegram")
-                    analytics.track(chat_id, "trial_drip_sent", {"step": step, "channel": "telegram"})
+                    _track_event(chat_id, "trial_drip_sent", {"step": step, "channel": "telegram"})
                     sent_telegram += 1
                 except Exception as e:
                     logger.error(f"[TrialLifecycle] Errore Telegram {step} per {chat_id}: {e}")
@@ -3013,7 +3022,7 @@ def _trial_lifecycle_job(app: Application, loop: asyncio.AbstractEventLoop) -> N
                         }
                         brevo_client.send_transactional_email(user.email, subject, html, headers=email_headers)
                         _user_store.record_lifecycle_event(chat_id, step, "email")
-                        analytics.track(chat_id, "trial_drip_sent", {"step": step, "channel": "email"})
+                        _track_event(chat_id, "trial_drip_sent", {"step": step, "channel": "email"})
                         sent_email += 1
                     except Exception as e:
                         logger.error(f"[TrialLifecycle] Errore email {step} per {chat_id}: {e}")
@@ -3514,7 +3523,7 @@ async def ob_handle_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         logger.warning("Errore bootstrap categorie onboarding Telegram: %s", e)
 
     _user_store.complete_onboarding(chat_id)
-    analytics.track(chat_id, "onboarding_completed", {"platform": "telegram", "hobbies": hobbies})
+    _track_event(chat_id, "onboarding_completed", {"platform": "telegram", "hobbies": hobbies})
 
     # Carica dati demo automaticamente per il tour nella web app
     demo_count = 0
@@ -3523,7 +3532,7 @@ async def ob_handle_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         storage = _get_storage(chat_id)
         demo_count = load_demo_data(storage)
         _user_store.set_has_demo_data(chat_id, True)
-        analytics.track(chat_id, "demo_data_loaded", {"expense_count": demo_count, "platform": "telegram"})
+        _track_event(chat_id, "demo_data_loaded", {"expense_count": demo_count, "platform": "telegram"})
     except Exception as e:
         logger.warning("[User %s] Errore caricamento demo data post-onboarding: %s", chat_id, e)
 
