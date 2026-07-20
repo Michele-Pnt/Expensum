@@ -197,6 +197,7 @@ def api_track():
 
     consent = data.get("consent") or {}
     if consent.get("analytics"):
+        properties.setdefault("platform", "web")
         if event == "identify":
             analytics.identify(distinct_id, properties)
             return jsonify({"ok": True})
@@ -279,7 +280,7 @@ def _send_referral_reward_emails(applied_rewards: list, unlocked_lifetime_founde
                 extra={"domain": "dashboard", "event": "referral_reward_email_failed"},
             )
         if reward.role == "referred" and reward.beneficiary_chat_id:
-            analytics.track(reward.beneficiary_chat_id, "referral_signup", {"days_granted": reward.days_granted})
+            analytics.track(reward.beneficiary_chat_id, "referral_signup", {"days_granted": reward.days_granted, "platform": "web"})
     if unlocked_lifetime_founder_email:
         try:
             subject, html = beta_access.build_lifetime_founder_unlocked_email()
@@ -869,7 +870,7 @@ def web_register():
         logger.exception("Errore registrazione web per email=%s", email)
         return _err("Errore durante la registrazione. Riprova.")
 
-    analytics.track(web_chat_id, "user_signed_up", {"auth_method": "web", "storage_backend": "postgres"})
+    analytics.track(web_chat_id, "user_signed_up", {"auth_method": "web", "storage_backend": "postgres", "platform": "web"})
     try:
         applied = store.apply_pending_referral_rewards(email)
         if applied:
@@ -2794,12 +2795,13 @@ def api_chat_confirm():
             "input_method": input_method,
             "storage_backend": user.storage_backend,
             "transaction_type": parsed_type,
+            "platform": "web",
         })
         store.record_tx_event(chat_id, parsed_type, input_method, "confirmed", "webapp")
         if _is_first_expense:
-            analytics.track(chat_id, "first_expense_tracked", {"input_method": input_method})
+            analytics.track(chat_id, "first_expense_tracked", {"input_method": input_method, "platform": "web"})
     else:
-        analytics.track(chat_id, "expense_tracking_failed", {"reason": "save_error"})
+        analytics.track(chat_id, "expense_tracking_failed", {"reason": "save_error", "platform": "web"})
         store.record_tx_event(
             chat_id, parsed_type, data.get("input_method", "text"), "failed", "webapp",
             reason="save_error",
@@ -4318,12 +4320,16 @@ def analytics_month_comparison():
 # ---------------------------------------------------------------------------
 
 @app.route("/api/reports/<share_token>", methods=["GET"])
+@_tg_webapp_auth
 def api_get_report_by_token(share_token: str):
-    """Endpoint pubblico: restituisce un report tramite share_token (no auth richiesta)."""
+    """Endpoint autenticato: restituisce un report tramite share_token, solo se
+    appartiene all'utente loggato corrente (RLS + controllo esplicito di ownership)."""
+    from flask import g
+
     with store.Session() as s:
-        storage = PostgresStorage(session=s, user_id="")
+        storage = PostgresStorage(session=s, user_id=g.chat_id)
         report = storage.get_report_by_token(share_token)
-    if not report:
+    if not report or report.get("user_id") != g.chat_id:
         return jsonify({"error": "Report non trovato"}), 404
     return jsonify(report)
 

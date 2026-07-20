@@ -366,6 +366,66 @@ def test_browser_session_can_access_reports_api_without_telegram_header(client):
     assert response.json == {"reports": []}
 
 
+def _save_report(store, chat_id, share_token="tok-123", report_type="weekly"):
+    from datetime import date
+    from src.storage.postgres_storage import PostgresStorage
+
+    with store.Session() as s:
+        storage = PostgresStorage(session=s, user_id=chat_id)
+        storage.save_report(
+            user_id=chat_id,
+            report_type=report_type,
+            report_date=date.today(),
+            text_content="Report di prova",
+            report_data=None,
+        )
+        # save_report genera un token proprio: lo leggiamo per rendere il test
+        # deterministico rispetto al token atteso dal chiamante.
+        saved = storage.get_reports_for_user(user_id=chat_id, limit=1)[0]
+        return saved["share_token"]
+
+
+def test_report_detail_requires_auth(client):
+    response = client.get("/api/reports/some-token")
+    assert response.status_code == 401
+
+
+def test_report_detail_returns_404_for_other_users_report(client):
+    from src.dashboard.app import store
+
+    owner_chat_id, _, _ = _create_dashboard_user(
+        store, chat_id="chat_report_owner", email="owner@example.com"
+    )
+    token = _save_report(store, owner_chat_id)
+
+    _, other_email, other_password = _create_dashboard_user(
+        store, chat_id="chat_report_other", email="other@example.com"
+    )
+    store.mark_setup_completed("chat_report_other")
+    client.post("/login", data={"email": other_email, "password": other_password})
+
+    response = client.get(f"/api/reports/{token}")
+
+    assert response.status_code == 404
+
+
+def test_report_detail_returns_report_for_owner(client):
+    from src.dashboard.app import store
+
+    owner_chat_id, email, password = _create_dashboard_user(
+        store, chat_id="chat_report_self", email="self@example.com"
+    )
+    store.mark_setup_completed(owner_chat_id)
+    token = _save_report(store, owner_chat_id)
+
+    client.post("/login", data={"email": email, "password": password})
+    response = client.get(f"/api/reports/{token}")
+
+    assert response.status_code == 200
+    assert response.json["share_token"] == token
+    assert response.json["text_content"] == "Report di prova"
+
+
 def test_telegram_login_template_has_mobile_keyboard_guards(client):
     from src.dashboard.app import store
 

@@ -184,7 +184,10 @@ def generate_weekly_plan_action(*, chat_id: str, storage, user_store: UserStore)
             report_type="weekly",
             report_date=ref,
             share_token=cached["share_token"],
-            report_url=f"{Config.WEBAPP_BASE_URL}/reports/{cached['share_token']}" if cached["share_token"] else None,
+            report_url=(
+                f"{Config.WEBAPP_BASE_URL}/reports?highlight={cached['share_token']}"
+                if cached["share_token"] else None
+            ),
             plan_data=plan_data,
             notification_text="📱 *Webapp* — Ho generato il tuo piano settimanale. Aprilo nei report per i dettagli completi.",
         )
@@ -206,7 +209,7 @@ def generate_weekly_plan_action(*, chat_id: str, storage, user_store: UserStore)
         text_content=plan_text,
         report_data=serialize_weekly_data(plan_data),
     )
-    report_url = f"{Config.WEBAPP_BASE_URL}/reports/{share_token}" if share_token else None
+    report_url = f"{Config.WEBAPP_BASE_URL}/reports?highlight={share_token}" if share_token else None
 
     return PlanGenerationResult(
         plan_kind="weekly",
@@ -258,7 +261,10 @@ def generate_monthly_plan_action(
             report_type="monthly",
             report_date=target_month,
             share_token=cached["share_token"],
-            report_url=f"{Config.WEBAPP_BASE_URL}/reports/{cached['share_token']}" if cached["share_token"] else None,
+            report_url=(
+                f"{Config.WEBAPP_BASE_URL}/reports?highlight={cached['share_token']}"
+                if cached["share_token"] else None
+            ),
             plan_data=plan_data,
             notification_text=(
                 "📱 *Webapp* — Ho generato il tuo piano mensile. Aprilo nei report e poi passa in "
@@ -283,7 +289,7 @@ def generate_monthly_plan_action(
         text_content=plan_text,
         report_data=serialize_monthly_data(plan_data),
     )
-    report_url = f"{Config.WEBAPP_BASE_URL}/reports/{share_token}" if share_token else None
+    report_url = f"{Config.WEBAPP_BASE_URL}/reports?highlight={share_token}" if share_token else None
 
     return PlanGenerationResult(
         plan_kind="monthly",

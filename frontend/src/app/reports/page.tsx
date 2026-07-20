@@ -1,12 +1,12 @@
 "use client";
 
-import { useEffect, useState } from "react";
-import Link from "next/link";
-import { useRouter } from "next/navigation";
+import { Suspense, useCallback, useEffect, useState } from "react";
+import { useSearchParams } from "next/navigation";
 import { CircularProgress } from "@mui/material";
 import styles from "./reports.module.css";
 import { trackReportViewed, trackReportShared } from "@/lib/analytics";
 import { getCsrfToken } from "@/lib/csrf";
+import { ReportBody, type ReportDetail } from "@/components/ReportContent";
 
 interface ReportSummary {
   id: number;
@@ -32,26 +32,63 @@ function formatDate(iso: string): string {
   return d.toLocaleDateString("it-IT", { day: "2-digit", month: "long", year: "numeric" });
 }
 
-export default function ReportsPage() {
-  const router = useRouter();
+function authHeaders(): HeadersInit {
+  const telegramWindow = window as TelegramWindow;
+  const initData = telegramWindow.Telegram?.WebApp?.initData ?? "";
+  return initData ? { "X-Telegram-Init-Data": initData } : {};
+}
+
+function ReportsPageInner() {
+  const searchParams = useSearchParams();
+  const highlightToken = searchParams.get("highlight");
+
   const [reports, setReports] = useState<ReportSummary[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [generating, setGenerating] = useState<"weekly" | "monthly" | null>(null);
   const [generateError, setGenerateError] = useState<string | null>(null);
 
+  const [expandedToken, setExpandedToken] = useState<string | null>(null);
+  const [details, setDetails] = useState<Record<string, ReportDetail>>({});
+  const [detailLoading, setDetailLoading] = useState<string | null>(null);
+  const [detailError, setDetailError] = useState<string | null>(null);
+
+  const loadDetail = useCallback(async (token: string) => {
+    setDetailError(null);
+    if (details[token]) return;
+    setDetailLoading(token);
+    try {
+      const res = await fetch(`${API_BASE}/api/reports/${token}`, { headers: authHeaders() });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data: ReportDetail = await res.json();
+      setDetails((prev) => ({ ...prev, [token]: data }));
+    } catch {
+      setDetailError("Impossibile caricare il report. Riprova tra poco.");
+    } finally {
+      setDetailLoading(null);
+    }
+  }, [details]);
+
+  function toggleReport(token: string, type: "weekly" | "monthly") {
+    if (expandedToken === token) {
+      setExpandedToken(null);
+      return;
+    }
+    trackReportShared(type);
+    setExpandedToken(token);
+    loadDetail(token);
+  }
+
   async function handleGenerate(type: "weekly" | "monthly") {
     setGenerating(type);
     setGenerateError(null);
     try {
-      const telegramWindow = window as TelegramWindow;
-      const initData = telegramWindow.Telegram?.WebApp?.initData ?? "";
       const csrfToken = await getCsrfToken();
       const headers: HeadersInit = {
         "Content-Type": "application/json",
         "X-CSRFToken": csrfToken,
+        ...authHeaders(),
       };
-      if (initData) headers["X-Telegram-Init-Data"] = initData;
 
       const res = await fetch(`${API_BASE}/api/reports/generate`, {
         method: "POST",
@@ -69,7 +106,12 @@ export default function ReportsPage() {
       if (!res.ok) throw new Error("generate_failed");
       const data = await res.json();
       if (data.share_token) {
-        router.push(`/reports/${data.share_token}`);
+        // Ricarica lo storico e apre subito la scheda appena generata.
+        const listRes = await fetch(`${API_BASE}/api/reports`, { headers: authHeaders() });
+        const listData = await listRes.json();
+        setReports(listData.reports ?? []);
+        setExpandedToken(data.share_token);
+        loadDetail(data.share_token);
       } else {
         throw new Error("generate_failed");
       }
@@ -82,11 +124,7 @@ export default function ReportsPage() {
 
   useEffect(() => {
     trackReportViewed("list");
-    const telegramWindow = window as TelegramWindow;
-    const initData = telegramWindow.Telegram?.WebApp?.initData ?? "";
-    const headers: HeadersInit = initData ? { "X-Telegram-Init-Data": initData } : {};
-
-    fetch(`${API_BASE}/api/reports`, { headers })
+    fetch(`${API_BASE}/api/reports`, { headers: authHeaders() })
       .then((r) => {
         if (r.status === 401) throw new Error("auth_401");
         if (!r.ok) throw new Error("load_failed");
@@ -95,7 +133,17 @@ export default function ReportsPage() {
       .then((data) => setReports(data.reports ?? []))
       .catch((e) => setError(e.message))
       .finally(() => setLoading(false));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // Se si arriva da un link (Telegram o condiviso) con ?highlight=<token>,
+  // apre subito la scheda corrispondente una volta caricato lo storico.
+  useEffect(() => {
+    if (!highlightToken || loading) return;
+    setExpandedToken(highlightToken);
+    loadDetail(highlightToken);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [highlightToken, loading]);
 
   if (loading) {
     return (
@@ -150,32 +198,69 @@ export default function ReportsPage() {
       )}
 
       <div className={styles.list}>
-        {reports.map((r) => (
-          <Link
-            key={r.share_token}
-            href={`/reports/${r.share_token}`}
-            className={styles.reportCard}
-            onClick={() => trackReportShared(r.report_type)}
-          >
-            <div className={styles.reportCardLeft}>
-              <span className={styles.reportIcon}>
-                {r.report_type === "weekly" ? "📅" : "📆"}
-              </span>
-              <div>
-                <div className={styles.reportType}>
-                  {r.report_type === "weekly" ? "Report Settimanale" : "Report Mensile"}
+        {reports.map((r) => {
+          const isExpanded = expandedToken === r.share_token;
+          return (
+            <div key={r.share_token}>
+              <button
+                type="button"
+                className={styles.reportCard}
+                onClick={() => toggleReport(r.share_token, r.report_type)}
+                aria-expanded={isExpanded}
+              >
+                <div className={styles.reportCardLeft}>
+                  <span className={styles.reportIcon}>
+                    {r.report_type === "weekly" ? "📅" : "📆"}
+                  </span>
+                  <div>
+                    <div className={styles.reportType}>
+                      {r.report_type === "weekly" ? "Report Settimanale" : "Report Mensile"}
+                    </div>
+                    <div className={styles.reportDate}>{formatDate(r.report_date)}</div>
+                  </div>
                 </div>
-                <div className={styles.reportDate}>{formatDate(r.report_date)}</div>
-              </div>
+                <span
+                  className={`${styles.reportBadge} ${r.report_type === "weekly" ? styles.reportBadgeWeekly : ""}`}
+                >
+                  {isExpanded ? "▲" : "▼"} {r.report_type === "weekly" ? "Settimanale" : "Mensile"}
+                </span>
+              </button>
+
+              {isExpanded && (
+                <div style={{ marginBottom: "1.5rem" }}>
+                  {detailLoading === r.share_token && (
+                    <div className={styles.loading}>
+                      <CircularProgress size={24} color="primary" />
+                    </div>
+                  )}
+                  {detailError && detailLoading !== r.share_token && !details[r.share_token] && (
+                    <div className={styles.empty}>
+                      <p>{detailError}</p>
+                    </div>
+                  )}
+                  {details[r.share_token] && <ReportBody report={details[r.share_token]} />}
+                </div>
+              )}
             </div>
-            <span
-              className={`${styles.reportBadge} ${r.report_type === "weekly" ? styles.reportBadgeWeekly : ""}`}
-            >
-              {r.report_type === "weekly" ? "Settimanale" : "Mensile"}
-            </span>
-          </Link>
-        ))}
+          );
+        })}
       </div>
     </div>
+  );
+}
+
+export default function ReportsPage() {
+  return (
+    <Suspense
+      fallback={
+        <div className={styles.container}>
+          <div className={styles.loading}>
+            <CircularProgress size={32} color="primary" />
+          </div>
+        </div>
+      }
+    >
+      <ReportsPageInner />
+    </Suspense>
   );
 }
