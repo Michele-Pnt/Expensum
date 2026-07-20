@@ -387,15 +387,18 @@ function InviteStep({ onContinue }: { onContinue: () => void }) {
           >
             📲 Condividi su WhatsApp
           </Button>
-          <Typography variant="caption" sx={{ display: "block", mb: 3, color: "var(--color-text-2)" }}>
+          <Typography variant="caption" sx={{ display: "block", mb: 1, color: "var(--color-text-2)" }}>
             {data.referred_count > 0
               ? `Hai già invitato ${data.referred_count} ${data.referred_count === 1 ? "persona" : "persone"}.`
               : "Nessun invito ancora — condividi il link per iniziare."}
           </Typography>
+          <Typography variant="caption" sx={{ display: "block", mb: 3, color: "var(--color-text-2)" }}>
+            Ritrovi sempre il link nella tab &quot;Invita amici&quot;.
+          </Typography>
         </>
       ) : (
         <Typography variant="body2" sx={{ mb: 3, color: "var(--color-text-2)" }}>
-          Il link personale sarà disponibile a breve nelle Impostazioni.
+          Il link personale sarà disponibile a breve nella tab &quot;Invita amici&quot;.
         </Typography>
       )}
 
