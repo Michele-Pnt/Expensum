@@ -4,7 +4,7 @@ import { Suspense, useCallback, useEffect, useState } from "react";
 import { useSearchParams } from "next/navigation";
 import { CircularProgress } from "@mui/material";
 import styles from "./reports.module.css";
-import { trackReportViewed, trackReportShared } from "@/lib/analytics";
+import { trackReportViewed, trackReportGenerated } from "@/lib/analytics";
 import { getCsrfToken } from "@/lib/csrf";
 import { ReportBody, type ReportDetail } from "@/components/ReportContent";
 
@@ -74,7 +74,7 @@ function ReportsPageInner() {
       setExpandedToken(null);
       return;
     }
-    trackReportShared(type);
+    trackReportViewed(type);
     setExpandedToken(token);
     loadDetail(token);
   }
@@ -106,6 +106,7 @@ function ReportsPageInner() {
       if (!res.ok) throw new Error("generate_failed");
       const data = await res.json();
       if (data.share_token) {
+        trackReportGenerated(type);
         // Ricarica lo storico e apre subito la scheda appena generata.
         const listRes = await fetch(`${API_BASE}/api/reports`, { headers: authHeaders() });
         const listData = await listRes.json();

@@ -195,8 +195,8 @@ export function trackReportViewed(reportType: "weekly" | "monthly" | string) {
   void sendEvent("report_viewed", { report_type: reportType });
 }
 
-export function trackReportShared(reportType: "weekly" | "monthly" | string) {
-  void sendEvent("report_shared", { report_type: reportType });
+export function trackReportGenerated(reportType: "weekly" | "monthly" | string) {
+  void sendEvent("report_generated", { report_type: reportType });
 }
 
 // ---------------------------------------------------------------------------
