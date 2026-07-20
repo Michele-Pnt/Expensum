@@ -871,6 +871,7 @@ def web_register():
         return _err("Errore durante la registrazione. Riprova.")
 
     analytics.track(web_chat_id, "user_signed_up", {"auth_method": "web", "storage_backend": "postgres", "platform": "web"})
+    analytics.identify(web_chat_id, {"auth_method": "web", "storage_backend": "postgres", "platform": "web"})
     try:
         applied = store.apply_pending_referral_rewards(email)
         if applied:
@@ -1076,6 +1077,7 @@ def _process_oauth_background(
             pay_transfer_db_id=valid_discovered.get("pay_transfer_db_id"),
         )
         analytics.track(chat_id, "user_signed_up", {"auth_method": "telegram", "storage_backend": "notion", "platform": "telegram"})
+        analytics.identify(chat_id, {"auth_method": "telegram", "storage_backend": "notion", "platform": "telegram"})
 
         # 4. Cache degli schemi
         for db_key, schema_data in discovered_schemas.items():
@@ -1250,6 +1252,7 @@ def _process_postgres_background(chat_id: str) -> None:
         refresh_category_averages(chat_id, store, session=session)
         store.mark_setup_completed(chat_id)
         analytics.track(chat_id, "user_signed_up", {"auth_method": "telegram", "storage_backend": "postgres", "platform": "telegram"})
+        analytics.identify(chat_id, {"auth_method": "telegram", "storage_backend": "postgres", "platform": "telegram"})
 
         reg_token = store.create_oauth_session(chat_id)
         miniapp_url = f"{Config.WEBAPP_BASE_URL}/setup?reg_token={reg_token}"

@@ -1311,6 +1311,7 @@ async def process_accounts_db(update: Update, context: ContextTypes.DEFAULT_TYPE
     context.user_data.clear()
     logger.info(f"[User {chat_id}] Registrazione completata con tutti i DB.")
     _track_event(chat_id, "user_signed_up", {"auth_method": "telegram", "storage_backend": "notion"})
+    analytics.identify(chat_id, {"auth_method": "telegram", "storage_backend": "notion", "platform": "telegram"})
     await update.message.reply_text(
         "🎊 *Configurazione completata!*\n\n"
         "Ora puoi usare il bot per tracciare le tue finanze. Scrivi una spesa in modo naturale!",
@@ -1806,7 +1807,9 @@ async def _process_expense_text(update: Update, context: ContextTypes.DEFAULT_TY
 
     if not transactions:
         _user_store.increment_ai_metrics(success=False)
-        _track_event(chat_id, "expense_tracking_failed", {"reason": "ai_unavailable", "input_method": "text"})
+        _track_event(chat_id, "expense_tracking_failed", {
+            "reason": "ai_unavailable", "input_method": "text", "transaction_type": "unknown",
+        })
         _user_store.record_tx_event(chat_id, "unknown", "text", "failed", "telegram", reason="ai_unavailable")
         await update.message.reply_text(
             "⚠️ Non sono riuscito ad elaborare il messaggio in questo momento.\n"
@@ -2339,7 +2342,10 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         if cancelled_data is None:
             await query.edit_message_text("⚠️ Nessuna spesa in sospeso.")
             return
-        _track_event(chat_id, "expense_tracking_failed", {"reason": "user_cancelled", "input_method": "text"})
+        _track_event(chat_id, "expense_tracking_failed", {
+            "reason": "user_cancelled", "input_method": "text",
+            "transaction_type": cancelled_data.get("type", "expense"),
+        })
         _user_store.record_tx_event(
             chat_id, cancelled_data.get("type", "expense"), "text", "cancelled", "telegram",
             reason="user_cancelled",
@@ -2423,7 +2429,10 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             # Nessun conto configurato: blocca solo questa transazione (le altre in parallelo
             # restano in sospeso, l'utente potrà confermarle appena avrà creato un conto).
             context.user_data.get("pending_expenses", {}).pop(tx_id, None)
-            _track_event(chat_id, "expense_tracking_failed", {"reason": "no_account", "input_method": "text"})
+            _track_event(chat_id, "expense_tracking_failed", {
+                "reason": "no_account", "input_method": "text",
+                "transaction_type": data.get("type", "expense"),
+            })
             _user_store.record_tx_event(
                 chat_id, data.get("type", "expense"), "text", "failed", "telegram", reason="no_account",
             )
@@ -2516,7 +2525,10 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         input_method = context.user_data.pop("input_method", "text")
         cancelled_data = context.user_data.pop("pending_expense", None)
         context.user_data.pop("waiting_for_amount", None)
-        _track_event(chat_id, "expense_tracking_failed", {"reason": "user_cancelled", "input_method": input_method})
+        _track_event(chat_id, "expense_tracking_failed", {
+            "reason": "user_cancelled", "input_method": input_method,
+            "transaction_type": (cancelled_data or {}).get("type", "expense"),
+        })
         _user_store.record_tx_event(
             chat_id, (cancelled_data or {}).get("type", "expense"), input_method, "cancelled", "telegram",
             reason="user_cancelled",
@@ -2562,7 +2574,10 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             context.user_data.pop("pending_expense", None)
             context.user_data.pop("waiting_for_amount", None)
             context.user_data.pop("expense_queue", None)
-            _track_event(chat_id, "expense_tracking_failed", {"reason": "no_account", "input_method": input_method})
+            _track_event(chat_id, "expense_tracking_failed", {
+                "reason": "no_account", "input_method": input_method,
+                "transaction_type": tx_type_for_failure,
+            })
             _user_store.record_tx_event(
                 chat_id, tx_type_for_failure, input_method, "failed", "telegram", reason="no_account",
             )
