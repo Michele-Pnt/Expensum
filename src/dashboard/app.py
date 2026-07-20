@@ -137,12 +137,15 @@ _PUBLIC_STATS_TTL_SECONDS = 300
 def api_public_stats():
     """Statistiche pubbliche aggregate per il social proof sulla landing page.
 
-    Nessun dato per-utente: solo il conteggio cross-backend/cross-canale delle
-    transazioni confermate (tx_events.outcome='confirmed', rispecchia sia
-    Postgres sia Notion — vedi docstring di TxEvent). Cache in-memory con TTL
-    perché la rotta è pubblica, non autenticata, e potenzialmente ad alto traffico.
+    Nessun dato per-utente: conta le righe di `expenses` (backend Postgres),
+    non `tx_events.outcome='confirmed'` — quella tabella esiste solo dal
+    14/07/2026 e conterebbe solo gli ultimi giorni, facendo apparire il numero
+    ridicolmente basso rispetto al volume reale tracciato da aprile 2026.
+    `expenses` non copre gli utenti su backend Notion, quindi il numero è un
+    minimo garantito, mai gonfiato. Cache in-memory con TTL perché la rotta è
+    pubblica, non autenticata, e potenzialmente ad alto traffico.
     """
-    from src.user_store import TxEvent
+    from src.storage.models import Expense
 
     global _public_stats_cache
     now = time.time()
@@ -150,11 +153,9 @@ def api_public_stats():
         return jsonify(_public_stats_cache["data"])
 
     with store.Session() as s:
-        total_confirmed = s.query(func.count(TxEvent.id)).filter(
-            TxEvent.outcome == "confirmed"
-        ).scalar() or 0
+        total_expenses = s.query(func.count(Expense.id)).scalar() or 0
 
-    data = {"total_expenses_tracked": int(total_confirmed)}
+    data = {"total_expenses_tracked": int(total_expenses)}
     _public_stats_cache = {"ts": now, "data": data}
     return jsonify(data)
 

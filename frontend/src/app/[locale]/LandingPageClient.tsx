@@ -156,6 +156,12 @@ export default function LandingPage() {
                 {t("hero.subLine1")}<br />
                 {t("hero.subLine2")}
               </p>
+              {expensesTracked !== null && expensesTracked > 0 && (
+                <div className={styles.heroStatBadge}>
+                  <TrendingUp size={16} strokeWidth={2} />
+                  <span>{t("hero.socialProof", { count: expensesTracked })}</span>
+                </div>
+              )}
               <div className={styles.heroActions}>
                 <div id="hero-waitlist-form" style={{ width: "100%", maxWidth: "450px", marginTop: "0.5rem" }}>
                   <iframe
@@ -167,11 +173,6 @@ export default function LandingPage() {
                   ></iframe>
                   <Script src="https://tally.so/widgets/embed.js" strategy="lazyOnload" />
                 </div>
-                {expensesTracked !== null && expensesTracked > 0 && (
-                  <p className={styles.heroSocialProof}>
-                    {t("hero.socialProof", { count: expensesTracked })}
-                  </p>
-                )}
               </div>
             </div>
 
