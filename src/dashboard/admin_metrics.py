@@ -34,6 +34,7 @@ from src.user_store import (
     JobRun,
     LlmUsageEvent,
     PlanChange,
+    ReferralReward,
     TallyLead,
     TxEvent,
     User,
@@ -1055,7 +1056,94 @@ def get_tour_funnel(s: Session) -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
-# 13. Drill-down per singolo utente
+# 13. Referral: leaderboard, reward, sblocco Lifetime Founder
+# ---------------------------------------------------------------------------
+def get_referral_metrics(s: Session, top_n: int = 20, recent_n: int = 50) -> dict[str, Any]:
+    """Stato del sistema referral: KPI, classifica referrer, invii recenti.
+
+    Tetto reward per il referrer (fisso a 60gg, non additivo) e sblocco
+    Lifetime Founder al 3° referral sono applicati in
+    UserStore.create_referral_rewards; qui si aggregano solo i dati già
+    persistiti (tally_leads + referral_rewards), nessuna logica di business.
+    """
+    total_codes_generated = s.query(TallyLead).filter(TallyLead.referral_code.isnot(None)).count()
+    total_referred_signups = s.query(TallyLead).filter(TallyLead.referred_by_code.isnot(None)).count()
+
+    reward_rows = (
+        s.query(ReferralReward.role, ReferralReward.status, func.count())
+        .group_by(ReferralReward.role, ReferralReward.status)
+        .all()
+    )
+    rewards = {"referred": {"pending": 0, "applied": 0}, "referrer": {"pending": 0, "applied": 0}}
+    for role, status, cnt in reward_rows:
+        if role in rewards and status in rewards[role]:
+            rewards[role][status] = cnt
+
+    lifetime_founder_unlocked = (
+        s.query(TallyLead).filter(TallyLead.lifetime_founder_guaranteed.is_(True)).count()
+    )
+
+    # Classifica referrer: conteggio referred per referral_code, poi risoluzione
+    # dell'email del referrer via join manuale (referred_by_code -> referral_code).
+    referred_counts = dict(
+        s.query(TallyLead.referred_by_code, func.count())
+        .filter(TallyLead.referred_by_code.isnot(None))
+        .group_by(TallyLead.referred_by_code)
+        .all()
+    )
+    top_referrers: list[dict[str, Any]] = []
+    if referred_counts:
+        codes = list(referred_counts.keys())
+        referrer_leads = (
+            s.query(TallyLead)
+            .filter(TallyLead.referral_code.in_(codes))
+            .all()
+        )
+        leads_by_code = {lead.referral_code: lead for lead in referrer_leads}
+        ranked = sorted(referred_counts.items(), key=lambda kv: kv[1], reverse=True)[:top_n]
+        for code, count in ranked:
+            lead = leads_by_code.get(code)
+            top_referrers.append({
+                "referral_code": code,
+                "email": lead.email if lead else None,
+                "referred_count": count,
+                "lifetime_founder_guaranteed": bool(lead and lead.lifetime_founder_guaranteed),
+            })
+
+    recent_signups = (
+        s.query(TallyLead)
+        .filter(TallyLead.referred_by_code.isnot(None))
+        .order_by(TallyLead.received_at.desc())
+        .limit(recent_n)
+        .all()
+    )
+    referrer_codes = {lead.referred_by_code for lead in recent_signups}
+    referrer_emails = {
+        lead.referral_code: lead.email
+        for lead in s.query(TallyLead).filter(TallyLead.referral_code.in_(referrer_codes)).all()
+    } if referrer_codes else {}
+    recent = [
+        {
+            "email": lead.email,
+            "received_at": lead.received_at,
+            "referrer_email": referrer_emails.get(lead.referred_by_code),
+            "beta_account_granted": lead.beta_account_granted,
+        }
+        for lead in recent_signups
+    ]
+
+    return {
+        "total_codes_generated": total_codes_generated,
+        "total_referred_signups": total_referred_signups,
+        "rewards": rewards,
+        "lifetime_founder_unlocked": lifetime_founder_unlocked,
+        "top_referrers": top_referrers,
+        "recent_signups": recent,
+    }
+
+
+# ---------------------------------------------------------------------------
+# 14. Drill-down per singolo utente
 # ---------------------------------------------------------------------------
 def get_user_detail(s: Session, chat_id: str) -> dict[str, Any] | None:
     """Timeline completa del singolo utente per la pagina di drill-down/supporto."""

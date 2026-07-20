@@ -1,0 +1,67 @@
+{% extends "base.html" %}
+{% import "_macros.html" as ui %}
+{% block content %}
+<h1 class="page-title">Referral {{ ui.info("Sistema referral beta: chi invita e chi si registra ricevono 60gg di Pro. Il referrer riceve un solo reward in assoluto (tetto fisso, non additivo per numero di inviti); dal 4° referral in poi il link continua a registrare gli invitati ma non genera più reward. Al 3° referral il referrer sblocca l'accesso garantito alla futura offerta Lifetime Founder (oggi solo marketing/copy, nessun flusso di acquisto — il flag va onorato manualmente quando quel flusso sarà costruito).") }}</h1>
+<p class="page-desc">Codici generati, inviti andati a buon fine e reward Pro distribuiti.</p>
+
+<div class="stats-grid">
+    <div class="stat-card glass-panel">
+        <div class="stat-label">Codici generati {{ ui.info("Numero di lead Tally a cui è stato assegnato un referral_code (uno per ogni submit del form waitlist).") }}</div>
+        <div class="stat-value">{{ referral.total_codes_generated }}</div>
+    </div>
+    <div class="stat-card glass-panel" style="border-left: 4px solid var(--success)">
+        <div class="stat-label">Inviti riusciti {{ ui.info("Lead Tally arrivati tramite un link ?ref=CODICE valido (referred_by_code valorizzato), indipendentemente dal fatto che abbiano ricevuto un reward (il tetto dei 3 referral può bloccare il reward ma il lead resta comunque tracciato).") }}</div>
+        <div class="stat-value" style="color: var(--success)">{{ referral.total_referred_signups }}</div>
+    </div>
+    <div class="stat-card glass-panel">
+        <div class="stat-label">Reward applicati {{ ui.info("Reward Pro (60gg) già applicati al piano dell'utente: status='applied' su referral_rewards, sommando i ruoli referred e referrer.") }}</div>
+        <div class="stat-value">{{ referral.rewards.referred.applied + referral.rewards.referrer.applied }}</div>
+    </div>
+    <div class="stat-card glass-panel">
+        <div class="stat-label">Reward in attesa {{ ui.info("Reward creati ma non ancora applicati (status='pending'): il beneficiario non ha ancora un account risolvibile via email — verranno applicati automaticamente al primo login/registrazione/grant beta.") }}</div>
+        <div class="stat-value">{{ referral.rewards.referred.pending + referral.rewards.referrer.pending }}</div>
+    </div>
+    <div class="stat-card glass-panel" style="border-left: 4px solid var(--warning)">
+        <div class="stat-label">Lifetime Founder sbloccati {{ ui.info("Referrer che hanno raggiunto 3 inviti riusciti e hanno quindi il flag lifetime_founder_guaranteed=True. Nessun flusso di acquisto esiste ancora: onora questi utenti manualmente quando l'offerta verrà aperta.") }}</div>
+        <div class="stat-value" style="color: var(--warning)">{{ referral.lifetime_founder_unlocked }}</div>
+    </div>
+</div>
+
+<h3 style="margin-top: 2rem; margin-bottom: 1rem; color: var(--text-main);">Classifica referrer {{ ui.info("Top referrer per numero di persone invitate con successo (referred_by_code == il loro referral_code). Il tetto reward è fisso a 60gg indipendentemente dal conteggio; oltre il 3° invito il conteggio continua a crescere ma non genera più reward.") }}</h3>
+<div class="glass-panel data-table-wrapper">
+    <table class="glass-table">
+        <thead><tr><th>Email</th><th>Codice</th><th>Invitati</th><th>Lifetime Founder</th></tr></thead>
+        <tbody>
+            {% for r in referral.top_referrers %}
+            <tr>
+                <td>{{ r.email or '—' }}</td>
+                <td><code style="font-size:0.75rem; color: var(--text-secondary)">{{ r.referral_code }}</code></td>
+                <td>{{ r.referred_count }}</td>
+                <td>{% if r.lifetime_founder_guaranteed %}<span class="badge active">✓ Sbloccato</span>{% else %}—{% endif %}</td>
+            </tr>
+            {% else %}
+            <tr><td colspan="4" style="text-align:center; color: var(--text-secondary);">Nessun referral ancora.</td></tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+
+<h3 style="margin-top: 2rem; margin-bottom: 1rem; color: var(--text-main);">Inviti recenti {{ ui.info("Ultimi lead arrivati tramite link referral, dal più recente. beta_account_granted indica se l'account beta è già stato creato automaticamente per quell'email.") }}</h3>
+<div class="glass-panel data-table-wrapper">
+    <table class="glass-table">
+        <thead><tr><th>Invitato</th><th>Invitato da</th><th>Ricevuto</th><th>Account beta</th></tr></thead>
+        <tbody>
+            {% for r in referral.recent_signups %}
+            <tr>
+                <td>{{ r.email or '—' }}</td>
+                <td>{{ r.referrer_email or '—' }}</td>
+                <td>{{ r.received_at.strftime('%Y-%m-%d %H:%M') if r.received_at else '—' }}</td>
+                <td>{% if r.beta_account_granted %}<span class="badge active">✓</span>{% else %}—{% endif %}</td>
+            </tr>
+            {% else %}
+            <tr><td colspan="4" style="text-align:center; color: var(--text-secondary);">Nessun invito ancora.</td></tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+{% endblock %}

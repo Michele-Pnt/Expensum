@@ -24,6 +24,7 @@
                 <li><a href="{{ url_for('admin.index') }}" class="{% if request.endpoint == 'admin.index' %}active{% endif %}">📊 Overview</a></li>
                 <li><a href="{{ url_for('admin.product_metrics') }}" class="{% if request.endpoint == 'admin.product_metrics' %}active{% endif %}">📈 Prodotto</a></li>
                 <li><a href="{{ url_for('admin.business_metrics') }}" class="{% if request.endpoint == 'admin.business_metrics' %}active{% endif %}">💶 Business</a></li>
+                <li><a href="{{ url_for('admin.referrals') }}" class="{% if request.endpoint == 'admin.referrals' %}active{% endif %}">🔗 Referral</a></li>
                 <li><a href="{{ url_for('admin.jobs_status') }}" class="{% if request.endpoint == 'admin.jobs_status' %}active{% endif %}">⏱️ Job</a></li>
                 <li><a href="{{ url_for('admin.users_list') }}" class="{% if request.endpoint == 'admin.users_list' %}active{% endif %}">👥 Utenti</a></li>
                 <li><a href="{{ url_for('admin.feedbacks_list') }}" class="{% if request.endpoint == 'admin.feedbacks_list' %}active{% endif %}">📧 Feedback</a></li>

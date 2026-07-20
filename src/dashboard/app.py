@@ -4,6 +4,7 @@ import sys
 import json
 import time
 import uuid
+import secrets
 import difflib
 import logging
 import threading
@@ -137,15 +138,17 @@ _PUBLIC_STATS_TTL_SECONDS = 300
 def api_public_stats():
     """Statistiche pubbliche aggregate per il social proof sulla landing page.
 
-    Nessun dato per-utente: conta le righe di `expenses` (backend Postgres),
-    non `tx_events.outcome='confirmed'` — quella tabella esiste solo dal
-    14/07/2026 e conterebbe solo gli ultimi giorni, facendo apparire il numero
-    ridicolmente basso rispetto al volume reale tracciato da aprile 2026.
-    `expenses` non copre gli utenti su backend Notion, quindi il numero è un
-    minimo garantito, mai gonfiato. Cache in-memory con TTL perché la rotta è
-    pubblica, non autenticata, e potenzialmente ad alto traffico.
+    Conta tx_events.outcome='confirmed', NON la tabella `expenses`: `expenses`
+    esiste solo per gli utenti su backend Postgres, ma storage_backend di
+    default è 'notion' (vedi User.storage_backend), quindi `expenses` è quasi
+    sempre vuota e il conteggio risultava 0. `tx_events` è l'unica tabella
+    pensata cross-backend (Notion + Postgres, vedi sua docstring): esiste solo
+    dal 14/07/2026, quindi parte basso, ma è l'unico numero onesto e cresce
+    correttamente da qui in avanti su entrambi i backend. Cache in-memory con
+    TTL perché la rotta è pubblica, non autenticata, e potenzialmente ad alto
+    traffico.
     """
-    from src.storage.models import Expense
+    from src.user_store import TxEvent
 
     global _public_stats_cache
     now = time.time()
@@ -153,9 +156,11 @@ def api_public_stats():
         return jsonify(_public_stats_cache["data"])
 
     with store.Session() as s:
-        total_expenses = s.query(func.count(Expense.id)).scalar() or 0
+        total_confirmed = s.query(func.count(TxEvent.id)).filter(
+            TxEvent.outcome == "confirmed"
+        ).scalar() or 0
 
-    data = {"total_expenses_tracked": int(total_expenses)}
+    data = {"total_expenses_tracked": int(total_confirmed)}
     _public_stats_cache = {"ts": now, "data": data}
     return jsonify(data)
 
@@ -243,6 +248,51 @@ def _extract_tally_name(fields: list) -> str:
     return ""
 
 
+def _extract_tally_ref(fields: list) -> str | None:
+    """Estrae il codice referral (campo hidden 'ref') da un submit Tally, se presente."""
+    for field in fields:
+        if not isinstance(field, dict):
+            continue
+        key = (field.get("key") or "").strip().lower()
+        label = (field.get("label") or "").strip().lower()
+        value = field.get("value")
+        if ("ref" in key or "ref" in label) and isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
+
+
+def _send_referral_reward_emails(applied_rewards: list, unlocked_lifetime_founder_email: str | None) -> None:
+    """Invia le email di notifica per i reward referral appena applicati/sbloccati.
+
+    Fire-and-forget: eventuali errori Brevo vengono loggati ma non propagati,
+    lo stato del reward in DB resta 'applied' anche se la mail fallisce.
+    """
+    for reward in applied_rewards:
+        try:
+            subject, html = beta_access.build_referral_reward_email(reward.days_granted)
+            brevo_client.send_transactional_email(
+                to_email=reward.beneficiary_email, subject=subject, html_content=html,
+            )
+        except Exception:
+            logger.exception(
+                "Errore invio email reward referral",
+                extra={"domain": "dashboard", "event": "referral_reward_email_failed"},
+            )
+        if reward.role == "referred" and reward.beneficiary_chat_id:
+            analytics.track(reward.beneficiary_chat_id, "referral_signup", {"days_granted": reward.days_granted})
+    if unlocked_lifetime_founder_email:
+        try:
+            subject, html = beta_access.build_lifetime_founder_unlocked_email()
+            brevo_client.send_transactional_email(
+                to_email=unlocked_lifetime_founder_email, subject=subject, html_content=html,
+            )
+        except Exception:
+            logger.exception(
+                "Errore invio email Lifetime Founder sbloccato",
+                extra={"domain": "dashboard", "event": "lifetime_founder_email_failed"},
+            )
+
+
 def _sync_tally_lead_to_brevo(tally_submission_id: str, email: str, name: str = "") -> None:
     """Sincronizza un lead Tally su Brevo e, se sotto il tetto configurato,
     crea subito l'account beta e invia le credenziali (in background: risponde
@@ -281,6 +331,18 @@ def _sync_tally_lead_to_brevo(tally_submission_id: str, email: str, name: str = 
             extra={"domain": "dashboard", "event": "beta_access_auto_failed"},
         )
 
+    # L'account beta appena creato (o già esistente) potrebbe sbloccare reward
+    # referral rimasti 'pending' (come 'referred' o come 'referrer' in attesa).
+    try:
+        applied = store.apply_pending_referral_rewards(email)
+        if applied:
+            _send_referral_reward_emails(applied, unlocked_lifetime_founder_email=None)
+    except Exception:
+        logger.exception(
+            "Errore applicazione reward referral pendenti",
+            extra={"domain": "dashboard", "event": "referral_reward_apply_failed"},
+        )
+
 
 @app.route("/webhooks/tally", methods=["POST"])
 @limiter.limit("60 per minute")
@@ -300,11 +362,14 @@ def webhook_tally():
     fields = data.get("fields") or []
     email = _extract_tally_email(fields) if isinstance(fields, list) else None
     name = _extract_tally_name(fields) if isinstance(fields, list) else ""
+    ref = _extract_tally_ref(fields) if isinstance(fields, list) else None
 
     lead, is_new = store.save_tally_lead(
         tally_submission_id=submission_id,
         email=email,
         raw_payload=json.dumps(payload),
+        referral_code=secrets.token_urlsafe(6),
+        referred_by_code=ref,
     )
 
     logger.info(
@@ -312,9 +377,30 @@ def webhook_tally():
         extra={
             "domain": "dashboard",
             "event": "tally_lead_received",
-            "meta": {"is_new": is_new, "has_email": bool(email)},
+            "meta": {"is_new": is_new, "has_email": bool(email), "has_ref": bool(ref)},
         },
     )
+
+    # Attribuzione referral: va fatta sincrona (non nel thread di background) così
+    # i ReferralReward esistono già prima che _sync_tally_lead_to_brevo tenti di
+    # applicarli alla creazione dell'account beta.
+    if is_new and ref:
+        referrer_lead = store.get_tally_lead_by_referral_code(ref)
+        if referrer_lead and referrer_lead.id != lead.id:
+            try:
+                result = store.create_referral_rewards(lead, referrer_lead)
+                unlocked_email = referrer_lead.email if result.get("lifetime_founder_unlocked") else None
+                if unlocked_email:
+                    threading.Thread(
+                        target=_send_referral_reward_emails,
+                        args=([], unlocked_email),
+                        daemon=True,
+                    ).start()
+            except Exception:
+                logger.exception(
+                    "Errore creazione reward referral",
+                    extra={"domain": "dashboard", "event": "referral_rewards_create_failed"},
+                )
 
     if is_new and email:
         threading.Thread(
@@ -678,6 +764,19 @@ def web_login():
             session["user_logged_in"] = True
             session["chat_id"] = user.chat_id
             session["token_version"] = user.token_version or 0
+            try:
+                applied = store.apply_pending_referral_rewards(email)
+                if applied:
+                    threading.Thread(
+                        target=_send_referral_reward_emails,
+                        args=(applied, None),
+                        daemon=True,
+                    ).start()
+            except Exception:
+                logger.exception(
+                    "Errore applicazione reward referral pendenti al login",
+                    extra={"domain": "dashboard", "event": "referral_reward_apply_failed"},
+                )
             return redirect(next_url or _resolve_authenticated_redirect(user.chat_id))
 
         error = "Email o password errati."
@@ -771,6 +870,19 @@ def web_register():
         return _err("Errore durante la registrazione. Riprova.")
 
     analytics.track(web_chat_id, "user_signed_up", {"auth_method": "web", "storage_backend": "postgres"})
+    try:
+        applied = store.apply_pending_referral_rewards(email)
+        if applied:
+            threading.Thread(
+                target=_send_referral_reward_emails,
+                args=(applied, None),
+                daemon=True,
+            ).start()
+    except Exception:
+        logger.exception(
+            "Errore applicazione reward referral pendenti alla registrazione",
+            extra={"domain": "dashboard", "event": "referral_reward_apply_failed"},
+        )
     # Appena registrato: sessione persistente, così non deve rifare login subito.
     session.permanent = True
     session["user_logged_in"] = True
@@ -3419,6 +3531,32 @@ def api_onboarding_age_confirm():
     ip = request.headers.get("X-Forwarded-For", request.remote_addr)
     store.set_age_attestation(chat_id, ip_address=ip, platform="web")
     return jsonify({"status": "ok"})
+
+
+@app.route("/api/referral/link", methods=["GET"])
+def api_referral_link():
+    """Ritorna il link referral personale dell'utente autenticato e il suo stato
+    (quante persone ha già invitato, se ha sbloccato Lifetime Founder garantito).
+
+    Mostrato nella schermata di condivisione on-site (fine onboarding /
+    impostazioni): l'utente deve essere già autenticato, il referral è un
+    beneficio per chi è già un utente Expensum.
+    """
+    chat_id, _ = _resolve_request_chat_id()
+    if not chat_id:
+        return jsonify({"error": "Unauthorized"}), 401
+    user = _get_user_by_chat_id(chat_id)
+    if not user or not user.email:
+        return jsonify({"error": "User not found"}), 404
+
+    status = store.get_referral_status(user.email)
+    link = f"{Config.WEBAPP_BASE_URL}?ref={status['referral_code']}"
+    return jsonify({
+        "referral_code": status["referral_code"],
+        "link": link,
+        "referred_count": status["referred_count"],
+        "lifetime_founder_guaranteed": status["lifetime_founder_guaranteed"],
+    })
 
 
 @app.route("/api/demo/load", methods=["POST"])

@@ -492,6 +492,32 @@ class TallyLead(Base):
     synced_to_brevo       = Column(Boolean, default=False, nullable=False)
     beta_account_granted    = Column(Boolean, default=False, nullable=False)
     beta_account_granted_at = Column(DateTime, nullable=True)
+    # Referral: codice opaco assegnato a questo lead (usabile come referrer da altri) e,
+    # se questo lead è arrivato tramite un link di invito, il codice di chi lo ha invitato.
+    referral_code                  = Column(String, unique=True, index=True, nullable=True)
+    referred_by_code                = Column(String, index=True, nullable=True)
+    # Sbloccato quando questo lead (come referrer) accumula 3 referred lead: da onorare
+    # quando il flusso di acquisto Lifetime Founder (oggi solo marketing) verrà costruito.
+    lifetime_founder_guaranteed     = Column(Boolean, default=False, nullable=False)
+    lifetime_founder_guaranteed_at  = Column(DateTime, nullable=True)
+
+
+class ReferralReward(Base):
+    """Reward Pro (60gg) da un referral: uno per il 'referred', uno (a occorrenza
+    singola) per il 'referrer' — il tetto massimo per il referrer è fisso a
+    days_granted indipendentemente dal numero di persone invitate.
+    """
+    __tablename__ = "referral_rewards"
+
+    id                   = Column(Integer, primary_key=True, autoincrement=True)
+    beneficiary_email    = Column(String, nullable=False, index=True)
+    beneficiary_chat_id  = Column(String, nullable=True)
+    role                 = Column(String, nullable=False)  # 'referrer' | 'referred'
+    days_granted         = Column(Integer, nullable=False, default=60)
+    source_tally_lead_id = Column(Integer, ForeignKey("tally_leads.id"), nullable=True)
+    status               = Column(String, nullable=False, default="pending")  # 'pending'|'applied'
+    created_at           = Column(DateTime, default=datetime.utcnow)
+    applied_at           = Column(DateTime, nullable=True)
 
 
 class JobRun(Base):
@@ -1960,6 +1986,8 @@ class UserStore:
         tally_submission_id: str,
         email: Optional[str],
         raw_payload: str,
+        referral_code: Optional[str] = None,
+        referred_by_code: Optional[str] = None,
     ) -> tuple["TallyLead", bool]:
         """Salva un submit del form Tally in modo idempotente su tally_submission_id.
 
@@ -1979,11 +2007,199 @@ class UserStore:
                 tally_submission_id=tally_submission_id,
                 email=email,
                 raw_payload=raw_payload,
+                referral_code=referral_code,
+                referred_by_code=referred_by_code,
             )
             session.add(lead)
             session.commit()
             session.refresh(lead)
             return lead, True
+
+    def get_tally_lead_by_referral_code(self, referral_code: str) -> Optional["TallyLead"]:
+        """Risolve il lead Tally (referrer) a partire dal suo referral_code."""
+        with self.Session() as session:
+            return (
+                session.query(TallyLead)
+                .filter(TallyLead.referral_code == referral_code)
+                .first()
+            )
+
+    def create_referral_rewards(
+        self, lead: "TallyLead", referrer_lead: "TallyLead"
+    ) -> dict:
+        """Crea i ReferralReward per un nuovo lead 'referred' e, se non ne ha già
+        uno, per il referrer. Il referrer riceve un solo reward in assoluto
+        (tetto fisso, non additivo per numero di referral). Al 3° referral andato
+        a buon fine, marca il referrer come 'lifetime_founder_guaranteed' — e da lì
+        in poi il link smette di generare reward: i referral oltre il 3° vengono
+        comunque registrati (referred_by_code resta valorizzato, per tracciamento),
+        ma non creano più alcun ReferralReward, né per il referrer né per l'invitato.
+
+        Ritorna {'referrer_first_reward': bool, 'lifetime_founder_unlocked': bool,
+        'reward_cap_reached': bool} per permettere al chiamante di decidere quali
+        email inviare.
+        """
+        result = {
+            "referrer_first_reward": False,
+            "lifetime_founder_unlocked": False,
+            "reward_cap_reached": False,
+        }
+        if not lead.email or not referrer_lead.email:
+            return result
+
+        with self.Session() as session:
+            referred_count = (
+                session.query(TallyLead)
+                .filter(TallyLead.referred_by_code == referrer_lead.referral_code)
+                .count()
+            )
+            if referred_count > 3:
+                result["reward_cap_reached"] = True
+                return result
+
+            session.add(ReferralReward(
+                beneficiary_email=lead.email,
+                role="referred",
+                days_granted=60,
+                source_tally_lead_id=lead.id,
+                status="pending",
+            ))
+
+            existing_referrer_reward = (
+                session.query(ReferralReward)
+                .filter(
+                    ReferralReward.role == "referrer",
+                    ReferralReward.beneficiary_email == referrer_lead.email,
+                )
+                .first()
+            )
+            if not existing_referrer_reward:
+                session.add(ReferralReward(
+                    beneficiary_email=referrer_lead.email,
+                    role="referrer",
+                    days_granted=60,
+                    source_tally_lead_id=lead.id,
+                    status="pending",
+                ))
+                result["referrer_first_reward"] = True
+
+            referrer_row = (
+                session.query(TallyLead)
+                .filter(TallyLead.id == referrer_lead.id)
+                .first()
+            )
+            if referred_count >= 3 and referrer_row and not referrer_row.lifetime_founder_guaranteed:
+                referrer_row.lifetime_founder_guaranteed = True
+                referrer_row.lifetime_founder_guaranteed_at = datetime.utcnow()
+                result["lifetime_founder_unlocked"] = True
+
+            session.commit()
+            logger.info(
+                "[Referral] Reward creati per lead %s (referrer=%s)",
+                lead.id, referrer_lead.id,
+                extra={
+                    "domain": "dashboard",
+                    "event": "referral_rewards_created",
+                    "meta": {
+                        "referrer_first_reward": result["referrer_first_reward"],
+                        "lifetime_founder_unlocked": result["lifetime_founder_unlocked"],
+                    },
+                },
+            )
+            return result
+
+    def apply_pending_referral_rewards(self, email: str) -> list["ReferralReward"]:
+        """Applica i reward referral 'pending' per un'email appena diventata un
+        account reale (chat_id risolvibile). Ritorna i reward applicati con
+        successo, per permettere al chiamante di inviare le email di notifica.
+        """
+        email = (email or "").strip().lower()
+        if not email:
+            return []
+
+        user = self.get_user_by_email_any_status(email)
+        if not user:
+            return []
+
+        applied: list["ReferralReward"] = []
+        with self.Session() as session:
+            pending = (
+                session.query(ReferralReward)
+                .filter(
+                    ReferralReward.status == "pending",
+                    ReferralReward.beneficiary_email == email,
+                )
+                .all()
+            )
+            for reward in pending:
+                self.extend_trial_days(user.chat_id, reward.days_granted)
+                reward.status = "applied"
+                reward.applied_at = datetime.utcnow()
+                reward.beneficiary_chat_id = user.chat_id
+                applied.append(reward)
+            session.commit()
+            for reward in applied:
+                session.refresh(reward)
+
+        return applied
+
+    def get_or_create_referral_code(self, email: str) -> str:
+        """Risolve il referral_code di un utente a partire dalla sua email.
+
+        Normalmente l'utente ha già un TallyLead (arrivato dalla waitlist) con
+        un referral_code assegnato al submit. Per gli account creati fuori da quel
+        flusso (es. administrative provisioning) crea un TallyLead sintetico solo
+        per ospitare il referral_code, così la web app può sempre mostrare un link.
+        """
+        email = (email or "").strip().lower()
+        with self.Session() as session:
+            lead = (
+                session.query(TallyLead)
+                .filter(TallyLead.email == email, TallyLead.referral_code.isnot(None))
+                .first()
+            )
+            if lead:
+                return lead.referral_code
+
+            lead = session.query(TallyLead).filter(TallyLead.email == email).first()
+            if lead:
+                lead.referral_code = secrets.token_urlsafe(6)
+                session.commit()
+                return lead.referral_code
+
+            new_lead = TallyLead(
+                tally_submission_id=f"manual_{uuid.uuid4().hex}",
+                email=email,
+                referral_code=secrets.token_urlsafe(6),
+            )
+            session.add(new_lead)
+            session.commit()
+            return new_lead.referral_code
+
+    def get_referral_status(self, email: str) -> dict:
+        """Stato referral di un utente: codice, numero di inviti andati a buon
+        fine, e se ha già sbloccato l'accesso garantito a Lifetime Founder.
+        """
+        email = (email or "").strip().lower()
+        referral_code = self.get_or_create_referral_code(email)
+        with self.Session() as session:
+            referred_count = (
+                session.query(TallyLead)
+                .filter(TallyLead.referred_by_code == referral_code)
+                .count()
+            )
+            lead = (
+                session.query(TallyLead)
+                .filter(TallyLead.referral_code == referral_code)
+                .first()
+            )
+            lifetime_founder_guaranteed = bool(lead and lead.lifetime_founder_guaranteed)
+
+        return {
+            "referral_code": referral_code,
+            "referred_count": referred_count,
+            "lifetime_founder_guaranteed": lifetime_founder_guaranteed,
+        }
 
     def mark_tally_lead_synced(self, tally_submission_id: str) -> None:
         """Marca un lead Tally come sincronizzato su Brevo."""
@@ -2342,6 +2558,49 @@ class UserStore:
 
             session.commit()
             logger.info("[User %s] Trial Pro avviato (%d giorni).", chat_id, days)
+
+    def extend_trial_days(self, chat_id: str, days: int = 60) -> None:
+        """Estende (additivamente) il Pro dell'utente di N giorni — reward referral.
+
+        Se un trial è già attivo e non ancora scaduto, i giorni si sommano alla
+        scadenza esistente invece di sovrascriverla (altrimenti referral multipli
+        si cancellerebbero a vicenda). Se non c'è trial attivo (piano free, o Pro
+        permanente beta senza scadenza), parte da ora. Applicato anche agli account
+        Pro permanenti (beta_default): li trasforma in un Pro con scadenza — scelta
+        esplicita del reward referral, non un effetto collaterale.
+        """
+        chat_id = str(chat_id)
+        now = datetime.utcnow()
+
+        with self.Session() as session:
+            plan = session.query(UserPlan).filter_by(chat_id=chat_id).first()
+            if not plan:
+                self.get_user_plan(chat_id)
+                plan = session.query(UserPlan).filter_by(chat_id=chat_id).first()
+
+            old_plan = plan.plan_type
+            base = plan.trial_ends_at if (plan.trial_ends_at and plan.trial_ends_at > now) else now
+
+            plan.plan_type = "pro"
+            plan.is_trial = True
+            plan.trial_started_at = plan.trial_started_at or now
+            plan.trial_ends_at = base + timedelta(days=days)
+            plan.tokens_total = 3000000
+
+            session.add(PlanChange(
+                chat_id=chat_id,
+                from_plan=old_plan,
+                to_plan="pro",
+                change_type="referral_reward",
+                changed_at=now,
+                reason="referral_reward",
+            ))
+
+            session.commit()
+            logger.info(
+                "[User %s] Pro esteso di %d giorni (reward referral), nuova scadenza %s.",
+                chat_id, days, plan.trial_ends_at.isoformat(),
+            )
 
     def get_expired_trials(self, reference_time: datetime | None = None) -> list["User"]:
         """Utenti con trial attivo la cui scadenza è già passata (o oggi)."""

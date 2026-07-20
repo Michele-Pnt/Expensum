@@ -14,6 +14,7 @@ from src.user_store import (
     JobRun,
     LlmUsageEvent,
     PlanChange,
+    ReferralReward,
     TallyLead,
     TxEvent,
     User,
@@ -442,3 +443,49 @@ def test_record_tour_event(mock_db_session):
 
 def test_record_tour_event_unknown_user_is_noop(mock_db_session):
     mock_db_session.record_tour_event("does_not_exist", "tour_started", None)  # non deve sollevare
+
+
+def test_get_referral_metrics(mock_db_session):
+    store = mock_db_session
+    with store.Session() as s:
+        s.add(TallyLead(tally_submission_id="ref_t1", email="referrer@example.com",
+                        referral_code="CODEA", received_at=NOW - timedelta(days=5)))
+        s.add(TallyLead(tally_submission_id="ref_t2", email="friend1@example.com",
+                        referral_code="CODEB", referred_by_code="CODEA",
+                        received_at=NOW - timedelta(days=4), beta_account_granted=True))
+        s.add(TallyLead(tally_submission_id="ref_t3", email="friend2@example.com",
+                        referral_code="CODEC", referred_by_code="CODEA",
+                        received_at=NOW - timedelta(days=3)))
+        s.add(TallyLead(tally_submission_id="ref_t4", email="friend3@example.com",
+                        referral_code="CODED", referred_by_code="CODEA",
+                        lifetime_founder_guaranteed=True,
+                        lifetime_founder_guaranteed_at=NOW - timedelta(days=1),
+                        received_at=NOW - timedelta(days=1)))
+        s.add(ReferralReward(beneficiary_email="friend1@example.com", role="referred",
+                             days_granted=60, status="applied"))
+        s.add(ReferralReward(beneficiary_email="friend2@example.com", role="referred",
+                             days_granted=60, status="pending"))
+        s.add(ReferralReward(beneficiary_email="referrer@example.com", role="referrer",
+                             days_granted=60, status="applied"))
+        s.commit()
+
+        result = m.get_referral_metrics(s)
+
+    assert result["total_codes_generated"] == 4
+    assert result["total_referred_signups"] == 3
+    assert result["rewards"] == {
+        "referred": {"pending": 1, "applied": 1},
+        "referrer": {"pending": 0, "applied": 1},
+    }
+    assert result["lifetime_founder_unlocked"] == 1
+
+    assert len(result["top_referrers"]) == 1
+    top = result["top_referrers"][0]
+    assert top["email"] == "referrer@example.com"
+    assert top["referred_count"] == 3
+    assert top["lifetime_founder_guaranteed"] is False  # flag vive sul lead di CODEA, non su CODED
+
+    assert len(result["recent_signups"]) == 3
+    assert result["recent_signups"][0]["email"] == "friend3@example.com"
+    assert result["recent_signups"][0]["referrer_email"] == "referrer@example.com"
+    assert result["recent_signups"][0]["beta_account_granted"] is False

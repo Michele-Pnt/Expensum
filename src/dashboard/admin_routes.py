@@ -196,6 +196,18 @@ def business_metrics():
 
 
 # ---------------------------------------------------------------------------
+# Referral: leaderboard, reward, sblocco Lifetime Founder
+# ---------------------------------------------------------------------------
+@admin_bp.route("/admin/referrals", strict_slashes=False)
+@_admin_required
+def referrals():
+    """Stato del sistema referral: KPI, classifica referrer, invii recenti."""
+    with _store().Session() as s:
+        referral_data = admin_metrics.get_referral_metrics(s)
+    return render_template("referrals.html", referral=referral_data)
+
+
+# ---------------------------------------------------------------------------
 # Utenti + drill-down per utente
 # ---------------------------------------------------------------------------
 @admin_bp.route("/admin/users", strict_slashes=False)

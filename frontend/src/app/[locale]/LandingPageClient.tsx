@@ -23,11 +23,14 @@ const HOW_ICONS = [
   <BellRing key="bell" size={18} strokeWidth={1.5} />,
 ];
 
+const TALLY_BASE_SRC = "https://tally.so/embed/44pAAr?alignLeft=1&hideTitle=1&transparentBackground=1&dynamicHeight=1";
+
 export default function LandingPage() {
   const t = useTranslations("Landing");
   const [scrolled, setScrolled] = useState(false);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [expensesTracked, setExpensesTracked] = useState<number | null>(null);
+  const [tallySrc, setTallySrc] = useState(TALLY_BASE_SRC);
 
   useEffect(() => {
     let cancelled = false;
@@ -42,6 +45,15 @@ export default function LandingPage() {
     return () => {
       cancelled = true;
     };
+  }, []);
+
+  // Passthrough del codice referral (?ref=CODICE) verso il form Tally: nessun
+  // errore visibile se assente o invalido, il form funziona comunque.
+  useEffect(() => {
+    const ref = new URLSearchParams(window.location.search).get("ref");
+    if (ref) {
+      setTallySrc(`${TALLY_BASE_SRC}&ref=${encodeURIComponent(ref)}`);
+    }
   }, []);
 
   const scrollToWaitlist = () => {
@@ -165,7 +177,7 @@ export default function LandingPage() {
               <div className={styles.heroActions}>
                 <div id="hero-waitlist-form" style={{ width: "100%", maxWidth: "450px", marginTop: "0.5rem" }}>
                   <iframe
-                    data-tally-src="https://tally.so/embed/44pAAr?alignLeft=1&hideTitle=1&transparentBackground=1&dynamicHeight=1"
+                    data-tally-src={tallySrc}
                     width="100%"
                     height="200"
                     title="Expensum Early Access"

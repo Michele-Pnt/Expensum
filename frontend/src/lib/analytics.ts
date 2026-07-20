@@ -232,9 +232,18 @@ export function trackFeedbackSubmitted() {
 }
 
 // ---------------------------------------------------------------------------
-// Stub futuri (sistemi non ancora implementati — G5/G6)
+// Referral
+// ---------------------------------------------------------------------------
+
+// referral_signup resta emesso lato backend (src/dashboard/app.py), al momento
+// dell'applicazione del reward 'referred' — non c'è un equivalente frontend.
+export function trackReferralLinkGenerated() {
+  void sendEvent("referral_link_generated");
+}
+
+// ---------------------------------------------------------------------------
+// Stub futuri (sistemi non ancora implementati — G5)
 // ---------------------------------------------------------------------------
 
 // TODO [G5]: habit_threshold_reached — emettere da backend Python quando il sistema streak è live
-// TODO [G6]: referral_link_generated — emettere quando il sistema referral è live
 // TODO [G6]: referral_signup — emettere da backend Python al completamento onboarding con referral
