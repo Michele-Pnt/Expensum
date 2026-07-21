@@ -29,6 +29,8 @@
                 <li><a href="{{ url_for('admin.users_list') }}" class="{% if request.endpoint == 'admin.users_list' %}active{% endif %}">👥 Utenti</a></li>
                 <li><a href="{{ url_for('admin.feedbacks_list') }}" class="{% if request.endpoint == 'admin.feedbacks_list' %}active{% endif %}">📧 Feedback</a></li>
                 <li><a href="{{ url_for('admin.logs_viewer') }}" class="{% if request.endpoint == 'admin.logs_viewer' %}active{% endif %}">💻 Log</a></li>
+                <li><a href="https://eu.posthog.com/project/186394/dashboard/835311" target="_blank" rel="noopener noreferrer">🦔 PostHog ↗</a></li>
+                <li><a href="https://analytics.google.com/analytics/web/#/analysis/a395541870p538790680" target="_blank" rel="noopener noreferrer">📉 GA4 ↗</a></li>
             </ul>
             <div class="nav-footer">
                 <a href="{{ url_for('admin_logout') }}" class="btn-logout">Esci</a>
