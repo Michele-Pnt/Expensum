@@ -37,6 +37,17 @@ function loadGoogleAnalytics(): void {
   window.gtag = function gtag(...args: unknown[]) {
     window.dataLayer!.push(args);
   };
+  // Consent Mode: gtag.js applica di default "negato" per utenti in area
+  // UE finché non riceve questo segnale esplicito — anche se lo script
+  // viene caricato SOLO dopo che il nostro banner ha già raccolto il
+  // consenso "analytics" (quindi qui è sempre accurato dichiararlo concesso).
+  // Senza questa chiamata lo script si carica ma non invia mai dati.
+  window.gtag("consent", "default", {
+    analytics_storage: "granted",
+    ad_storage: "denied",
+    ad_user_data: "denied",
+    ad_personalization: "denied",
+  });
   window.gtag("js", new Date());
   window.gtag("config", measurementId, { anonymize_ip: true });
 }
