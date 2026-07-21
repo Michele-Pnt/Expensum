@@ -143,6 +143,27 @@ class Config:
     SCHEDULE_HOUR: int = int(os.getenv("SCHEDULE_HOUR", "7"))
     SCHEDULE_MINUTE: int = int(os.getenv("SCHEDULE_MINUTE", "0"))
 
+    # --- CATEGORIZZAZIONE ADATTIVA ---
+    # Sotto questa soglia la categoria proposta dal parser non viene accettata subito:
+    # la spesa resta sulla categoria fallback finché il pattern non si consolida.
+    CATEGORY_MATCH_THRESHOLD: float = float(os.getenv("CATEGORY_MATCH_THRESHOLD", "0.70"))
+    # Pesi dello score combinato (confidenza string-match LLM + similarità storica).
+    # Default 50/50: nessuno dei due segnali è a priori più affidabile dell'altro.
+    CATEGORY_MATCH_WEIGHT_LLM: float = float(os.getenv("CATEGORY_MATCH_WEIGHT_LLM", "0.5"))
+    CATEGORY_MATCH_WEIGHT_HISTORY: float = float(os.getenv("CATEGORY_MATCH_WEIGHT_HISTORY", "0.5"))
+    # Soglia (più alta della 0.6 usata per correggere typo su categorie note) per decidere
+    # se due nomi spesa liberi sono lo stesso pattern ricorrente: qui il rischio è
+    # raggruppare per errore eventi scorrelati, quindi serve più margine.
+    CATEGORY_CANDIDATE_CLUSTER_CUTOFF: float = float(os.getenv("CATEGORY_CANDIDATE_CLUSTER_CUTOFF", "0.8"))
+    # Occorrenze minime dello stesso pattern prima di promuoverlo a categoria reale
+    # (es. "25 ciabatte" sì, "1 ciabatta" no).
+    CATEGORY_PROMOTION_THRESHOLD: int = int(os.getenv("CATEGORY_PROMOTION_THRESHOLD", "5"))
+    # Finestra entro cui le occorrenze contano ai fini della promozione (stesso
+    # orizzonte trimestrale già usato per i budget suggestion in postgres_storage.py).
+    CATEGORY_PROMOTION_WINDOW_DAYS: int = int(os.getenv("CATEGORY_PROMOTION_WINDOW_DAYS", "90"))
+    # Categoria di fallback usata finché un pattern resta "pending".
+    CATEGORY_FALLBACK_NAME: str = os.getenv("CATEGORY_FALLBACK_NAME", "Altro")
+
     # --- LOGGING ---
     LOG_DIR: Path = Path(__file__).parent / "logs"
     # Default INFO in produzione: DEBUG va abilitato esplicitamente in dev via .env

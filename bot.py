@@ -52,6 +52,7 @@ import os
 
 from config import Config, setup_logging
 from src.expense_parser import ExpenseParser
+from src import category_matcher
 from src.notion_client import NotionFinanceClient
 from src.storage.base import FinancialStorage
 from src.storage.notion_storage import NotionStorage                                                                                                         
@@ -1493,6 +1494,23 @@ async def _process_expense_text(update: Update, context: ContextTypes.DEFAULT_TY
         return
 
     logger.info(f"[User {chat_id}] Risultato parser: {result['type']} - {result['name']} (€{result['amount']})")
+
+    # Categorizzazione adattiva: sotto soglia di match, traccia l'occorrenza invece di
+    # accettare/creare categorie a caso; promuove a categoria reale dopo N ricorrenze.
+    if result["type"] == "expense" and result.get("category"):
+        storage = _get_storage(chat_id)
+        known_categories = _user_store.get_user_category_names(chat_id)
+        with _user_store.Session() as cm_session:
+            match_result = category_matcher.evaluate_and_track(
+                cm_session,
+                storage,
+                _user_store,
+                chat_id,
+                result["name"],
+                result["category"],
+                known_categories,
+            )
+        result["category"] = match_result.category_name
 
     # Salva i dati nel contesto utente (evita il limite 64 byte di callback_data)
     context.user_data["pending_expense"] = {
