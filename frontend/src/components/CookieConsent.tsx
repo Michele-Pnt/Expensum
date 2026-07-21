@@ -6,9 +6,39 @@ import "vanilla-cookieconsent/dist/cookieconsent.css";
 declare global {
   interface Window {
     // Letto da src/lib/analytics.ts per decidere quali vendor notificare
-    // lato server (nessuno script di terze parti viene mai caricato qui).
+    // lato server (PostHog/Meta restano server-side; GA4 usa anche gtag.js,
+    // vedi loadGoogleAnalytics sotto).
     __cookieConsentApi?: { acceptedCategory: (category: string) => boolean };
+    dataLayer?: unknown[];
+    gtag?: (...args: unknown[]) => void;
   }
+}
+
+// Unico script di terze parti caricato nel browser, e solo dopo consenso
+// "analytics": gtag.js serve a GA4 per calcolare sessioni/engagement/
+// attribuzione sorgente traffico, impossibili da ricostruire lato server
+// (Measurement Protocol da solo non basta, vedi analytics.py::track_ga4).
+// Gli eventi custom di prodotto continuano ad arrivare a GA4 server-side
+// come oggi; solo il page_view "grezzo" lo gestisce gtag.js in autonomia,
+// per non contare due volte la stessa pageview.
+let gaLoaded = false;
+function loadGoogleAnalytics(): void {
+  if (gaLoaded) return;
+  const measurementId = process.env.NEXT_PUBLIC_GA4_MEASUREMENT_ID;
+  if (!measurementId) return;
+  gaLoaded = true;
+
+  const script = document.createElement("script");
+  script.src = `https://www.googletagmanager.com/gtag/js?id=${measurementId}`;
+  script.async = true;
+  document.head.appendChild(script);
+
+  window.dataLayer = window.dataLayer || [];
+  window.gtag = function gtag(...args: unknown[]) {
+    window.dataLayer!.push(args);
+  };
+  window.gtag("js", new Date());
+  window.gtag("config", measurementId, { anonymize_ip: true });
 }
 
 export default function CookieConsentBanner(): null {
@@ -18,10 +48,11 @@ export default function CookieConsentBanner(): null {
     import("vanilla-cookieconsent").then((CC) => {
       if (!mounted) return;
 
-      // Nessuno script di terze parti viene caricato: PostHog/GA4/Meta
-      // ricevono gli eventi server-side (vedi src/lib/analytics.ts +
-      // /api/track). Qui esponiamo solo lo stato di consenso, letto ad
-      // ogni evento per decidere quali vendor notificare lato backend.
+      // PostHog/Meta restano server-side (vedi src/lib/analytics.ts +
+      // /api/track): qui esponiamo lo stato di consenso, letto ad ogni
+      // evento per decidere quali vendor notificare lato backend. GA4 in
+      // più carica gtag.js nel browser quando la categoria "analytics" è
+      // accettata (mai altrimenti).
       //
       // CC.run() è dietro un import() dinamico: __cookieConsentApi non esiste
       // ancora quando i componenti montati in root layout (es. PageViewTracker)
@@ -30,11 +61,16 @@ export default function CookieConsentBanner(): null {
       // provato a tracciare di ritentare non appena il consenso è disponibile.
       const exposeConsentApi = () => {
         window.__cookieConsentApi = CC;
+        if (CC.acceptedCategory("analytics")) loadGoogleAnalytics();
         window.dispatchEvent(new Event("cc:consent-changed"));
       };
 
       CC.run({
-        revision: 1,
+        // Bump da 1 a 2: il consenso "analitici" ora comporta anche il
+        // caricamento di uno script di terze parti (gtag.js) nel browser,
+        // non solo invio server-side — chi aveva già acconsentito sotto le
+        // vecchie condizioni deve poterlo rivedere.
+        revision: 2,
         cookie: { expiresAfterDays: 182 },
 
         guiOptions: {
@@ -91,7 +127,7 @@ export default function CookieConsentBanner(): null {
                   {
                     title: "Cookie analitici",
                     description:
-                      "Ci aiutano a capire come usi Expensum (Google Analytics 4, PostHog). I dati sono aggregati e anonimi e vengono inviati dal nostro server, non dal browser.",
+                      "Ci aiutano a capire come usi Expensum. PostHog riceve i dati dal nostro server, in forma aggregata e anonima. Google Analytics 4 carica invece uno script nel tuo browser (necessario per riconoscere sessioni e provenienza del traffico) e imposta i cookie _ga.",
                     linkedCategory: "analytics",
                   },
                   {

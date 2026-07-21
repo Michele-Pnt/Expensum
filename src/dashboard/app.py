@@ -172,13 +172,16 @@ _TRACK_EVENT_RE = re.compile(r"^[a-z0-9_]{1,64}$")
 def api_track():
     """Riceve un evento di analytics dal frontend e lo inoltra server-side.
 
-    Il browser non parla mai direttamente con PostHog/GA4/Meta: questa rotta
-    è same-origin, quindi la CSP non deve concedere script-src/connect-src a
-    nessuno di quei domini. Il consenso cookie (letto lato client dal CMP)
-    decide quali vendor vengono effettivamente notificati. PostHog è nella
-    categoria "analytics" del banner esattamente come GA4 (vedi
-    CookieConsent.tsx) e va quindi gated allo stesso modo — non è esente dal
-    consenso solo perché la chiamata è server-side.
+    Il browser non parla mai direttamente con PostHog/Meta: questa rotta è
+    same-origin, la CSP non concede script-src/connect-src a quei domini.
+    GA4 fa eccezione: gtag.js viene caricato lato browser (solo dopo consenso
+    "analytics", vedi CookieConsent.tsx) perché serve a calcolare sessioni e
+    provenienza del traffico, impossibili da ricostruire da qui. Per questo
+    il page_view "grezzo" NON viene rinoltrato a GA4 in questa rotta: lo
+    gestisce già gtag.js in autonomia, rimandarlo duplicherebbe il conteggio.
+    Tutti gli altri eventi (custom di prodotto) continuano ad arrivare a GA4
+    da qui, invariato. PostHog resta gated dallo stesso consenso "analytics"
+    del banner, non è esente solo perché la chiamata è server-side.
     """
     data = request.get_json(silent=True) or {}
     event = data.get("event", "")
@@ -202,7 +205,9 @@ def api_track():
             analytics.identify(distinct_id, properties)
             return jsonify({"ok": True})
         analytics.track(distinct_id, event, properties)
-        analytics.track_ga4(distinct_id, event, properties)
+        if event != "page_view":
+            # page_view lo gestisce già gtag.js lato browser (vedi docstring).
+            analytics.track_ga4(distinct_id, event, properties)
         # Il tour guidato webapp prima viveva solo in localStorage: questi eventi
         # rispecchiano lo stato in Postgres (solo per sessioni autenticate, mai
         # per visitatori anonimi) così la dashboard admin sa chi lo salta e a
