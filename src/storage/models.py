@@ -130,6 +130,39 @@ class UserCategoryNotionLink(Base):
     average = Column(Numeric(12, 2), nullable=True)
 
 
+class CategoryCandidate(Base):
+    """Pattern di spesa ricorrenti non ancora promossi a categoria vera.
+
+    Traccia, per utente, le occorrenze di un nome spesa normalizzato la cui
+    categoria proposta dal parser non ha raggiunto la soglia di match. Una
+    volta superate `occurrences` occorrenze entro la finestra temporale
+    configurata, il candidate viene promosso a `UserCategory` reale tramite
+    `FinancialStorage.create_category` (mai un accesso diretto a Notion/Postgres).
+    """
+
+    __tablename__ = "category_candidates"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(String, ForeignKey("users.chat_id"), nullable=False)
+    normalized_name = Column(String, nullable=False)
+    display_name = Column(String, nullable=False)
+    fallback_category_id = Column(Integer, ForeignKey("user_categories.id"), nullable=True)
+    occurrences = Column(Integer, nullable=False, default=1)
+    first_seen_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    last_seen_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    last_score = Column(Numeric(4, 3), nullable=True)
+    status = Column(String(20), nullable=False, default="pending")
+    promoted_category_id = Column(Integer, ForeignKey("user_categories.id"), nullable=True)
+    promoted_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    __table_args__ = (
+        UniqueConstraint("user_id", "normalized_name", name="uq_category_candidates_user_normalized"),
+        Index("ix_category_candidates_user_id", "user_id"),
+        Index("ix_category_candidates_status", "status"),
+    )
+
+
 class Subscription(Base):
     """Tabella degli abbonamenti per utenti con backend PostgreSQL/SQLite."""
 

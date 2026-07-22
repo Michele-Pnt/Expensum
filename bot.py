@@ -53,6 +53,7 @@ import os
 
 from config import Config, setup_logging
 from src.expense_parser import ExpenseParser
+from src import category_matcher
 from src.notion_client import NotionFinanceClient
 from src.storage.base import FinancialStorage
 from src.storage.notion_storage import NotionStorage                                                                                                         
@@ -1818,6 +1819,26 @@ async def _process_expense_text(update: Update, context: ContextTypes.DEFAULT_TY
         return
 
     logger.info(f"[User {chat_id}] Risultato parser: {len(transactions)} transazione/i rilevate")
+
+    # Categorizzazione adattiva: sotto soglia di match, traccia l'occorrenza invece di
+    # accettare/creare categorie a caso; promuove a categoria reale dopo N ricorrenze.
+    # Applicata a ogni transazione (multi-spesa), non solo alla prima.
+    expense_txs = [tx for tx in transactions if tx["type"] == "expense" and tx.get("category")]
+    if expense_txs:
+        storage = _get_storage(chat_id)
+        known_categories = _user_store.get_user_category_names(chat_id)
+        with _user_store.Session() as cm_session:
+            for tx in expense_txs:
+                match_result = category_matcher.evaluate_and_track(
+                    cm_session,
+                    storage,
+                    _user_store,
+                    chat_id,
+                    tx["name"],
+                    tx["category"],
+                    known_categories,
+                )
+                tx["category"] = match_result.category_name
 
     # Multi-spesa: le transazioni con importo già noto (il caso comune) vengono presentate
     # TUTTE SUBITO, ciascuna con bottoni indipendenti (id dedicato) — l'utente le conferma

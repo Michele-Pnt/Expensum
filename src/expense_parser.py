@@ -95,6 +95,36 @@ def _build_user_prompt(message: str, categories: list[str], today: date) -> str:
     )
 
 
+def match_category_string(
+    category: str | None, known_categories: list[str], cutoff: float = 0.6,
+) -> tuple[str | None, float]:
+    """Confronta `category` con `known_categories` restituendo (nome_matchato, score).
+
+    Match esatto case-insensitive -> score 1.0. Altrimenti fuzzy match (difflib)
+    entro `cutoff` -> score = ratio di similarità. Nessun match -> (None, 0.0).
+    Riusata sia da `ExpenseParser._normalize` sia da `src/category_matcher.py`
+    per derivare una "confidenza" deterministica senza chiedere un punteggio all'LLM.
+    """
+    if not category or not known_categories:
+        return None, 0.0
+
+    category_lower = category.lower()
+    lowered_known = [c.lower() for c in known_categories]
+
+    matched = next((c for c in known_categories if c.lower() == category_lower), None)
+    if matched:
+        return matched, 1.0
+
+    matches = difflib.get_close_matches(category_lower, lowered_known, n=1, cutoff=cutoff)
+    if not matches:
+        return None, 0.0
+
+    best_match_lower = matches[0]
+    matched = next(c for c in known_categories if c.lower() == best_match_lower)
+    score = difflib.SequenceMatcher(None, category_lower, best_match_lower).ratio()
+    return matched, score
+
+
 def _extract_json(text: str) -> dict | None:
     """Estrae un oggetto JSON dal testo, anche se circondato da altro testo."""
     # Prova prima il parsing diretto
@@ -349,21 +379,7 @@ class ExpenseParser:
         # Category — verifica che sia tra quelle disponibili
         category = parsed.get("category")
         if category and self._categories:
-            # 1. Prova match esatto (case-insensitive)
-            category_lower = category.lower()
-            matched = next(
-                (c for c in self._categories if c.lower() == category_lower),
-                None,
-            )
-            
-            # 2. Se non c'è match esatto, prova il fuzzy match
-            if not matched:
-                matches = difflib.get_close_matches(category_lower, [c.lower() for c in self._categories], n=1, cutoff=0.6)
-                if matches:
-                    # Recupera il nome originale con le maiuscole corrette
-                    best_match_lower = matches[0]
-                    matched = next(c for c in self._categories if c.lower() == best_match_lower)
-
+            matched, _score = match_category_string(category, self._categories)
             category = matched or category
 
         # Name
