@@ -1,7 +1,7 @@
 {% extends "base.html" %}
 {% import "_macros.html" as ui %}
 {% block content %}
-<h1 class="page-title">Log {{ ui.info("Log strutturati in JSON Lines, un file per dominio (app, error, security, access), letti direttamente dai file su VPS — nessun SSH. Ogni riga ha ts, level, domain, event e meta. Per GDPR non contengono mai contenuto libero dell'utente (importi, testi, trascrizioni): solo identificatori pseudonimi e codici evento.") }}</h1>
+<h1 class="page-title">Log {{ ui.info("Log strutturati in JSON Lines, un file per dominio (app, error, security, usage), letti direttamente dai file su VPS — nessun SSH. Ogni riga ha ts, level, domain, event e meta. Per GDPR non contengono mai contenuto libero dell'utente (importi, testi, trascrizioni): solo identificatori pseudonimi e codici evento.") }}</h1>
 <p class="page-desc">Log strutturati JSON Lines per dominio, letti direttamente dal VPS. Nessun SSH.</p>
 
 <div class="stats-grid" style="margin-bottom: 1.5rem;">
@@ -13,10 +13,14 @@
         <div class="stat-label">Eventi security oggi {{ ui.info("Righe in security.jsonl di oggi: login falliti, blocchi rate-limit, prompt injection rilevate, eventi OAuth. Un aumento improvviso può indicare un attacco o un abuso in corso.") }}</div>
         <div class="stat-value" style="color: {% if summary.security_today > 0 %}var(--warning){% else %}var(--success){% endif %}">{{ summary.security_today }}</div>
     </div>
+    <div class="stat-card glass-panel" style="border-left: 4px solid var(--warning)">
+        <div class="stat-label">Fallimenti usage oggi {{ ui.info("Righe WARNING/ERROR in usage.jsonl di oggi: OCR scontrino non leggibile o campo non riconosciuto, trascrizione audio vuota, parsing spesa fallito. Sono fallimenti 'attesi' (input malformato dell'utente), non errori di sistema — per questo non contano in error.jsonl.") }}</div>
+        <div class="stat-value" style="color: {% if summary.usage_failures_today > 0 %}var(--warning){% else %}var(--success){% endif %}">{{ summary.usage_failures_today }}</div>
+    </div>
 </div>
 
 <form method="get" style="display:flex; gap:0.75rem; align-items:center; margin-bottom:1rem; flex-wrap:wrap;">
-    <label>File: {{ ui.info("Sceglie il dominio da ispezionare: app.jsonl (flusso generale, incl. esito cron/health-check), error.jsonl (solo ERROR+), security.jsonl (sicurezza), access.jsonl (azioni utente senza contenuto).") }}
+    <label>File: {{ ui.info("Sceglie il dominio da ispezionare: app.jsonl (flusso generale, incl. esito cron/health-check), error.jsonl (solo ERROR+), security.jsonl (sicurezza), usage.jsonl (azioni utente ed esiti: OCR, audio, parsing spesa — WARNING/ERROR inclusi).") }}
         <select name="file" onchange="this.form.submit()">
             {% for f in files %}<option value="{{ f }}" {% if f == selected_file %}selected{% endif %}>{{ f }}</option>{% endfor %}
         </select>

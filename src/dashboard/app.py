@@ -2480,7 +2480,7 @@ def _chat_parse_text(
     # Parsing LLM (multi-transazione: un messaggio può contenere più spese/entrate)
     try:
         parser = ExpenseParser(categories=categories)
-        results, usage = parser.parse_multi_with_usage(safe_input)
+        results, usage = parser.parse_multi_with_usage(safe_input, chat_id)
     except Exception as e:
         logger.exception("Errore ExpenseParser chat: %s", e)
         return None, None, "⚠️ Errore interno durante il parsing. Riprova."
@@ -2964,7 +2964,7 @@ def api_chat_photo():
             }), 413
 
         try:
-            ocr_text = OcrClient().extract_text_from_image(tmp_path)
+            ocr_text = OcrClient().extract_text_from_image(tmp_path, chat_id)
         except OCRError:
             return jsonify({"ok": False, "reply": "⚠️ Non riesco a leggere lo scontrino. Riprova con una foto più nitida e ben illuminata.", "saved": False})
         finally:

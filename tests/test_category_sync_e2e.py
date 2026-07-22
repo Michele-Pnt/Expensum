@@ -1,13 +1,12 @@
 """
-tests/test_category_sync_e2e.py — Test end-to-end per il sistema user_categories / system_categories.
+tests/test_category_sync_e2e.py — Test end-to-end per il sistema user_categories.
 
 Copre:
-  1. system_categories — tabella seeded con le 32 categorie di default
-  2. Postgres path — compute_category_averages: spese → medie → user_categories
-  3. Notion path   — sync_categories_to_local: mock API → user_categories
-  4. Router        — refresh_category_averages instrada correttamente per backend
-  5. Upsert idempotenza — upsert_user_categories aggiorna senza duplicati
-  6. Lookup helpers — get_notion_page_id_for_category, get_category_by_notion_page_id
+  1. Postgres path — compute_category_averages: spese → medie → user_categories
+  2. Notion path   — sync_categories_to_local: mock API → user_categories
+  3. Router        — refresh_category_averages instrada correttamente per backend
+  4. Upsert idempotenza — upsert_user_categories aggiorna senza duplicati
+  5. Lookup helpers — get_notion_page_id_for_category, get_category_by_notion_page_id
 
 Usa SQLite in-memory: nessuna dipendenza da DB reale o servizi esterni.
 """
@@ -20,36 +19,18 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from src.user_store import Base, User, UserStore
-from src.storage.models import Expense, SystemCategory, UserCategory, UserCategoryNotionLink
+from src.storage.models import Expense, UserCategory, UserCategoryNotionLink
 from src.category_sync import (
     compute_category_averages,
     sync_categories_to_local,
     refresh_category_averages,
 )
 
-SYSTEM_CATEGORIES_COUNT = 32  # categorie definite nella migration b2c3d4e5f6a7
-
 pytestmark = pytest.mark.integration
 
 # ---------------------------------------------------------------------------
 # Fixture condivise
 # ---------------------------------------------------------------------------
-
-def _seed_system_categories(eng):
-    names = [
-        "Alimentari", "Ristoranti", "Bar/Caffè", "Trasporti", "Benzina",
-        "Taxi", "Parcheggio", "Salute", "Farmacia", "Casa", "Bollette",
-        "Affitto", "Intrattenimento", "Cinema", "Gaming", "Streaming",
-        "Musica", "Sport", "Palestra", "Abbigliamento", "Cosmesi",
-        "Tecnologia", "Viaggi", "Regali", "Istruzione", "Libri",
-        "Animali", "Lavanderia", "Tabacchi", "Banca/Finanza",
-        "Assicurazione", "Altro",
-    ]
-    Session = sessionmaker(bind=eng)
-    with Session() as s:
-        s.add_all([SystemCategory(name=n) for n in names])
-        s.commit()
-
 
 @pytest.fixture(scope="module")
 def engine():
@@ -70,10 +51,9 @@ def store(engine):
 
 @pytest.fixture
 def db_session(engine):
-    """Schema azzerato, system categories e utenti di test reinseriti a ogni test."""
+    """Schema azzerato e utenti di test reinseriti a ogni test."""
     Base.metadata.drop_all(engine)
     Base.metadata.create_all(engine)
-    _seed_system_categories(engine)
 
     Session = sessionmaker(bind=engine)
     session = Session()
@@ -87,26 +67,7 @@ def db_session(engine):
 
 
 # ---------------------------------------------------------------------------
-# 1. system_categories — seed corretto
-# ---------------------------------------------------------------------------
-
-class TestSystemCategoriesSeeded:
-    def test_count(self, db_session):
-        cats = db_session.query(SystemCategory).all()
-        assert len(cats) == SYSTEM_CATEGORIES_COUNT
-
-    def test_contains_expected_names(self, db_session):
-        names = {c.name for c in db_session.query(SystemCategory).all()}
-        for expected in ("Alimentari", "Trasporti", "Salute", "Altro"):
-            assert expected in names, f"'{expected}' mancante da system_categories"
-
-    def test_names_are_unique(self, db_session):
-        names = [c.name for c in db_session.query(SystemCategory).all()]
-        assert len(names) == len(set(names)), "system_categories contiene duplicati"
-
-
-# ---------------------------------------------------------------------------
-# 2. Postgres path — compute_category_averages
+# 1. Postgres path — compute_category_averages
 # ---------------------------------------------------------------------------
 
 class _PostgresOnlySession:

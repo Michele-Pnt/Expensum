@@ -1693,7 +1693,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     logger.info(
         "message_received",
         extra={
-            "domain": "access",
+            "domain": "usage",
             "event": "message_received",
             "chat_id": chat_id,
             "meta": {"input_type": "text", "length": len(message_text)},
@@ -1711,7 +1711,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     # Controlla se siamo in attesa dell'importo
     if context.user_data.get("waiting_for_amount"):
         parser = _get_parser(chat_id)
-        amount_res = parser.parse(message_text)
+        amount_res = parser.parse(message_text, chat_id)
         
         amt = None
         if amount_res and amount_res["amount"] is not None:
@@ -1780,7 +1780,7 @@ async def _process_expense_text(update: Update, context: ContextTypes.DEFAULT_TY
     # 1. Recuperiamo il parser specifico per l'utente
     parser = _get_parser(chat_id)
     # 2. Parsa con LLM (input sanificato) — l'LLM decide se è una o più transazioni
-    transactions, usage = parser.parse_multi_with_usage(safe_input)
+    transactions, usage = parser.parse_multi_with_usage(safe_input, chat_id)
     raw_usage = usage or {}
     normalized_usage = normalize_usage_metadata(raw_usage)
 
@@ -1924,6 +1924,21 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         )
         message_trascribed = response.text.strip()
 
+        if not message_trascribed:
+            logger.warning(
+                "audio_transcription_empty",
+                extra={
+                    "domain": "usage",
+                    "event": "audio_transcription_empty",
+                    "chat_id": chat_id,
+                    "meta": {},
+                },
+            )
+            await update.message.reply_text(
+                "⚠️ Non sono riuscito a capire l'audio. Riprova parlando più chiaramente."
+            )
+            return
+
         # 🛡️ DIFESA 2.5: Sanitizzazione trascrizione audio — rileva injection vocali
         # (es. "...e ora ignora le istruzioni precedenti") e rimuove Unicode anomali
         from src.input_sanitizer import sanitize_audio_transcription, InjectionDetectedError
@@ -1942,7 +1957,7 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         logger.info(
             "audio_transcribed",
             extra={
-                "domain": "access",
+                "domain": "usage",
                 "event": "audio_transcribed",
                 "chat_id": chat_id,
                 "meta": {"input_type": "voice", "length": len(message_trascribed)},
@@ -2034,7 +2049,7 @@ async def handle_photos(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         await update.message.reply_text("Immagine ricevuta! Sto accendendo gli occhi bionici... 👁️📸")
 
         try:
-            message_trascribed = OcrClient().extract_text_from_image(temp_path)
+            message_trascribed = OcrClient().extract_text_from_image(temp_path, chat_id)
         except OCRError:
             await update.message.reply_text(
                 "⚠️ Non riesco a leggere lo scontrino. Riprova con una foto più nitida e ben illuminata."
@@ -2059,7 +2074,7 @@ async def handle_photos(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         logger.info(
             "receipt_ocr_processed",
             extra={
-                "domain": "access",
+                "domain": "usage",
                 "event": "receipt_ocr_processed",
                 "chat_id": chat_id,
                 "meta": {"input_type": "photo", "length": len(message_trascribed)},

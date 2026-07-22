@@ -423,15 +423,22 @@ def _last_active_map(s: Session) -> dict[str, datetime]:
     return last
 
 
-def get_retention(s: Session, windows: tuple[int, ...] = (7, 14, 60)) -> dict[str, Any]:
+def get_retention(
+    s: Session, windows: tuple[int, ...] = (7, 14, 60), now: datetime | None = None
+) -> dict[str, Any]:
     """Retention di prodotto su 7/14/60 giorni.
 
     - `rolling_active`: quanti utenti hanno avuto attività negli ultimi N giorni
       (stickiness "usano ancora l'app adesso").
     - `cohort_retention`: tra gli utenti il cui account ha almeno N giorni,
       quanti sono rimasti attivi fino ad almeno N giorni dopo la registrazione.
+
+    `now` iniettabile (pattern già usato in get_usage_chart) — nei test permette di
+    ancorare il calcolo alla data dei dati seminati invece che al tempo reale, che
+    altrimenti fa scadere silenziosamente le finestre rolling man mano che il tempo
+    reale si allontana dai timestamp fissi della fixture.
     """
-    now = datetime.utcnow()
+    now = now or datetime.utcnow()
     last_active = _last_active_map(s)
     users = s.query(User.chat_id, User.created_at).all()
     total_users = len(users)

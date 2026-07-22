@@ -96,15 +96,6 @@ class Transfer(Base):
     )
 
 
-class SystemCategory(Base):
-    """Categorie predefinite condivise fra tutti gli utenti. Immutabile a runtime."""
-
-    __tablename__ = "system_categories"
-
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    name = Column(String, nullable=False, unique=True)
-
-
 class UserCategory(Base):
     """Categorie base dell'utente.
 

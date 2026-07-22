@@ -138,12 +138,12 @@ class ExpenseParser:
             f"{len(self._categories)} categorie"
         )
 
-    def parse(self, message: str) -> dict | None:
+    def parse(self, message: str, chat_id: str = "unknown") -> dict | None:
         """Parsa un messaggio e restituisce solo il risultato strutturato."""
-        result, _usage = self.parse_with_usage(message)
+        result, _usage = self.parse_with_usage(message, chat_id)
         return result
 
-    def parse_with_usage(self, message: str) -> tuple[dict | None, dict]:
+    def parse_with_usage(self, message: str, chat_id: str = "unknown") -> tuple[dict | None, dict]:
         """
         Parsa un messaggio di testo libero e restituisce i dati della spesa.
 
@@ -156,12 +156,20 @@ class ExpenseParser:
         today = date.today()
         user_prompt = _build_user_prompt(message, self._categories, today)
 
-        logger.info("parsing_expense", extra={"meta": {"length": len(message)}})
+        logger.info(
+            "parsing_expense",
+            extra={"domain": "usage", "event": "parsing_expense", "chat_id": chat_id,
+                   "meta": {"length": len(message)}},
+        )
 
         try:
             raw_response, usage = self._call_mistral(user_prompt)
         except Exception as e:
-            logger.error(f"Errore LLM durante il parsing: {e}")
+            logger.error(
+                "expense_parsing_llm_failed",
+                extra={"domain": "usage", "event": "expense_parsing_llm_failed", "chat_id": chat_id,
+                       "meta": {"error_type": type(e).__name__}},
+            )
             return None, {}
 
         logger.debug(f"Risposta LLM grezza: {raw_response[:200]}")
@@ -170,22 +178,31 @@ class ExpenseParser:
         if parsed is None:
             logger.warning(
                 "json_extraction_failed",
-                extra={"meta": {"response_length": len(raw_response)}},
+                extra={"domain": "usage", "event": "json_extraction_failed", "chat_id": chat_id,
+                       "meta": {"response_length": len(raw_response)}},
             )
             return None, usage
 
         # Se il LLM dice che non è una spesa
         if "error" in parsed:
-            logger.info(f"Messaggio non riconosciuto come spesa: {parsed.get('error')}")
+            logger.info(
+                "expense_not_recognized",
+                extra={"domain": "usage", "event": "expense_not_recognized", "chat_id": chat_id,
+                       "meta": {"reason": parsed.get("error")}},
+            )
             return None, usage
 
         # Validazione e normalizzazione
         result = self._normalize(parsed, today)
         result["usage_metadata"] = usage
-        logger.info(f"Parsing completato: {result}")
+        logger.info(
+            "parsing_expense_completed",
+            extra={"domain": "usage", "event": "parsing_expense_completed", "chat_id": chat_id,
+                   "meta": {"type": result.get("type")}},
+        )
         return result, usage
 
-    def parse_multi_with_usage(self, message: str) -> tuple[list[dict] | None, dict]:
+    def parse_multi_with_usage(self, message: str, chat_id: str = "unknown") -> tuple[list[dict] | None, dict]:
         """
         Parsa un messaggio di testo libero e restituisce UNA O PIÙ transazioni.
 
@@ -201,12 +218,20 @@ class ExpenseParser:
         today = date.today()
         user_prompt = _build_user_prompt(message, self._categories, today)
 
-        logger.info("parsing_expense_multi", extra={"meta": {"length": len(message)}})
+        logger.info(
+            "parsing_expense_multi",
+            extra={"domain": "usage", "event": "parsing_expense_multi", "chat_id": chat_id,
+                   "meta": {"length": len(message)}},
+        )
 
         try:
             raw_response, usage = self._call_mistral(user_prompt)
         except Exception as e:
-            logger.error(f"Errore LLM durante il parsing multi: {e}")
+            logger.error(
+                "expense_parsing_multi_llm_failed",
+                extra={"domain": "usage", "event": "expense_parsing_multi_llm_failed", "chat_id": chat_id,
+                       "meta": {"error_type": type(e).__name__}},
+            )
             return None, {}
 
         logger.debug(f"Risposta LLM grezza (multi): {raw_response[:200]}")
@@ -215,12 +240,17 @@ class ExpenseParser:
         if parsed is None:
             logger.warning(
                 "json_extraction_failed_multi",
-                extra={"meta": {"response_length": len(raw_response)}},
+                extra={"domain": "usage", "event": "json_extraction_failed_multi", "chat_id": chat_id,
+                       "meta": {"response_length": len(raw_response)}},
             )
             return None, usage
 
         if "error" in parsed:
-            logger.info(f"Messaggio non riconosciuto come spesa: {parsed.get('error')}")
+            logger.info(
+                "expense_not_recognized",
+                extra={"domain": "usage", "event": "expense_not_recognized", "chat_id": chat_id,
+                       "meta": {"reason": parsed.get("error")}},
+            )
             return None, usage
 
         raw_transactions = parsed["transactions"] if isinstance(parsed.get("transactions"), list) else [parsed]
@@ -229,7 +259,11 @@ class ExpenseParser:
         if not results:
             return None, usage
 
-        logger.info(f"Parsing multi completato: {len(results)} transazione/i")
+        logger.info(
+            "parsing_expense_multi_completed",
+            extra={"domain": "usage", "event": "parsing_expense_multi_completed", "chat_id": chat_id,
+                   "meta": {"count": len(results)}},
+        )
         return results, usage
 
     def _call_mistral(self, user_prompt: str) -> tuple[str, dict]:

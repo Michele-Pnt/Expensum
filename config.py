@@ -257,8 +257,10 @@ def setup_logging() -> logging.Logger:
     """Configura il sistema di logging multi-file JSON Lines, separato per dominio.
 
     File prodotti in logs/: app.jsonl (flusso generale), error.jsonl (solo
-    ERROR+ cross-dominio), security.jsonl (eventi di sicurezza), access.jsonl
-    (azioni utente senza contenuto), debug.jsonl (solo se LOG_LEVEL=DEBUG).
+    ERROR+ cross-dominio), security.jsonl (eventi di sicurezza), usage.jsonl
+    (azioni utente ed esiti — spese/OCR/audio/parsing, senza contenuto libero,
+    include gli errori "attesi" gestiti come WARNING/ERROR di dominio usage),
+    debug.jsonl (solo se LOG_LEVEL=DEBUG).
     """
     Config.LOG_DIR.mkdir(exist_ok=True)
 
@@ -274,7 +276,7 @@ def setup_logging() -> logging.Logger:
         ("app.jsonl", logging.INFO, 14, None),
         ("error.jsonl", logging.ERROR, 30, None),
         ("security.jsonl", logging.WARNING, 180, {"security"}),
-        ("access.jsonl", logging.INFO, 30, {"access"}),
+        ("usage.jsonl", logging.INFO, 30, {"usage"}),
     ]
     if Config.LOG_LEVEL <= logging.DEBUG:
         handlers_spec.append(("debug.jsonl", logging.DEBUG, 3, None))

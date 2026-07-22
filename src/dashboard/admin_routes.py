@@ -285,7 +285,7 @@ def jobs_status():
 # ---------------------------------------------------------------------------
 # File JSONL prodotti da config.setup_logging(). `agent.log` resta come fallback
 # legacy finché non sparisce dai server.
-LOG_FILES = ["app.jsonl", "error.jsonl", "security.jsonl", "access.jsonl"]
+LOG_FILES = ["app.jsonl", "error.jsonl", "security.jsonl", "usage.jsonl"]
 _MAX_SCAN_LINES = 4000  # tetto di righe lette per file (bound di memoria)
 
 
@@ -337,10 +337,10 @@ def _read_log_entries(filename: str, level: str | None, limit: int) -> list[dict
 
 
 def _log_summary() -> dict[str, int]:
-    """Conteggio errori/eventi security di oggi (dai rispettivi file)."""
+    """Conteggio errori/eventi security/usage di oggi (dai rispettivi file)."""
     today = date.today().isoformat()
 
-    def _count_today(filename: str) -> int:
+    def _count_today(filename: str, levels: set[str] | None = None) -> int:
         path = Config.LOG_DIR / filename
         if not path.exists():
             return 0
@@ -348,13 +348,19 @@ def _log_summary() -> dict[str, int]:
         with open(path, encoding="utf-8", errors="replace") as fh:
             for raw in fh:
                 parsed = _parse_log_line(raw.strip()) if raw.strip() else None
-                if parsed and parsed["timestamp"].startswith(today):
-                    count += 1
+                if not parsed or not parsed["timestamp"].startswith(today):
+                    continue
+                if levels and parsed["level"] not in levels:
+                    continue
+                count += 1
         return count
 
     return {
         "errors_today": _count_today("error.jsonl"),
         "security_today": _count_today("security.jsonl"),
+        # Fallimenti "attesi" (OCR/audio/parsing spesa) — WARNING/ERROR nel dominio
+        # usage, distinti dagli errori di sistema in error.jsonl (vedi docs/logging.md).
+        "usage_failures_today": _count_today("usage.jsonl", levels={"WARNING", "ERROR"}),
     }
 
 

@@ -210,7 +210,9 @@ def test_overview_kpis(mock_db_session):
 def test_retention(mock_db_session):
     _seed(mock_db_session)
     with mock_db_session.Session() as s:
-        r = m.get_retention(s)
+        # `now` ancorato a NOW (il tempo della fixture), non al tempo reale — altrimenti
+        # le finestre rolling scadono silenziosamente col passare dei giorni reali.
+        r = m.get_retention(s, now=NOW)
     assert r["total_users"] == 2
     # Solo u1 ha account ≥ 60 giorni? No: u1 ha 40 giorni → nessun idoneo a 60.
     assert r["cohort_retention"][60]["eligible"] == 0
