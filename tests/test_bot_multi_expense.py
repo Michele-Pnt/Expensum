@@ -51,6 +51,17 @@ def test_process_expense_text_sends_all_confirmations_immediately(monkeypatch):
     monkeypatch.setattr(bot._user_store, "log_message", lambda *a, **k: None)
     monkeypatch.setattr(bot.analytics, "track", lambda *a, **k: None)
 
+    # Categorizzazione adattiva (src/category_matcher.py): pass-through, la categoria
+    # proposta dall'LLM resta invariata — qui si testa solo il flusso multi-spesa.
+    monkeypatch.setattr(bot, "_get_storage", lambda chat_id: MagicMock())
+    monkeypatch.setattr(bot._user_store, "get_user_category_names", lambda chat_id: [])
+    monkeypatch.setattr(bot._user_store, "Session", lambda: MagicMock())
+    monkeypatch.setattr(
+        bot.category_matcher,
+        "evaluate_and_track",
+        lambda session, storage, user_store, chat_id, name, category, known: MagicMock(category_name=category),
+    )
+
     context = MagicMock()
     context.user_data = {}
 
