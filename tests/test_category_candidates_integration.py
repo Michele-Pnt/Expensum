@@ -238,6 +238,25 @@ class TestPromotionCycle:
         )
         assert candidate.status == "pending"  # non "promoted": pronto per ritentare
 
+    def test_llm_proposing_the_fallback_itself_still_tracks_and_promotes(
+        self, db_session, user_store, mock_storage,
+    ):
+        """Il parser sceglie sempre una categoria dalla lista nota (vincolo di prompt),
+        quindi per una spesa sconosciuta propone il fallback stesso ("Altro") — un match
+        esatto con confidenza 1.0 contro le categorie note. Senza l'eccezione nel gate
+        primario di evaluate_and_track, questo bloccava il tracking per sempre: qualunque
+        spesa sconosciuta restava su "Altro" a vita, mai promossa."""
+        for _ in range(2):
+            result = _evaluate(db_session, mock_storage, user_store, "Scorie radioattive", "Altro")
+            assert result.category_name == "Altro"
+            assert result.promoted is False
+
+        result = _evaluate(db_session, mock_storage, user_store, "Scorie radioattive", "Altro")
+
+        assert result.promoted is True
+        assert result.category_name == "Scorie radioattive"
+        mock_storage.create_category.assert_called_once_with("Scorie radioattive")
+
     def test_mirror_updated_immediately_after_promotion(
         self, db_session, user_store, mock_storage,
     ):

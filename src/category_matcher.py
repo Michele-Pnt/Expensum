@@ -312,8 +312,16 @@ def evaluate_and_track(
     # gate separato, una spesa mai vista prima (storico=0) con match perfetto (LLM=1.0)
     # otterrebbe uno score combinato 50/50 pari a 0.5, sempre sotto soglia di default —
     # il che romperebbe la categorizzazione per ogni spesa nuova.
+    #
+    # Eccezione: il parser sceglie SEMPRE una categoria dalla lista nota (vincolo nel
+    # system prompt), quindi per una spesa che non riconosce propone il fallback stesso
+    # ("Altro") — che è a tutti gli effetti un match esatto con confidenza 1.0. Senza
+    # questa eccezione il gate primario intercetterebbe ogni fallback prima che il
+    # tracking delle occorrenze abbia la possibilità di scattare, rendendo la promozione
+    # automatica irraggiungibile nella pratica.
     matched_name, llm_confidence = match_category_string(category_from_llm, known_categories)
-    if matched_name is not None and llm_confidence >= Config.CATEGORY_MATCH_THRESHOLD:
+    is_fallback_match = matched_name is not None and matched_name.lower() == fallback_category_name.lower()
+    if matched_name is not None and not is_fallback_match and llm_confidence >= Config.CATEGORY_MATCH_THRESHOLD:
         return MatchResult(category_name=matched_name, score=llm_confidence)
 
     normalized = normalize_event_name(raw_name)

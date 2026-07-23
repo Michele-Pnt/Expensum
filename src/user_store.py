@@ -775,6 +775,23 @@ class UserStore:
             "password_hash": "TEXT",
             "token_version": "INTEGER DEFAULT 0",
             "pinned_dashboard_msg_id": "INTEGER",
+            "storage_backend": "TEXT DEFAULT 'notion'",
+            "preferred_language": "TEXT DEFAULT 'it'",
+            "currency": "TEXT DEFAULT 'EUR'",
+            "timezone": "TEXT DEFAULT 'Europe/Rome'",
+            "lifestyle_json": "TEXT",
+            "monthly_budget": "REAL",
+            "notification_time": "TEXT DEFAULT '08:00'",
+            "notifications_enabled": "BOOLEAN DEFAULT 1",
+            "onboarding_step": "TEXT DEFAULT 'pending'",
+            "onboarding_completed_at": "DATETIME",
+            "privacy_policy_version_accepted": "TEXT",
+            "privacy_accepted_at": "DATETIME",
+            "age_attestation_at": "DATETIME",
+            "has_demo_data": "BOOLEAN DEFAULT 0",
+            "tour_step": "TEXT",
+            "tour_status": "TEXT",
+            "tour_completed_at": "DATETIME",
         }
 
         dialect = self.engine.dialect.name
