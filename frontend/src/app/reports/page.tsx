@@ -3,7 +3,8 @@
 import { Suspense, useCallback, useEffect, useState } from "react";
 import { useSearchParams } from "next/navigation";
 import Link from "next/link";
-import { CircularProgress } from "@mui/material";
+import { CircularProgress, Select, MenuItem } from "@mui/material";
+import type { SelectChangeEvent } from "@mui/material";
 import { Lock } from "lucide-react";
 import styles from "./reports.module.css";
 import { trackReportViewed, trackReportGenerated } from "@/lib/analytics";
@@ -51,6 +52,7 @@ function ReportsPageInner() {
   const [generating, setGenerating] = useState<"weekly" | "monthly" | null>(null);
   const [generateError, setGenerateError] = useState<string | null>(null);
   const [isPro, setIsPro] = useState(false);
+  const [typeFilter, setTypeFilter] = useState<"all" | "weekly" | "monthly">("all");
 
   const [expandedToken, setExpandedToken] = useState<string | null>(null);
   const [details, setDetails] = useState<Record<string, ReportDetail>>({});
@@ -167,11 +169,46 @@ function ReportsPageInner() {
     );
   }
 
+  const filteredReports = typeFilter === "all"
+    ? reports
+    : reports.filter((r) => r.report_type === typeFilter);
+
   return (
     <div className={styles.container} data-tour="reports-list">
       <div className={styles.header}>
-        <h1 className={styles.title}>Storico Report</h1>
-        <p className={styles.subtitle}>Report settimanali e mensili generati automaticamente</p>
+        <div className={styles.headerTop}>
+          <div>
+            <h1 className={styles.title}>Storico Report</h1>
+            <p className={styles.subtitle}>Report settimanali e mensili generati automaticamente</p>
+          </div>
+          {reports.length > 0 && (
+            <Select
+              value={typeFilter}
+              onChange={(e: SelectChangeEvent) =>
+                setTypeFilter(e.target.value as "all" | "weekly" | "monthly")
+              }
+              size="small"
+              sx={{
+                minWidth: 170,
+                flexShrink: 0,
+                fontSize: "0.82rem",
+                fontWeight: 600,
+                borderRadius: 2,
+                background: "var(--color-surface)",
+              }}
+              MenuProps={{
+                PaperProps: {
+                  sx: { borderRadius: 2, mt: 0.5 },
+                },
+              }}
+              aria-label="Filtra per tipo di report"
+            >
+              <MenuItem value="all">Tutti i report</MenuItem>
+              <MenuItem value="weekly">Solo settimanali</MenuItem>
+              <MenuItem value="monthly">Solo mensili</MenuItem>
+            </Select>
+          )}
+        </div>
         {isPro ? (
           <div className={styles.generateRow}>
             <button
@@ -226,8 +263,15 @@ function ReportsPageInner() {
         </div>
       )}
 
+      {!error && reports.length > 0 && filteredReports.length === 0 && (
+        <div className={styles.empty}>
+          <div className={styles.emptyIcon}>📭</div>
+          <p>Nessun report {typeFilter === "weekly" ? "settimanale" : "mensile"} per ora.</p>
+        </div>
+      )}
+
       <div className={styles.list}>
-        {reports.map((r) => {
+        {filteredReports.map((r) => {
           const isExpanded = expandedToken === r.share_token;
           return (
             <div key={r.share_token}>

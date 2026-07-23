@@ -8,6 +8,14 @@
   margin-bottom: 2rem;
 }
 
+.headerTop {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+  flex-wrap: wrap;
+}
+
 .title {
   font-size: 1.5rem;
   font-weight: 700;
@@ -260,28 +268,67 @@
 .textCard {
   background: var(--color-surface);
   border: 1px solid var(--color-border);
+  border-top: 3px solid var(--color-primary);
   border-radius: 10px;
-  padding: 1.5rem;
+  padding: 1.75rem 1.75rem 1.5rem;
   margin-bottom: 1.25rem;
 }
 
 .textCardTitle {
-  font-size: 0.85rem;
+  font-size: 0.78rem;
   font-weight: 600;
-  color: var(--color-text-2);
+  color: var(--color-primary);
   text-transform: uppercase;
-  letter-spacing: 0.04em;
-  margin-bottom: 1rem;
+  letter-spacing: 0.08em;
+  margin-bottom: 1.1rem;
+}
+
+.reportDoc {
+  font-family: Georgia, "Iowan Old Style", "Palatino Linotype", Palatino, serif;
+}
+
+.reportDocHeader {
+  font-size: 1.05rem;
+  font-weight: 700;
+  color: var(--color-primary);
+  letter-spacing: 0.01em;
+  margin: 0 0 0.9rem 0;
+  padding-bottom: 0.75rem;
+  border-bottom: 1px solid var(--color-border);
 }
 
 .reportText {
-  font-family: "SF Mono", "Fira Code", ui-monospace, monospace;
-  font-size: 0.78rem;
-  line-height: 1.6;
+  font-family: inherit;
+  font-size: 0.92rem;
+  line-height: 1.85;
   color: var(--color-text);
   white-space: pre-wrap;
   word-break: break-word;
-  margin: 0;
+  margin: 0 0 1.1rem 0;
+}
+
+.reportText:last-child {
+  margin-bottom: 0;
+}
+
+/* Blocchi tabellari (es. "Categoria   Scorsa   /sett") — monospace per non
+   rompere l'allineamento a colonne dentro il font serif del resto del report. */
+.reportTable {
+  font-family: "SF Mono", "Fira Code", ui-monospace, monospace;
+  font-size: 0.76rem;
+  line-height: 1.7;
+  color: var(--color-text);
+  white-space: pre;
+  overflow-x: auto;
+  background: rgba(26, 54, 115, 0.04);
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  padding: 0.85rem 1rem;
+  margin: 0 0 1.1rem 0;
+}
+
+.reportTable:last-child {
+  margin-bottom: 0;
 }
 
 .empty {
@@ -302,30 +349,69 @@
 }
 
 /* Contenuto sfocato (piano Free, dal secondo mese) */
-.lockedWrap {
-  position: relative;
+
+/* Grafici: sfocatura, giusto per far intuire che ci sono dati senza leggerli */
+.lockedCharts {
+  filter: blur(7px);
+  opacity: 0.5;
+  pointer-events: none;
+  user-select: none;
 }
 
-.lockedContent {
-  filter: blur(6px);
-  opacity: 0.4;
+/* Testo report: il primo paragrafo (intro, senza cifre) resta leggibile, tutto il
+   resto — dove vivono i dati veri — è sfocato per davvero (blur diretto sul testo
+   stesso). Lo split avviene sul contenuto (vedi splitReportPeek in ReportContent.tsx),
+   non su un'altezza in px stimata: cosi' i numeri non trapelano mai. */
+.peekWrap {
+  position: relative;
+  max-height: 230px;
+  overflow: hidden;
+  border-radius: 8px;
+}
+
+.reportTextHidden {
+  font-family: inherit;
+  font-size: 0.92rem;
+  line-height: 1.85;
+  white-space: pre-wrap;
+  word-break: break-word;
+  margin: 0 0 1.1rem 0;
+  filter: blur(8px);
+  opacity: 0.5;
+  pointer-events: none;
+  user-select: none;
+}
+
+.reportTableHidden {
+  font-family: "SF Mono", "Fira Code", ui-monospace, monospace;
+  font-size: 0.76rem;
+  line-height: 1.7;
+  white-space: pre;
+  background: rgba(26, 54, 115, 0.04);
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  padding: 0.85rem 1rem;
+  margin: 0 0 1.1rem 0;
+  filter: blur(8px);
+  opacity: 0.5;
   pointer-events: none;
   user-select: none;
 }
 
 .lockedOverlay {
   position: absolute;
-  inset: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 65%;
   display: flex;
   flex-direction: column;
   align-items: center;
-  justify-content: center;
+  justify-content: flex-end;
   text-align: center;
-  gap: 0.4rem;
-  padding: 1.5rem;
-  background: rgba(3, 7, 18, 0.55);
-  border-radius: 10px;
-  z-index: 10;
+  gap: 0.35rem;
+  padding: 1.25rem 1.5rem;
+  background: linear-gradient(to bottom, transparent, rgba(3, 7, 18, 0.45) 35%, rgba(3, 7, 18, 0.75));
 }
 
 .lockedOverlayTitle {

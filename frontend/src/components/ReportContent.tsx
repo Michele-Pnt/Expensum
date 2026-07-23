@@ -2,6 +2,7 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
 import React from "react";
+import Link from "next/link";
 import {
   BarChart, Bar, LineChart, Line, PieChart, Pie, Cell,
   XAxis, YAxis, Tooltip, ResponsiveContainer, Legend, CartesianGrid,
@@ -20,6 +21,8 @@ export interface ReportDetail {
   text_content: string;
   report_data: Record<string, any> | null;
   created_at: string;
+  plan_type?: string;
+  locked?: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -78,7 +81,7 @@ export function buildReportSubtitle(report: ReportDetail): string {
   }
   const monthLabel = analyzedMonth.toLocaleDateString("it-IT", { month: "long" });
   const monthTitle = monthLabel ? monthLabel.charAt(0).toUpperCase() + monthLabel.slice(1) : "";
-  return `Analaisi del mese chiuso: ${monthTitle}`;
+  return `Analisi del mese chiuso: ${monthTitle}`;
 }
 
 export function stripTelegramMarkdown(text: string): string {
@@ -87,6 +90,79 @@ export function stripTelegramMarkdown(text: string): string {
     .replace(/_([^_]+)_/g, "$1")
     .replace(/```[\s\S]*?```/g, (m) => m.replace(/```/g, "").trim())
     .replace(/`([^`]+)`/g, "$1");
+}
+
+// Piano Free, dal secondo mese: mostra solo il primo paragrafo (intro, senza dati
+// veri) e sfoca tutto il resto (dove vivono le cifre). Split sul contenuto reale,
+// non su un'altezza in px stimata — cosi' i numeri non trapelano mai.
+function splitReportPeek(text: string): { peek: string; rest: string } {
+  const paragraphs = text.split(/\n{2,}/);
+  return {
+    peek: paragraphs[0] ?? "",
+    rest: paragraphs.slice(1).join("\n\n"),
+  };
+}
+
+// Separa la prima riga (titolo, es. "📊 Riepilogo di Luglio 2026") dal corpo, cosi'
+// possiamo trattarla come intestazione di un documento invece che come testo normale.
+function splitReportHeader(text: string): { header: string; body: string } {
+  const idx = text.indexOf("\n");
+  if (idx === -1) return { header: text.trim(), body: "" };
+  return { header: text.slice(0, idx).trim(), body: text.slice(idx + 1).trim() };
+}
+
+// Le etichette delle cifre chiave (entrate/uscite/risparmio/categoria) vanno in
+// grassetto, come su un vero estratto conto — il valore dopo i due punti resta
+// testo normale.
+const BOLD_LINE_PREFIXES = [
+  "entrate:",
+  "uscite:",
+  "risparmio netto:",
+  "categoria con la spesa maggiore:",
+];
+
+function renderReportLines(text: string): React.ReactNode {
+  const lines = text.split("\n");
+  return lines.map((line, i) => {
+    const lower = line.trim().toLowerCase();
+    const matchedPrefix = BOLD_LINE_PREFIXES.find((prefix) => lower.startsWith(prefix));
+    const colonIdx = line.indexOf(":");
+    const content = matchedPrefix && colonIdx !== -1
+      ? <><strong>{line.slice(0, colonIdx + 1)}</strong>{line.slice(colonIdx + 1)}</>
+      : line;
+    return (
+      <React.Fragment key={i}>
+        {content}
+        {i < lines.length - 1 ? "\n" : null}
+      </React.Fragment>
+    );
+  });
+}
+
+// Un blocco (paragrafo) è una tabella (es. "Categoria   Scorsa   /sett") se almeno
+// due righe hanno colonne allineate a spazi — va mostrato in monospace, altrimenti
+// l'allineamento si rompe con il font serif del resto del report.
+function isTabularBlock(block: string): boolean {
+  const alignedLines = block.split("\n").filter((l) => /\S {2,}\S/.test(l)).length;
+  return alignedLines >= 2;
+}
+
+// Divide il corpo in blocchi (paragrafi) e sceglie lo stile giusto per ciascuno:
+// prose in serif (con le cifre chiave in grassetto), tabelle in monospace allineato.
+// hidden=true sfoca il blocco (report bloccato, dal secondo mese su piano Free).
+function renderReportBody(text: string, hidden = false): React.ReactNode {
+  const blocks = text.split(/\n{2,}/).filter((b) => b.trim() !== "");
+  return blocks.map((block, i) => {
+    const tabular = isTabularBlock(block);
+    const className = tabular
+      ? (hidden ? styles.reportTableHidden : styles.reportTable)
+      : (hidden ? styles.reportTextHidden : styles.reportText);
+    return (
+      <pre key={i} className={className} aria-hidden={hidden || undefined}>
+        {hidden ? block : renderReportLines(block)}
+      </pre>
+    );
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -284,17 +360,48 @@ export function MonthlyCharts({ data }: { data: Record<string, any> }) {
 export function ReportBody({ report }: { report: ReportDetail }) {
   const isWeekly = report.report_type === "weekly";
   const hasChartData = report.report_data !== null;
+  const isLocked = report.locked === true;
+
+  const { header, body } = splitReportHeader(stripTelegramMarkdown(report.text_content));
 
   return (
     <div>
       {hasChartData && (
-        isWeekly
-          ? <WeeklyCharts data={report.report_data!} />
-          : <MonthlyCharts data={report.report_data!} />
+        <div className={isLocked ? styles.lockedCharts : undefined} aria-hidden={isLocked || undefined}>
+          {isWeekly
+            ? <WeeklyCharts data={report.report_data!} />
+            : <MonthlyCharts data={report.report_data!} />}
+        </div>
       )}
+
       <div className={styles.textCard}>
-        <div className={styles.textCardTitle}>Testo del report</div>
-        <pre className={styles.reportText}>{stripTelegramMarkdown(report.text_content)}</pre>
+        <div className={styles.textCardTitle}>Informazioni dettagliate:</div>
+        {isLocked ? (() => {
+          const { peek, rest } = splitReportPeek(body);
+          return (
+            <div className={styles.reportDoc}>
+              {header && <p className={styles.reportDocHeader}>{header}</p>}
+              <div className={styles.peekWrap}>
+                {renderReportBody(peek)}
+                {rest && renderReportBody(rest, true)}
+                <div className={styles.lockedOverlay}>
+                  <p className={styles.lockedOverlayTitle}>🔒 Continua a leggere con Premium</p>
+                  <p className={styles.lockedOverlayText}>
+                    Dal secondo mese i report Free si sfocano, per sbloccarli passa a Premium!
+                  </p>
+                  <Link href="/abbonamenti#premium" className={styles.lockedCta}>
+                    Passa a Premium
+                  </Link>
+                </div>
+              </div>
+            </div>
+          );
+        })() : (
+          <div className={styles.reportDoc}>
+            {header && <p className={styles.reportDocHeader}>{header}</p>}
+            {renderReportBody(body)}
+          </div>
+        )}
       </div>
     </div>
   );
