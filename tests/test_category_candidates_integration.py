@@ -7,6 +7,12 @@ scrive su una sessione locale mentre `UserStore.upsert_user_categories` (chiamat
 fase di promozione) ne apre una propria — serve un vero file condiviso, non una singola
 connessione `:memory:`, per riprodurre fedelmente l'interazione multi-sessione che si
 verifica in produzione (bot.py apre una sessione dedicata, UserStore le sue).
+
+Dal 2026-07-22 la promozione richiede conferma esplicita dell'utente: raggiunta la
+soglia, `evaluate_and_track` porta il candidate a "awaiting_confirm" (non promuove più
+da solo) e solo `category_matcher.confirm_promotion` esegue la creazione reale — vedi
+`_reach_threshold_and_confirm` più sotto, usato dai test che verificano lo stato dopo
+la promozione.
 """
 
 from datetime import datetime, timedelta
@@ -93,8 +99,19 @@ def _evaluate(session, storage, user_store, raw_name, category_from_llm, known_c
     )
 
 
+def _reach_threshold_and_confirm(session, storage, user_store, raw_name, category_from_llm, times=3):
+    """Ripete `_evaluate` fino a raggiungere la soglia (default 3, vedi
+    reset_thresholds) e conferma esplicitamente la promozione (Sì) — simula il
+    flusso completo utente: N occorrenze + click "Sì" sul prompt di conferma."""
+    result = None
+    for _ in range(times):
+        result = _evaluate(session, storage, user_store, raw_name, category_from_llm)
+    assert result.awaiting_confirmation is True
+    return category_matcher.confirm_promotion(session, storage, user_store, result.candidate_id)
+
+
 # ---------------------------------------------------------------------------
-# 1. Ciclo completo: N occorrenze sotto soglia -> auto-creazione categoria
+# 1. Ciclo completo: N occorrenze sotto soglia -> richiesta conferma -> promozione
 # ---------------------------------------------------------------------------
 
 class TestPromotionCycle:
@@ -105,6 +122,7 @@ class TestPromotionCycle:
             result = _evaluate(db_session, mock_storage, user_store, "Ciabatte", "Scarpe")
             assert result.category_name == "Altro"
             assert result.promoted is False
+            assert result.awaiting_confirmation is False
 
         mock_storage.create_category.assert_not_called()
 
@@ -116,7 +134,7 @@ class TestPromotionCycle:
         assert candidate.occurrences == 2
         assert candidate.status == "pending"
 
-    def test_reaching_threshold_promotes_to_real_category(
+    def test_reaching_threshold_asks_confirmation_instead_of_promoting_silently(
         self, db_session, user_store, mock_storage,
     ):
         for _ in range(2):
@@ -124,8 +142,41 @@ class TestPromotionCycle:
 
         result = _evaluate(db_session, mock_storage, user_store, "Ciabatte", "Scarpe")
 
-        assert result.promoted is True
-        assert result.category_name == "Ciabatte"
+        assert result.awaiting_confirmation is True
+        assert result.promoted is False
+        assert result.suggested_name == "Ciabatte"
+        assert result.category_name == "Altro"  # la spesa corrente resta comunque sul fallback
+        mock_storage.create_category.assert_not_called()  # nessuna creazione senza conferma esplicita
+
+        candidate = (
+            db_session.query(CategoryCandidate)
+            .filter_by(user_id="test_user_1", normalized_name="ciabatte")
+            .one()
+        )
+        assert candidate.status == "awaiting_confirm"
+        assert candidate.occurrences == 3
+
+    def test_awaiting_confirm_does_not_ask_again_or_increment(self, db_session, user_store, mock_storage):
+        for _ in range(3):
+            _evaluate(db_session, mock_storage, user_store, "Ciabatte", "Scarpe")
+
+        # Un'altra occorrenza mentre il candidate è "awaiting_confirm": non richiede
+        # di nuovo conferma né incrementa oltre.
+        result = _evaluate(db_session, mock_storage, user_store, "Ciabatte", "Scarpe")
+        assert result.awaiting_confirmation is False
+
+        candidate = (
+            db_session.query(CategoryCandidate)
+            .filter_by(user_id="test_user_1", normalized_name="ciabatte")
+            .one()
+        )
+        assert candidate.occurrences == 3
+
+    def test_confirm_promotion_creates_real_category(self, db_session, user_store, mock_storage):
+        match_result = _reach_threshold_and_confirm(db_session, mock_storage, user_store, "Ciabatte", "Scarpe")
+
+        assert match_result.promoted is True
+        assert match_result.category_name == "Ciabatte"
         mock_storage.create_category.assert_called_once_with("Ciabatte")
 
         candidate = (
@@ -134,25 +185,86 @@ class TestPromotionCycle:
             .one()
         )
         assert candidate.status == "promoted"
-        assert candidate.occurrences == 3
         assert candidate.promoted_category_id is not None
+
+    def test_decline_promotion_resets_occurrences(self, db_session, user_store, mock_storage):
+        result = None
+        for _ in range(3):
+            result = _evaluate(db_session, mock_storage, user_store, "Ciabatte", "Scarpe")
+        assert result.awaiting_confirmation is True
+
+        category_matcher.decline_promotion(db_session, result.candidate_id)
+        mock_storage.create_category.assert_not_called()
+
+        candidate = (
+            db_session.query(CategoryCandidate)
+            .filter_by(user_id="test_user_1", normalized_name="ciabatte")
+            .one()
+        )
+        assert candidate.status == "pending"
+        assert candidate.occurrences == 0
+
+        # Il pattern deve ripresentarsi da capo per essere richiesto di nuovo.
+        next_result = _evaluate(db_session, mock_storage, user_store, "Ciabatte", "Scarpe")
+        assert next_result.awaiting_confirmation is False
+        db_session.refresh(candidate)
+        assert candidate.occurrences == 1
+
+    def test_confirm_promotion_failure_falls_back_to_llm_category_without_raising(
+        self, db_session, user_store,
+    ):
+        """Se storage.create_category solleva (es. Notion API down), confirm_promotion
+        non propaga l'eccezione: il candidate torna 'pending' per un retry naturale
+        alla prossima occorrenza/conferma."""
+        failing_storage = MagicMock(spec=FinancialStorage)
+        failing_storage.create_category.side_effect = RuntimeError("Notion API down")
+
+        result = None
+        for _ in range(3):
+            result = _evaluate(db_session, failing_storage, user_store, "Ciabatte", "Scarpe")
+        assert result.awaiting_confirmation is True
+
+        match_result = category_matcher.confirm_promotion(
+            db_session, failing_storage, user_store, result.candidate_id
+        )
+
+        assert match_result.promoted is False
+        assert match_result.category_name == "Ciabatte"  # nome grezzo tracciato, non un crash
+
+        candidate = (
+            db_session.query(CategoryCandidate)
+            .filter_by(user_id="test_user_1", normalized_name="ciabatte")
+            .one()
+        )
+        assert candidate.status == "pending"  # non "promoted": pronto per ritentare
 
     def test_mirror_updated_immediately_after_promotion(
         self, db_session, user_store, mock_storage,
     ):
         """Regressione sul punto critico: senza l'upsert esplicito nel matcher, la
         categoria promossa resterebbe invisibile a _get_parser fino al sync notturno."""
-        for _ in range(3):
-            _evaluate(db_session, mock_storage, user_store, "Ciabatte", "Scarpe")
+        _reach_threshold_and_confirm(db_session, mock_storage, user_store, "Ciabatte", "Scarpe")
 
         names = user_store.get_user_category_names("test_user_1")
         assert "Ciabatte" in names
 
+    def test_promoted_category_name_is_capitalized(self, db_session, user_store, mock_storage):
+        """Il nome creato è sempre capitalizzato, anche se l'ultima occorrenza
+        tracciata era tutta minuscola."""
+        for _ in range(2):
+            _evaluate(db_session, mock_storage, user_store, "netflix", "Abbonamenti")
+        result = _evaluate(db_session, mock_storage, user_store, "netflix", "Abbonamenti")
+        assert result.awaiting_confirmation is True
+        assert result.suggested_name == "Netflix"
+
+        match_result = category_matcher.confirm_promotion(db_session, mock_storage, user_store, result.candidate_id)
+        assert match_result.category_name == "Netflix"
+        mock_storage.create_category.assert_called_once_with("Netflix")
+
     def test_next_occurrence_after_promotion_matches_new_category_directly(
         self, db_session, user_store, mock_storage,
     ):
-        for _ in range(3):
-            _evaluate(db_session, mock_storage, user_store, "Ciabatte", "Scarpe")
+        _reach_threshold_and_confirm(db_session, mock_storage, user_store, "Ciabatte", "Scarpe")
         mock_storage.create_category.reset_mock()
 
         # Ora "Ciabatte" è tra le known_categories (come farebbe bot.py rileggendola
@@ -187,13 +299,14 @@ class TestPromotionWindow:
 
         result = _evaluate(db_session, mock_storage, user_store, "Ciabatte", "Scarpe")
         assert result.promoted is False
+        assert result.awaiting_confirmation is False
 
         db_session.refresh(candidate)
         assert candidate.occurrences == 1
 
 
 # ---------------------------------------------------------------------------
-# 3. Clustering fuzzy tra pattern simili vs pattern scorrelati
+# 3. Clustering fuzzy/containment tra pattern simili vs pattern scorrelati
 # ---------------------------------------------------------------------------
 
 class TestClustering:
@@ -223,6 +336,18 @@ class TestClustering:
         assert len(candidates) == 2
         assert {c.occurrences for c in candidates} == {1, 1}
 
+    def test_containment_clusters_pattern_with_extra_word(self, db_session, user_store, mock_storage):
+        """'Netflix' e 'Netflix mensile' hanno un ratio difflib di 0.636, sotto il
+        cutoff di default 0.8 — senza containment finirebbero in candidate separati,
+        nessuno dei due promosso mai. Col criterio di containment di token
+        ({netflix} ⊆ {netflix, mensile}) convergono sullo stesso candidate."""
+        _evaluate(db_session, mock_storage, user_store, "Netflix", "Abbonamenti")
+        _evaluate(db_session, mock_storage, user_store, "Netflix mensile", "Abbonamenti")
+
+        candidates = db_session.query(CategoryCandidate).filter_by(user_id="test_user_1").all()
+        assert len(candidates) == 1
+        assert candidates[0].occurrences == 2
+
 
 # ---------------------------------------------------------------------------
 # 4. Score sopra soglia: nessuna scrittura, categoria accettata invariata
@@ -240,8 +365,7 @@ class TestPromotionNotionMirror:
             lambda name: {"id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890", "name": name}
         )
 
-        for _ in range(3):
-            _evaluate(db_session, notion_like_storage, user_store, "Ciabatte", "Scarpe")
+        _reach_threshold_and_confirm(db_session, notion_like_storage, user_store, "Ciabatte", "Scarpe")
 
         category = db_session.query(UserCategory).filter_by(
             user_id="test_user_1", name="Ciabatte",
@@ -258,8 +382,7 @@ class TestAlreadyPromotedCandidate:
         """Se le known_categories passate da bot.py non sono ancora state ricaricate
         dopo una promozione precedente, il matcher deve comunque riconoscere il
         candidate già promosso tramite lo storico, senza tentare una ri-promozione."""
-        for _ in range(3):
-            _evaluate(db_session, mock_storage, user_store, "Ciabatte", "Scarpe")
+        _reach_threshold_and_confirm(db_session, mock_storage, user_store, "Ciabatte", "Scarpe")
         mock_storage.create_category.reset_mock()
 
         # known_categories volutamente non aggiornata (non contiene "Ciabatte")

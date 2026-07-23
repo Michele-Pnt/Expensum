@@ -10,7 +10,8 @@ import os
 import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from datetime import datetime, date, timedelta
+from datetime import datetime, date, timedelta, timezone
+from zoneinfo import ZoneInfo
 import secrets
 import string
 from decimal import Decimal, ROUND_HALF_UP
@@ -578,6 +579,27 @@ class TxEvent(Base):
     )
 
 
+class UserStreak(Base):
+    """Stato della streak giornaliera (≥2 transazioni/giorno) per il reward Pro.
+
+    Cicli sequenziali a target crescente: 14gg → Pro 2 settimane → pausa → 28gg →
+    Pro 2 settimane → pausa → 42gg, ecc. Durante `cycle_state='reward_active'` le
+    transazioni non contano; il ciclo riparte (target aumentato) alla prima
+    transazione confermata dopo `reward_active_until`.
+    """
+    __tablename__ = "user_streaks"
+
+    chat_id = Column(String, ForeignKey("users.chat_id"), primary_key=True)
+    current_streak_days = Column(Integer, default=0, nullable=False)
+    streak_target_days = Column(Integer, default=14, nullable=False)
+    cycle_state = Column(String, default="counting", nullable=False)  # 'counting'|'reward_active'
+    reward_active_until = Column(DateTime, nullable=True)
+    last_qualifying_date = Column(Date, nullable=True)
+    today_count = Column(Integer, default=0, nullable=False)
+    today_date = Column(Date, nullable=True)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+
+
 # 5. IL MANAGER DEL DATABASE
 class UserStore:
     def __init__(
@@ -1082,6 +1104,17 @@ class UserStore:
             if not user:
                 return False
             user.email = new_email.lower().strip()
+            session.commit()
+            return True
+
+    def update_username(self, chat_id: str, new_name: str) -> bool:
+        """Aggiorna il nome visualizzato (rettifica Art. 16 GDPR). Ritorna False se l'utente non esiste."""
+        chat_id = str(chat_id)
+        with self.Session() as session:
+            user = session.query(User).filter(User.chat_id == chat_id).first()
+            if not user:
+                return False
+            user.username = new_name.strip()
             session.commit()
             return True
 
@@ -2559,15 +2592,30 @@ class UserStore:
             session.commit()
             logger.info("[User %s] Trial Pro avviato (%d giorni).", chat_id, days)
 
-    def extend_trial_days(self, chat_id: str, days: int = 60) -> None:
-        """Estende (additivamente) il Pro dell'utente di N giorni — reward referral.
+    def extend_trial_days(
+        self,
+        chat_id: str,
+        days: int = 60,
+        change_type: str = "referral_reward",
+        reason: str = "referral_reward",
+    ) -> datetime:
+        """Estende (additivamente) il Pro dell'utente di N giorni — reward referral/streak/ecc.
 
         Se un trial è già attivo e non ancora scaduto, i giorni si sommano alla
-        scadenza esistente invece di sovrascriverla (altrimenti referral multipli
+        scadenza esistente invece di sovrascriverla (altrimenti reward multipli
         si cancellerebbero a vicenda). Se non c'è trial attivo (piano free, o Pro
         permanente beta senza scadenza), parte da ora. Applicato anche agli account
         Pro permanenti (beta_default): li trasforma in un Pro con scadenza — scelta
-        esplicita del reward referral, non un effetto collaterale.
+        esplicita del reward, non un effetto collaterale.
+
+        Args:
+            change_type: valore loggato in `PlanChange.change_type` (es. "referral_reward",
+                "streak_reward"). Default invariato per non rompere i chiamanti esistenti.
+            reason: valore loggato in `PlanChange.reason`.
+
+        Returns:
+            La nuova `trial_ends_at` (UTC), utile ai chiamanti che devono sapere
+            esattamente quando il reward termina (es. la streak per calcolare la pausa).
         """
         chat_id = str(chat_id)
         now = datetime.utcnow()
@@ -2591,16 +2639,17 @@ class UserStore:
                 chat_id=chat_id,
                 from_plan=old_plan,
                 to_plan="pro",
-                change_type="referral_reward",
+                change_type=change_type,
                 changed_at=now,
-                reason="referral_reward",
+                reason=reason,
             ))
 
             session.commit()
             logger.info(
-                "[User %s] Pro esteso di %d giorni (reward referral), nuova scadenza %s.",
-                chat_id, days, plan.trial_ends_at.isoformat(),
+                "[User %s] Pro esteso di %d giorni (%s), nuova scadenza %s.",
+                chat_id, days, change_type, plan.trial_ends_at.isoformat(),
             )
+            return plan.trial_ends_at
 
     def get_expired_trials(self, reference_time: datetime | None = None) -> list["User"]:
         """Utenti con trial attivo la cui scadenza è già passata (o oggi)."""
@@ -2880,6 +2929,28 @@ class UserStore:
             logger.info("[Cleanup] Rimossi %d chat_messages più vecchi di %d giorni.", deleted, days)
         return deleted
 
+    def cleanup_stale_category_candidates(self, days: int = 90) -> int:
+        """Rimuove i pattern di categorizzazione adattiva mai promossi né in attesa
+        di conferma, più vecchi di `days` giorni (chiamata dal job notturno di retention).
+
+        Non tocca i candidate `promoted` (audit trail delle categorie reali create)
+        né `awaiting_confirm` (decisione dell'utente ancora pendente) — solo i
+        `pending` stagnanti, che contengono testo libero (nome spesa) accumulato
+        senza mai portare a nulla.
+        """
+        from src.storage.models import CategoryCandidate
+
+        cutoff = datetime.utcnow() - timedelta(days=days)
+        with self.Session() as session:
+            deleted = session.query(CategoryCandidate).filter(
+                CategoryCandidate.status == "pending",
+                CategoryCandidate.last_seen_at < cutoff,
+            ).delete(synchronize_session=False)
+            session.commit()
+        if deleted:
+            logger.info("[Cleanup] Rimossi %d category_candidates stagnanti più vecchi di %d giorni.", deleted, days)
+        return deleted
+
     def cleanup_old_job_runs(self, days: int = 90) -> int:
         """Rimuove le esecuzioni job più vecchie di `days` giorni.
 
@@ -2939,13 +3010,16 @@ class UserStore:
         outcome: str,
         source: str,
         reason: str | None = None,
-    ) -> None:
+    ) -> dict | None:
         """Registra l'esito di un tentativo di registrazione transazione (best-effort).
 
         Chiamata accanto a `analytics.track` nei punti in cui il bot/webapp già
         emettono `expense_tracked`/`expense_tracking_failed` verso PostHog: non
         sostituisce quell'invio, lo rispecchia in Postgres per la dashboard admin.
         Non solleva mai: il tracking non deve poter interrompere il salvataggio.
+
+        Ritorna il dict di `record_streak_activity` (ciclo streak completato) quando
+        `outcome='confirmed'` e `tx_type` è spesa/entrata, altrimenti None.
         """
         try:
             with self.Session() as session:
@@ -2960,6 +3034,146 @@ class UserStore:
                 session.commit()
         except Exception as exc:  # noqa: BLE001 — tracking best-effort
             logger.warning("[TxEvent] Impossibile registrare l'evento per %s: %s", chat_id, exc)
+
+        if outcome == "confirmed" and tx_type in ("expense", "income"):
+            return self.record_streak_activity(chat_id)
+        return None
+
+    def get_user_streak(self, chat_id: str) -> dict:
+        """Stato corrente della streak per l'utente (get-or-default, non crea la riga)."""
+        chat_id = str(chat_id)
+        with self.Session() as session:
+            streak = session.query(UserStreak).filter_by(chat_id=chat_id).first()
+            if not streak:
+                return {
+                    "current_streak_days": 0,
+                    "streak_target_days": 14,
+                    "cycle_state": "counting",
+                }
+            return {
+                "current_streak_days": streak.current_streak_days,
+                "streak_target_days": streak.streak_target_days,
+                "cycle_state": streak.cycle_state,
+            }
+
+    def record_streak_activity(self, chat_id: str) -> dict | None:
+        """Avanza la streak giornaliera (≥2 tx/giorno) dell'utente (best-effort).
+
+        Cicli sequenziali a target crescente (14 → 28 → 42gg...) separati da una
+        pausa che coincide col reward Pro concesso al completamento di ogni ciclo:
+        vedi il modello `UserStreak` per la semantica dei campi. La transizione
+        `reward_active → counting` è rilevata pigramente qui, alla prima
+        transazione confermata dopo la scadenza del reward (nessun job dedicato).
+
+        Ritorna `{"cycle_completed_days": int, "next_target_days": int}` quando in
+        questa chiamata è stato appena completato un ciclo, altrimenti None. Non
+        solleva mai: un errore qui non deve mai far fallire il salvataggio della
+        transazione principale.
+        """
+        chat_id = str(chat_id)
+        try:
+            with self.Session() as session:
+                user = session.query(User).filter_by(chat_id=chat_id).first()
+                tz = ZoneInfo(user.timezone) if user and user.timezone else ZoneInfo("Europe/Rome")
+                now = datetime.now(tz)
+                today = now.date()
+
+                streak = session.query(UserStreak).filter_by(chat_id=chat_id).first()
+                if not streak:
+                    streak = UserStreak(chat_id=chat_id)
+                    session.add(streak)
+
+                if streak.cycle_state == "reward_active":
+                    reward_until = streak.reward_active_until
+                    if reward_until and reward_until.tzinfo is None:
+                        reward_until = reward_until.replace(tzinfo=timezone.utc)
+                    if reward_until and now < reward_until:
+                        session.commit()
+                        return None
+                    # Reward scaduto: questa transazione riattiva il ciclo (target aumentato
+                    # nel completamento precedente) e conta come 1ª transazione del giorno.
+                    streak.cycle_state = "counting"
+                    streak.current_streak_days = 0
+                    streak.last_qualifying_date = None
+                    streak.reward_active_until = None
+
+                if streak.today_date != today:
+                    streak.today_count = 1
+                    streak.today_date = today
+                    session.commit()
+                    return None
+
+                streak.today_count += 1
+                if streak.today_count != 2:
+                    session.commit()
+                    return None
+
+                yesterday = today - timedelta(days=1)
+                if streak.last_qualifying_date == yesterday:
+                    streak.current_streak_days += 1
+                elif streak.last_qualifying_date == today:
+                    session.commit()
+                    return None
+                else:
+                    streak.current_streak_days = 1
+                streak.last_qualifying_date = today
+
+                if streak.current_streak_days == streak.streak_target_days:
+                    completed_target = streak.streak_target_days
+                    trial_ends_at = self.extend_trial_days(
+                        chat_id, days=14,
+                        change_type="streak_reward", reason="streak_reward",
+                    )
+                    streak.cycle_state = "reward_active"
+                    streak.reward_active_until = trial_ends_at
+                    streak.current_streak_days = 0
+                    streak.streak_target_days = completed_target + 14
+                    session.commit()
+                    logger.info(
+                        "[User %s] Streak completata: %d giorni. Reward Pro fino a %s.",
+                        chat_id, completed_target, trial_ends_at.isoformat(),
+                    )
+                    return {
+                        "cycle_completed_days": completed_target,
+                        "next_target_days": streak.streak_target_days,
+                    }
+
+                session.commit()
+                return None
+        except Exception as exc:  # noqa: BLE001 — streak best-effort
+            logger.warning("[UserStreak] Impossibile aggiornare la streak per %s: %s", chat_id, exc)
+            return None
+
+    def reset_stale_streaks(self) -> int:
+        """Azzera `current_streak_days` per chi ha saltato un giorno (job notturno, best-effort).
+
+        Senza una transazione futura non c'è altro modo di accorgersi che un utente
+        ha smesso di registrare durante un ciclo di conteggio: senza questo job lo
+        stato resterebbe congelato al valore dell'ultimo giorno buono per sempre. Il
+        target del ciclo (`streak_target_days`) non viene mai toccato qui — un
+        tentativo fallito non lo fa scalare, si riprova allo stesso target. Le righe
+        in `cycle_state='reward_active'` non vengono toccate: la loro transizione è
+        gestita pigramente da `record_streak_activity`.
+        """
+        reset_count = 0
+        try:
+            with self.Session() as session:
+                streaks = (
+                    session.query(UserStreak)
+                    .filter(UserStreak.cycle_state == "counting", UserStreak.current_streak_days > 0)
+                    .all()
+                )
+                for streak in streaks:
+                    user = session.query(User).filter_by(chat_id=streak.chat_id).first()
+                    tz = ZoneInfo(user.timezone) if user and user.timezone else ZoneInfo("Europe/Rome")
+                    today = datetime.now(tz).date()
+                    if streak.last_qualifying_date is not None and streak.last_qualifying_date < today - timedelta(days=1):
+                        streak.current_streak_days = 0
+                        reset_count += 1
+                session.commit()
+        except Exception as exc:  # noqa: BLE001 — job best-effort
+            logger.warning("[UserStreak] Errore reset streak notturno: %s", exc)
+        return reset_count
 
     def record_tour_event(self, chat_id: str, event: str, step_id: str | None) -> None:
         """Persiste lo stato del tour guidato webapp sull'utente (best-effort).

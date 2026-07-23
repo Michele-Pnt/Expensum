@@ -28,6 +28,7 @@ import json
 import time
 import threading
 from datetime import date, datetime, timedelta
+from zoneinfo import ZoneInfo
 from cachetools import TTLCache
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.events import EVENT_JOB_ERROR, EVENT_JOB_EXECUTED, EVENT_JOB_MISSED
@@ -35,7 +36,7 @@ import requests
 
 from src.billing_utils import get_next_billing_date
 from src.privacy_export import build_export_json, build_csv_rows, CSV_HEADER
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, InputFile, Update, WebAppInfo
+from telegram import BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, InputFile, Update, WebAppInfo
 from telegram.constants import ParseMode
 from telegram.request import HTTPXRequest
 from google.genai import types
@@ -236,6 +237,19 @@ def _get_parser(chat_id: str) -> ExpenseParser:
     categories = _user_store.get_user_category_names(chat_id)
     logger.info(f"Parser con {len(categories)} categorie per {chat_id}")
     return ExpenseParser(categories=categories)
+
+
+def _get_message_when(update: Update, chat_id: str) -> datetime:
+    """Timestamp del messaggio nel fuso orario dell'utente (default Europe/Rome).
+
+    Usato dal parser per l'hint di categoria sensibile all'ora del giorno (es. "coca"
+    colazione vs aperitivo) — serve l'ora locale reale, non l'UTC grezzo di Telegram.
+    """
+    prefs = _user_store.get_user_preferences(chat_id)
+    tz = ZoneInfo(prefs.get("timezone") or "Europe/Rome")
+    message_date = update.effective_message.date if update.effective_message else None
+    when = message_date or datetime.now(tz)
+    return when.astimezone(tz)
 
 
 def _is_authorized(update: Update) -> bool:
@@ -768,6 +782,31 @@ async def cmd_modify(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 # Dashboard / Status
 # ---------------------------------------------------------------------------
 
+def _build_streak_bar(current_streak_days: int, streak_target_days: int, cycle_state: str) -> str:
+    """Barra a blocchi emoji dello stato streak."""
+    if cycle_state == "reward_active":
+        return "🟩" * 14
+    filled = max(0, min(current_streak_days, streak_target_days))
+    return "🟩" * filled + "⬜" * (streak_target_days - filled)
+
+
+def _build_streak_section(chat_id: str) -> str:
+    """Riga streak per la dashboard: didascalia breve (per capire cosa indica la barra) + barra.
+
+    Nessuna cifra esatta (giorno X/Y) — solo la spiegazione di cosa rappresenta la barra,
+    come richiesto: la barra da sola non basta a farla capire all'utente.
+    """
+    streak = _user_store.get_user_streak(chat_id)
+    bar = _build_streak_bar(
+        streak["current_streak_days"], streak["streak_target_days"], streak["cycle_state"]
+    )
+    if streak["cycle_state"] == "reward_active":
+        caption = "✨ Premio Pro attivo — streak in pausa fino alla scadenza"
+    else:
+        caption = "🔥 Streak verso il prossimo premio Pro (2 settimane gratis)"
+    return f"{caption}\n{bar}"
+
+
 async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Invia la dashboard finanziaria e la fissa in alto nella chat."""
     if not _is_authorized(update):
@@ -961,13 +1000,20 @@ def _build_dashboard_for_user(chat_id: str) -> str:
         # Ordina per spesa del mese corrente decrescente
         categories_spending.sort(key=lambda c: c["spent_this_month"], reverse=True)
 
-    return build_dashboard_text(
+    dashboard_text = build_dashboard_text(
         accounts=accounts,
         subscriptions=subscriptions,
         categories_spending=categories_spending,
         is_premium=is_premium,
         user_plan=plan,
     )
+
+    try:
+        dashboard_text += "\n\n" + _build_streak_section(chat_id)
+    except Exception as e:
+        logger.warning(f"[User {chat_id}] Errore calcolo sezione streak: {e}")
+
+    return dashboard_text
 
 
 async def _refresh_pinned_dashboard(bot, chat_id: str) -> None:
@@ -1712,7 +1758,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     # Controlla se siamo in attesa dell'importo
     if context.user_data.get("waiting_for_amount"):
         parser = _get_parser(chat_id)
-        amount_res = parser.parse(message_text, chat_id)
+        amount_res = parser.parse(message_text, chat_id, when=_get_message_when(update, chat_id))
         
         amt = None
         if amount_res and amount_res["amount"] is not None:
@@ -1781,7 +1827,9 @@ async def _process_expense_text(update: Update, context: ContextTypes.DEFAULT_TY
     # 1. Recuperiamo il parser specifico per l'utente
     parser = _get_parser(chat_id)
     # 2. Parsa con LLM (input sanificato) — l'LLM decide se è una o più transazioni
-    transactions, usage = parser.parse_multi_with_usage(safe_input, chat_id)
+    transactions, usage = parser.parse_multi_with_usage(
+        safe_input, chat_id, when=_get_message_when(update, chat_id),
+    )
     raw_usage = usage or {}
     normalized_usage = normalize_usage_metadata(raw_usage)
 
@@ -1821,9 +1869,11 @@ async def _process_expense_text(update: Update, context: ContextTypes.DEFAULT_TY
     logger.info(f"[User {chat_id}] Risultato parser: {len(transactions)} transazione/i rilevate")
 
     # Categorizzazione adattiva: sotto soglia di match, traccia l'occorrenza invece di
-    # accettare/creare categorie a caso; promuove a categoria reale dopo N ricorrenze.
+    # accettare/creare categorie a caso; dopo N ricorrenze chiede conferma all'utente
+    # prima di creare la categoria reale (vedi category_promotions più sotto).
     # Applicata a ogni transazione (multi-spesa), non solo alla prima.
     expense_txs = [tx for tx in transactions if tx["type"] == "expense" and tx.get("category")]
+    category_promotions = []  # match_result in attesa di conferma Sì/No, inviati dopo la sessione DB
     if expense_txs:
         storage = _get_storage(chat_id)
         known_categories = _user_store.get_user_category_names(chat_id)
@@ -1839,6 +1889,8 @@ async def _process_expense_text(update: Update, context: ContextTypes.DEFAULT_TY
                     known_categories,
                 )
                 tx["category"] = match_result.category_name
+                if match_result.awaiting_confirmation:
+                    category_promotions.append(match_result)
 
     # Multi-spesa: le transazioni con importo già noto (il caso comune) vengono presentate
     # TUTTE SUBITO, ciascuna con bottoni indipendenti (id dedicato) — l'utente le conferma
@@ -1873,6 +1925,19 @@ async def _process_expense_text(update: Update, context: ContextTypes.DEFAULT_TY
     if sequential:
         context.user_data["expense_queue"] = sequential
         await _present_next_pending_expense(context, chat_id)
+
+    # Conferma categorizzazione adattiva — inviata dopo il resto (sessione DB già
+    # chiusa, non la teniamo aperta durante l'I/O Telegram).
+    for match_result in category_promotions:
+        keyboard = InlineKeyboardMarkup([[
+            InlineKeyboardButton("✅ Sì", callback_data=f"catpromote_yes:{match_result.candidate_id}"),
+            InlineKeyboardButton("❌ No", callback_data=f"catpromote_no:{match_result.candidate_id}"),
+        ]])
+        await update.message.reply_text(
+            f"📂 Ho notato che scrivi spesso spese simili — vuoi che crei una categoria "
+            f"dedicata «{match_result.suggested_name}»?",
+            reply_markup=keyboard,
+        )
 
 async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handler per messaggi vocali — trascrizione e parsing spesa con LLM."""
@@ -2195,7 +2260,19 @@ async def _save_to_notion(query, context, chat_id: str, data: dict | None, accou
             "storage_backend": user_obj.storage_backend if user_obj else "unknown",
             "transaction_type": tx_type,
         })
-        _user_store.record_tx_event(chat_id, tx_type, input_method, "confirmed", "telegram")
+        streak_result = _user_store.record_tx_event(chat_id, tx_type, input_method, "confirmed", "telegram")
+        if streak_result:
+            try:
+                await query._bot.send_message(
+                    chat_id=chat_id,
+                    text=(
+                        f"🎉 Hai completato {streak_result['cycle_completed_days']} giorni di streak!\n"
+                        f"Ti abbiamo regalato 2 settimane di Pro.\n"
+                        f"La prossima streak sarà di {streak_result['next_target_days']} giorni."
+                    ),
+                )
+            except Exception as _se:
+                logger.warning(f"[User {chat_id}] Errore invio messaggio streak: {_se}")
 
         # Aggiorna la dashboard pinnata in background (se esiste)
         try:
@@ -2673,6 +2750,30 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         async def _send(text, reply_markup=None):
             await query.edit_message_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=reply_markup)
         await _advance_transfer_flow(context, chat_id, _send)
+        return
+
+    if query.data.startswith("catpromote_yes:") or query.data.startswith("catpromote_no:"):
+        decision_yes = query.data.startswith("catpromote_yes:")
+        candidate_id = int(query.data.split(":", 1)[1])
+
+        if decision_yes:
+            storage = _get_storage(chat_id)
+            with _user_store.Session() as cm_session:
+                match_result = category_matcher.confirm_promotion(cm_session, storage, _user_store, candidate_id)
+            if match_result.promoted:
+                await query.edit_message_text(
+                    f"✅ Categoria «{match_result.promoted_category_name}» creata! Le prossime spese simili "
+                    "verranno categorizzate automaticamente."
+                )
+            else:
+                await query.edit_message_text(
+                    "⚠️ Non sono riuscito a creare la categoria in questo momento (problema temporaneo col "
+                    "tuo storage). Riproverò automaticamente alla prossima spesa simile."
+                )
+        else:
+            with _user_store.Session() as cm_session:
+                category_matcher.decline_promotion(cm_session, candidate_id)
+            await query.edit_message_text("👍 Nessun problema, non creo la categoria.")
         return
 
 
@@ -3180,13 +3281,27 @@ def _nightly_retention_cleanup() -> None:
         deleted_oauth = _user_store.cleanup_expired_oauth_sessions()
         deleted_chats = _user_store.cleanup_old_chat_messages(days=90)
         deleted_jobs = _user_store.cleanup_old_job_runs(days=90)
+        deleted_candidates = _user_store.cleanup_stale_category_candidates(days=90)
         logger.info(
             "[NightlyRetention] OAuth sessions rimosse: %d, chat_messages rimossi: %d, "
-            "job_runs rimossi: %d",
-            deleted_oauth, deleted_chats, deleted_jobs,
+            "job_runs rimossi: %d, category_candidates rimossi: %d",
+            deleted_oauth, deleted_chats, deleted_jobs, deleted_candidates,
         )
     except Exception as e:
         logger.error(f"[NightlyRetention] Errore job: {e}")
+
+
+def _nightly_streak_reset_job() -> None:
+    """Job APScheduler alle 03:15 — azzera le streak interrotte da un giorno saltato.
+
+    Safety net: senza una transazione futura non c'è altro modo di accorgersi che un
+    utente ha smesso di registrare durante un ciclo di conteggio.
+    """
+    try:
+        reset_count = _user_store.reset_stale_streaks()
+        logger.info("[NightlyStreakReset] Streak azzerate: %d", reset_count)
+    except Exception as e:
+        logger.error(f"[NightlyStreakReset] Errore job: {e}")
 
 
 def _health_check_job() -> None:
@@ -3274,6 +3389,29 @@ def _record_scheduler_event(event) -> None:
 
 async def _start_scheduler(app: Application) -> None:
     """Hook post_init PTB: cattura il loop PTB e avvia APScheduler con il loop corretto."""
+    # Registra i comandi via API Telegram (setMyCommands) a ogni avvio: sostituisce
+    # la registrazione manuale su BotFather, che andrebbe rifatta a mano ogni volta
+    # che si aggiunge/rimuove un comando.
+    await app.bot.set_my_commands([
+        BotCommand("start", "Avvia o riavvia il bot"),
+        BotCommand("registrati", "Registra un nuovo account"),
+        BotCommand("login", "Accedi a un account esistente"),
+        BotCommand("logout", "Esci dall'account corrente"),
+        BotCommand("impostazioni", "Menu impostazioni account"),
+        BotCommand("modify", "Modifica l'ultima spesa registrata"),
+        BotCommand("trasferimento", "Registra un trasferimento tra conti"),
+        BotCommand("piano", "Mostra il tuo piano e i token residui"),
+        BotCommand("status", "Stato sincronizzazione dati"),
+        BotCommand("weekly_report", "Report settimanale spese"),
+        BotCommand("weekly_plan", "Piano settimanale spese"),
+        BotCommand("monthly_report", "Report mensile spese"),
+        BotCommand("monthly_plan", "Piano mensile spese"),
+        BotCommand("privacy", "Link alla privacy policy"),
+        BotCommand("export", "Esporta i tuoi dati (Art. 15/20 GDPR)"),
+        BotCommand("elimina_account", "Cancella definitivamente l'account (Art. 17 GDPR)"),
+        BotCommand("feedback", "Invia un feedback"),
+    ])
+
     loop = asyncio.get_running_loop()
     # Timezone esplicita (non affidarsi al fuso locale del sistema): gli orari sotto
     # sono pensati in ora italiana e admin_metrics.SCHEDULER_TZ deve restare allineato
@@ -3284,6 +3422,7 @@ async def _start_scheduler(app: Application) -> None:
     scheduler.add_job(_nightly_category_sync, 'cron', hour=3, minute=0, args=[app, loop], id='nightly_category_sync')
     scheduler.add_job(_nightly_subscription_job, 'cron', hour=3, minute=5, args=[app, loop], id='nightly_subscription_job')
     scheduler.add_job(_nightly_retention_cleanup, 'cron', hour=3, minute=10, id='nightly_retention_cleanup')
+    scheduler.add_job(_nightly_streak_reset_job, 'cron', hour=3, minute=15, id='nightly_streak_reset_job')
     scheduler.add_job(_trial_expiry_job, 'cron', hour=4, minute=0, args=[app, loop], id='trial_expiry_job')
     scheduler.add_job(_daily_dashboard_job, 'cron', hour=8, minute=0, args=[app, loop], id='daily_dashboard_job')
     scheduler.add_job(_weekly_plan_job, 'cron', day_of_week='mon', hour=8, minute=5, args=[app, loop], id='weekly_plan_job')

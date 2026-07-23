@@ -672,6 +672,45 @@ def test_privacy_delete_account_writes_audit_log_before_deletion(client):
         assert log is not None
 
 
+def test_change_name_writes_audit_log_and_updates_name(client):
+    from src.dashboard.app import store
+    from src.user_store import AuditLog
+
+    chat_id, email = "chat_change_name", "change-name@example.com"
+    _login_completed(client, store, chat_id, email)
+
+    csrf_token = client.get("/api/csrf-token").json["csrf_token"]
+    response = client.post(
+        "/api/settings/change-name",
+        json={"first_name": "Mario", "last_name": "Rossi"},
+        headers={"X-CSRFToken": csrf_token},
+    )
+
+    assert response.status_code == 200
+    assert response.json["ok"] is True
+    assert store.get_user(chat_id).username == "Mario Rossi"
+
+    with store.Session() as s:
+        log = s.query(AuditLog).filter_by(user_id=chat_id, action="change_name").first()
+        assert log is not None
+
+
+def test_change_name_rejects_empty_name(client):
+    from src.dashboard.app import store
+
+    chat_id, email = "chat_change_name_empty", "change-name-empty@example.com"
+    _login_completed(client, store, chat_id, email)
+
+    csrf_token = client.get("/api/csrf-token").json["csrf_token"]
+    response = client.post(
+        "/api/settings/change-name",
+        json={"first_name": "", "last_name": "Rossi"},
+        headers={"X-CSRFToken": csrf_token},
+    )
+
+    assert response.status_code == 400
+
+
 def test_change_email_writes_audit_log_and_updates_email(client):
     from src.dashboard.app import store
     from src.user_store import AuditLog
@@ -1261,6 +1300,117 @@ def test_chat_message_multi_transaction(client):
     names = {tx["parsed"]["name"] for tx in body["transactions"]}
     assert names == {"Pizza", "Benzina"}
     assert all(tx["awaiting_confirm"] for tx in body["transactions"])
+
+
+def test_chat_message_reports_category_promotion_after_threshold(client, monkeypatch):
+    """/api/chat/message espone category_promotion su una transazione quando la
+    categorizzazione adattiva (src/category_matcher.py) raggiunge la soglia —
+    stessa logica condivisa col bot Telegram, qui esercitata via webapp."""
+    from config import Config
+    from src.dashboard.app import store
+    from src.storage.postgres_storage import PostgresStorage
+    from src.expense_parser import ExpenseParser
+
+    monkeypatch.setattr(Config, "CATEGORY_PROMOTION_THRESHOLD", 1)
+
+    csrf_token = _login_chat_user(client, store, "chat_catpromote_user")
+    with store.Session() as s:
+        pg = PostgresStorage(session=s, user_id="chat_catpromote_user")
+        pg.create_account("Corrente", initial_balance=100.0)
+
+    transactions = [_fake_parsed(name="Pizza Speciale", amount=20.0, category="Ristoranti Nuovi")]
+    with patch.object(ExpenseParser, "parse_multi_with_usage", return_value=(transactions, {})):
+        resp = client.post(
+            "/api/chat/message",
+            json={"text": "20€ pizza speciale"},
+            headers={"X-CSRFToken": csrf_token},
+        )
+
+    assert resp.status_code == 200
+    tx = resp.json["transactions"][0]
+    promotion = tx.get("category_promotion")
+    assert promotion is not None
+    assert promotion["suggested_name"] == "Pizza Speciale"
+    assert isinstance(promotion["candidate_id"], int)
+
+
+def test_chat_category_confirm_yes_creates_category(client, monkeypatch):
+    """/api/chat/category-confirm con decision=yes crea davvero la categoria."""
+    from config import Config
+    from src.dashboard.app import store
+    from src.storage.postgres_storage import PostgresStorage
+    from src.storage.models import UserCategory
+    from src.expense_parser import ExpenseParser
+
+    monkeypatch.setattr(Config, "CATEGORY_PROMOTION_THRESHOLD", 1)
+
+    csrf_token = _login_chat_user(client, store, "chat_catconfirm_user")
+    with store.Session() as s:
+        pg = PostgresStorage(session=s, user_id="chat_catconfirm_user")
+        pg.create_account("Corrente", initial_balance=100.0)
+
+    transactions = [_fake_parsed(name="Abbonamento Palestra", amount=40.0, category="Sport Nuovo")]
+    with patch.object(ExpenseParser, "parse_multi_with_usage", return_value=(transactions, {})):
+        resp = client.post(
+            "/api/chat/message",
+            json={"text": "40€ palestra"},
+            headers={"X-CSRFToken": csrf_token},
+        )
+    candidate_id = resp.json["transactions"][0]["category_promotion"]["candidate_id"]
+
+    confirm_resp = client.post(
+        "/api/chat/category-confirm",
+        json={"candidate_id": candidate_id, "decision": "yes"},
+        headers={"X-CSRFToken": csrf_token},
+    )
+    assert confirm_resp.status_code == 200
+    assert confirm_resp.json["ok"] is True
+
+    with store.Session() as s:
+        assert s.query(UserCategory).filter_by(
+            user_id="chat_catconfirm_user", name="Abbonamento Palestra",
+        ).first() is not None
+
+
+def test_chat_category_confirm_no_resets_occurrences(client, monkeypatch):
+    """/api/chat/category-confirm con decision=no azzera il contatore, nessuna categoria creata."""
+    from config import Config
+    from src.dashboard.app import store
+    from src.storage.postgres_storage import PostgresStorage
+    from src.storage.models import CategoryCandidate, UserCategory
+    from src.expense_parser import ExpenseParser
+
+    monkeypatch.setattr(Config, "CATEGORY_PROMOTION_THRESHOLD", 1)
+
+    csrf_token = _login_chat_user(client, store, "chat_catdecline_user")
+    with store.Session() as s:
+        pg = PostgresStorage(session=s, user_id="chat_catdecline_user")
+        pg.create_account("Corrente", initial_balance=100.0)
+
+    transactions = [_fake_parsed(name="Rivista Mensile", amount=5.0, category="Edicola Nuova")]
+    with patch.object(ExpenseParser, "parse_multi_with_usage", return_value=(transactions, {})):
+        resp = client.post(
+            "/api/chat/message",
+            json={"text": "5€ rivista"},
+            headers={"X-CSRFToken": csrf_token},
+        )
+    candidate_id = resp.json["transactions"][0]["category_promotion"]["candidate_id"]
+
+    decline_resp = client.post(
+        "/api/chat/category-confirm",
+        json={"candidate_id": candidate_id, "decision": "no"},
+        headers={"X-CSRFToken": csrf_token},
+    )
+    assert decline_resp.status_code == 200
+    assert decline_resp.json["ok"] is True
+
+    with store.Session() as s:
+        candidate = s.query(CategoryCandidate).filter_by(id=candidate_id).one()
+        assert candidate.status == "pending"
+        assert candidate.occurrences == 0
+        assert s.query(UserCategory).filter_by(
+            user_id="chat_catdecline_user", name="Rivista Mensile",
+        ).first() is None
 
 
 def test_chat_confirm_expense_requires_account_id(client):

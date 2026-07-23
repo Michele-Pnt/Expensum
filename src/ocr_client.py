@@ -22,6 +22,16 @@ logger = logging.getLogger("financial_agent.ocr")
 # Soglia minima di caratteri per considerare l'OCR riuscito
 _MIN_TEXT_LENGTH = 10
 
+# PSM 6 ("assume a single uniform block of text") invece del default PSM 3
+# (segmentazione automatica della pagina): su scontrini fotografati/sgualciti il
+# default può decidere che intere righe (spesso proprio quella della data) "non
+# sono testo valido" e scartarle prima ancora di leggerle, o restituire stringa
+# vuota. Verificato su foto reali: con PSM 3 alcuni scontrini restituivano 0
+# caratteri o mancavano completamente della riga data; con PSM 6 il testo (incluse
+# le date) viene estratto correttamente. Uno scontrino è una singola colonna
+# stretta di testo — non ha la struttura complessa per cui PSM 3 è pensato.
+_TESSERACT_CONFIG = "--psm 6"
+
 # Etichette tipiche su scontrini italiani seguite dal nome di un terzo (cameriere,
 # cassiere, cliente...) — dato personale non necessario alla categorizzazione della
 # spesa (Art. 5(1)(c) GDPR: minimizzazione). Applicato come rete di sicurezza sulla
@@ -95,7 +105,7 @@ class OcrClient:
         img = Image.open(image_path)
         img = self._preprocess(img)
 
-        raw_text = pytesseract.image_to_string(img, lang="ita")
+        raw_text = pytesseract.image_to_string(img, lang="ita", config=_TESSERACT_CONFIG)
         cleaned = self._clean(raw_text)
 
         if len(cleaned) < _MIN_TEXT_LENGTH:

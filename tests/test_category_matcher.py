@@ -7,6 +7,7 @@ testate qui non aprono sessioni né toccano `category_candidates`.
 import pytest
 
 from src.category_matcher import (
+    _capitalize_display_name,
     compute_historical_score,
     compute_llm_confidence,
     normalize_event_name,
@@ -69,6 +70,21 @@ class TestComputeHistoricalScore:
         score, candidate = compute_historical_score(None, "any_user", "")
         assert score == 0.0
         assert candidate is None
+
+
+class TestCapitalizeDisplayName:
+    def test_capitalizes_lowercase_words(self):
+        assert _capitalize_display_name("netflix mensile") == "Netflix Mensile"
+
+    def test_avoids_title_apostrophe_bug(self):
+        # str.title() produrrebbe "Mcdonald'S" (S maiuscola dopo l'apostrofo) — bug noto.
+        assert _capitalize_display_name("mcdonald's") == "Mcdonald's"
+
+    def test_already_capitalized_is_idempotent(self):
+        assert _capitalize_display_name("Netflix") == "Netflix"
+
+    def test_strips_and_collapses_whitespace(self):
+        assert _capitalize_display_name("  netflix   mensile  ") == "Netflix Mensile"
 
 
 class TestScoreCategorization:

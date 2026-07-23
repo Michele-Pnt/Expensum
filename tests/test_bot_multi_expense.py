@@ -56,10 +56,16 @@ def test_process_expense_text_sends_all_confirmations_immediately(monkeypatch):
     monkeypatch.setattr(bot, "_get_storage", lambda chat_id: MagicMock())
     monkeypatch.setattr(bot._user_store, "get_user_category_names", lambda chat_id: [])
     monkeypatch.setattr(bot._user_store, "Session", lambda: MagicMock())
+    # _get_message_when (chiamata indipendente dal parsing) usa get_user_preferences
+    # via _user_store.Session() — con Session mockato genericamente sopra andrebbe in
+    # crash su json.loads(MagicMock); qui la aggiriamo direttamente.
+    monkeypatch.setattr(bot._user_store, "get_user_preferences", lambda chat_id: {})
     monkeypatch.setattr(
         bot.category_matcher,
         "evaluate_and_track",
-        lambda session, storage, user_store, chat_id, name, category, known: MagicMock(category_name=category),
+        lambda session, storage, user_store, chat_id, name, category, known: MagicMock(
+            category_name=category, awaiting_confirmation=False,
+        ),
     )
 
     context = MagicMock()
@@ -89,6 +95,108 @@ def test_process_expense_text_sends_all_confirmations_immediately(monkeypatch):
                 assert btn.callback_data.startswith(("mconfirm:", "mcancel:", "medit_category:"))
                 tags.add(btn.callback_data.split(":", 1)[1])
     assert len(tags) == 3
+
+
+def test_awaiting_confirmation_sends_extra_promotion_message(monkeypatch):
+    """Se evaluate_and_track segnala awaiting_confirmation, viene inviato un messaggio
+    extra separato (Sì/No) oltre alle conferme spesa — non incorporato nella card."""
+    import bot
+
+    transactions = [
+        {"type": "expense", "date": date(2026, 4, 9), "amount": 10.0, "category": "Ristoranti", "income_type": None, "name": "Pranzo"},
+    ]
+
+    fake_parser = MagicMock()
+    fake_parser.parse_multi_with_usage.return_value = (transactions, {"provider": "mistral"})
+    monkeypatch.setattr(bot, "_get_parser", lambda chat_id: fake_parser)
+    monkeypatch.setattr(bot._user_store, "reserve_llm_tokens", lambda **k: None)
+    monkeypatch.setattr(bot._user_store, "finalize_llm_usage", lambda **k: None)
+    monkeypatch.setattr(bot._user_store, "log_message", lambda *a, **k: None)
+    monkeypatch.setattr(bot.analytics, "track", lambda *a, **k: None)
+    monkeypatch.setattr(bot, "_get_storage", lambda chat_id: MagicMock())
+    monkeypatch.setattr(bot._user_store, "get_user_category_names", lambda chat_id: [])
+    monkeypatch.setattr(bot._user_store, "Session", lambda: MagicMock())
+    # _get_message_when (chiamata indipendente dal parsing) usa get_user_preferences
+    # via _user_store.Session() — con Session mockato genericamente sopra andrebbe in
+    # crash su json.loads(MagicMock); qui la aggiriamo direttamente.
+    monkeypatch.setattr(bot._user_store, "get_user_preferences", lambda chat_id: {})
+    monkeypatch.setattr(
+        bot.category_matcher,
+        "evaluate_and_track",
+        lambda session, storage, user_store, chat_id, name, category, known: MagicMock(
+            category_name="Altro", awaiting_confirmation=True, candidate_id=42, suggested_name="Pranzo",
+        ),
+    )
+
+    context = MagicMock()
+    context.user_data = {}
+    update = MagicMock()
+    update.effective_message.message_id = 1
+    update.message.reply_text = AsyncMock()
+
+    asyncio.run(bot._process_expense_text(update, context, "10 pranzo", "111"))
+
+    # 1 conferma spesa + 1 messaggio di conferma categoria = 2 chiamate distinte.
+    assert update.message.reply_text.await_count == 2
+    last_call = update.message.reply_text.await_args_list[-1]
+    assert "Pranzo" in last_call.args[0]
+    keyboard = last_call.kwargs["reply_markup"]
+    callback_data = [btn.callback_data for row in keyboard.inline_keyboard for btn in row]
+    assert callback_data == ["catpromote_yes:42", "catpromote_no:42"]
+
+
+def test_catpromote_yes_calls_confirm_promotion(monkeypatch):
+    """Il bottone Sì richiama category_matcher.confirm_promotion col candidate_id giusto."""
+    import bot
+
+    monkeypatch.setattr(bot, "_is_authorized", lambda u: True)
+    monkeypatch.setattr(bot, "_get_storage", lambda chat_id: MagicMock())
+    monkeypatch.setattr(bot._user_store, "Session", lambda: MagicMock())
+    # _get_message_when (chiamata indipendente dal parsing) usa get_user_preferences
+    # via _user_store.Session() — con Session mockato genericamente sopra andrebbe in
+    # crash su json.loads(MagicMock); qui la aggiriamo direttamente.
+    monkeypatch.setattr(bot._user_store, "get_user_preferences", lambda chat_id: {})
+
+    confirm_calls = []
+    monkeypatch.setattr(
+        bot.category_matcher,
+        "confirm_promotion",
+        lambda session, storage, user_store, candidate_id: confirm_calls.append(candidate_id) or MagicMock(
+            promoted=True, promoted_category_name="Netflix",
+        ),
+    )
+
+    query, update, context = _make_query_update_context("111", "catpromote_yes:42")
+    asyncio.run(bot.handle_callback(update, context))
+
+    assert confirm_calls == [42]
+    query.edit_message_text.assert_awaited_once()
+    assert "Netflix" in query.edit_message_text.await_args.args[0]
+
+
+def test_catpromote_no_calls_decline_promotion(monkeypatch):
+    """Il bottone No richiama category_matcher.decline_promotion col candidate_id giusto."""
+    import bot
+
+    monkeypatch.setattr(bot, "_is_authorized", lambda u: True)
+    monkeypatch.setattr(bot._user_store, "Session", lambda: MagicMock())
+    # _get_message_when (chiamata indipendente dal parsing) usa get_user_preferences
+    # via _user_store.Session() — con Session mockato genericamente sopra andrebbe in
+    # crash su json.loads(MagicMock); qui la aggiriamo direttamente.
+    monkeypatch.setattr(bot._user_store, "get_user_preferences", lambda chat_id: {})
+
+    decline_calls = []
+    monkeypatch.setattr(
+        bot.category_matcher,
+        "decline_promotion",
+        lambda session, candidate_id: decline_calls.append(candidate_id),
+    )
+
+    query, update, context = _make_query_update_context("111", "catpromote_no:42")
+    asyncio.run(bot.handle_callback(update, context))
+
+    assert decline_calls == [42]
+    query.edit_message_text.assert_awaited_once()
 
 
 def test_mcancel_only_cancels_its_own_transaction(monkeypatch):

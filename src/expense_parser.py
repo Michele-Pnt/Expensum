@@ -29,6 +29,24 @@ _INCOME_TYPES = [
     "Dividendi", "Affitto", "Interessi", "Mance", "Ripetizioni", "Paghetta",
 ]
 
+# keyword -> lista di (ora_inizio, ora_fine, categoria_hint), intervalli [start, end) su 24h.
+# Starter set più ampio ma non esaustivo: Michele lo espande/modifica secondo giudizio di prodotto.
+_TIME_SENSITIVE_KEYWORDS: dict[str, list[tuple[int, int, str]]] = {
+    "coca": [(6, 11, "Colazione"), (11, 15, "Pranzo"), (18, 23, "Aperitivo")],
+    "cocacola": [(6, 11, "Colazione"), (11, 15, "Pranzo"), (18, 23, "Aperitivo")],
+    "birra": [(11, 15, "Pranzo"), (18, 23, "Aperitivo")],
+    "vino": [(11, 15, "Pranzo"), (18, 21, "Aperitivo"), (21, 23, "Cena")],
+    "prosecco": [(11, 15, "Pranzo"), (18, 21, "Aperitivo"), (21, 23, "Cena")],
+    "spritz": [(11, 15, "Pranzo"), (18, 21, "Aperitivo")],
+    "panino": [(6, 11, "Colazione"), (11, 15, "Pranzo"), (15, 18, "Merenda")],
+    "toast": [(6, 11, "Colazione"), (11, 15, "Pranzo"), (15, 18, "Merenda")],
+    "tramezzino": [(6, 11, "Colazione"), (11, 15, "Pranzo"), (15, 18, "Merenda")],
+    "gelato": [(15, 18, "Merenda"), (21, 24, "Uscita serale")],
+    "patatine": [(15, 18, "Merenda"), (18, 23, "Aperitivo")],
+    "cornetto": [(6, 11, "Colazione"), (15, 18, "Merenda")],
+    "pizza": [(11, 15, "Pranzo"), (18, 23, "Cena")],
+}
+
 _SYSTEM_PROMPT = """Sei un assistente finanziario. Il tuo compito è estrarre informazioni finanziarie da messaggi scritti in modo informale in italiano. Devi capire dal contesto se si tratta di un'uscita (spesa), di un'entrata (stipendio, regalo, rimborso, bonifico ricevuto) o di uno spostamento di denaro tra due conti dello stesso utente (trasferimento/giroconto).
 
 REGOLE TASSATIVE:
@@ -85,13 +103,54 @@ ESEMPI MULTI-TRANSAZIONE:
 
 
 
-def _build_user_prompt(message: str, categories: list[str], today: date) -> str:
-    """Costruisce il prompt utente con contesto."""
+def _detect_time_sensitive_hint(
+    message: str, hour: int, known_categories: list[str],
+) -> str | None:
+    """Ritorna il nome di categoria reale da suggerire nel prompt se il messaggio
+    contiene una keyword ambigua rispetto all'ora del giorno, altrimenti None.
+
+    L'hint viene validato con fuzzy-match (`match_category_string`) contro le
+    categorie reali configurate dall'utente: non si inventa mai un nome di categoria
+    che l'utente non ha tra le sue. Se non c'è keyword, non c'è fascia oraria
+    corrispondente, o non c'è match tra le categorie reali, ritorna None (no-op).
+    """
+    message_lower = message.lower()
+    for keyword, hour_buckets in _TIME_SENSITIVE_KEYWORDS.items():
+        if keyword not in message_lower:
+            continue
+        for start_hour, end_hour, category_hint in hour_buckets:
+            if start_hour <= hour < end_hour:
+                matched, _score = match_category_string(category_hint, known_categories)
+                return matched
+    return None
+
+
+def _build_user_prompt(message: str, categories: list[str], when: datetime) -> str:
+    """Costruisce il prompt utente con contesto.
+
+    `when` è il timestamp reale associato al messaggio (es. `update.message.date` di
+    Telegram convertito nel fuso dell'utente, o `datetime.now()` come fallback quando
+    non disponibile — dashboard web). Oltre ad ancorare la data, se il messaggio
+    contiene una keyword ambigua rispetto all'ora del giorno (es. "coca" mattina vs
+    sera) e l'utente ha una categoria reale corrispondente, viene aggiunto un breve
+    blocco di contesto — altrimenti il prompt resta identico a prima.
+    """
     cats_str = ", ".join(categories) if categories else "Nessuna categoria disponibile"
-    return (
-        f"Data di oggi: {today.isoformat()}\n"
+    base_prompt = (
+        f"Data di oggi: {when.date().isoformat()}\n"
         f"Categorie disponibili: [{cats_str}]\n\n"
         f"Messaggio dell'utente: \"{message}\""
+    )
+
+    hint_category = _detect_time_sensitive_hint(message, when.hour, categories)
+    if hint_category is None:
+        return base_prompt
+
+    return base_prompt + (
+        f"\n\nNOTA CONTESTUALE: dato l'orario attuale ({when.hour:02d}:00), se il "
+        f"messaggio si riferisce a un consumo generico menzionato senza contesto "
+        f"esplicito, la categoria più plausibile in questa fascia oraria è "
+        f"\"{hint_category}\"."
     )
 
 
@@ -168,14 +227,21 @@ class ExpenseParser:
             f"{len(self._categories)} categorie"
         )
 
-    def parse(self, message: str, chat_id: str = "unknown") -> dict | None:
+    def parse(self, message: str, chat_id: str = "unknown", when: datetime | None = None) -> dict | None:
         """Parsa un messaggio e restituisce solo il risultato strutturato."""
-        result, _usage = self.parse_with_usage(message, chat_id)
+        result, _usage = self.parse_with_usage(message, chat_id, when)
         return result
 
-    def parse_with_usage(self, message: str, chat_id: str = "unknown") -> tuple[dict | None, dict]:
+    def parse_with_usage(
+        self, message: str, chat_id: str = "unknown", when: datetime | None = None,
+    ) -> tuple[dict | None, dict]:
         """
         Parsa un messaggio di testo libero e restituisce i dati della spesa.
+
+        Args:
+            when: timestamp reale del messaggio (fuso dell'utente), usato per ancorare
+                la data e per l'hint di categoria sensibile all'ora. Default a
+                `datetime.now()` se non fornito.
 
         Returns:
             dict con {type, date, amount, category, name, income_type, from_account, to_account,
@@ -183,8 +249,9 @@ class ExpenseParser:
             `usage_metadata` contiene {prompt_tokens, completion_tokens, total_tokens,
             provider, model} per il ledger token reale.
         """
-        today = date.today()
-        user_prompt = _build_user_prompt(message, self._categories, today)
+        when = when or datetime.now()
+        today = when.date()
+        user_prompt = _build_user_prompt(message, self._categories, when)
 
         logger.info(
             "parsing_expense",
@@ -202,7 +269,11 @@ class ExpenseParser:
             )
             return None, {}
 
-        logger.debug(f"Risposta LLM grezza: {raw_response[:200]}")
+        logger.debug(
+            "llm_raw_response_received",
+            extra={"domain": "usage", "event": "llm_raw_response_received", "chat_id": chat_id,
+                   "meta": {"length": len(raw_response)}},
+        )
 
         parsed = _extract_json(raw_response)
         if parsed is None:
@@ -232,7 +303,9 @@ class ExpenseParser:
         )
         return result, usage
 
-    def parse_multi_with_usage(self, message: str, chat_id: str = "unknown") -> tuple[list[dict] | None, dict]:
+    def parse_multi_with_usage(
+        self, message: str, chat_id: str = "unknown", when: datetime | None = None,
+    ) -> tuple[list[dict] | None, dict]:
         """
         Parsa un messaggio di testo libero e restituisce UNA O PIÙ transazioni.
 
@@ -240,13 +313,19 @@ class ExpenseParser:
         (oggetto JSON semplice) o più transazioni distinte (wrapper {"transactions": [...]});
         qui normalizziamo sempre il risultato in una lista, con un elemento per transazione.
 
+        Args:
+            when: timestamp reale del messaggio (fuso dell'utente), usato per ancorare
+                la data e per l'hint di categoria sensibile all'ora. Default a
+                `datetime.now()` se non fornito.
+
         Returns:
             (lista di dict con {type, date, amount, category, income_type, name, from_account, to_account}, usage_metadata)
             oppure (None, usage_metadata) se il messaggio non è riconosciuto come transazione
             finanziaria o il parsing fallisce.
         """
-        today = date.today()
-        user_prompt = _build_user_prompt(message, self._categories, today)
+        when = when or datetime.now()
+        today = when.date()
+        user_prompt = _build_user_prompt(message, self._categories, when)
 
         logger.info(
             "parsing_expense_multi",
@@ -264,7 +343,11 @@ class ExpenseParser:
             )
             return None, {}
 
-        logger.debug(f"Risposta LLM grezza (multi): {raw_response[:200]}")
+        logger.debug(
+            "llm_raw_response_received_multi",
+            extra={"domain": "usage", "event": "llm_raw_response_received_multi", "chat_id": chat_id,
+                   "meta": {"length": len(raw_response)}},
+        )
 
         parsed = _extract_json(raw_response)
         if parsed is None:

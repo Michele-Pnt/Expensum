@@ -52,6 +52,7 @@ interface ChatTransaction {
   needs_amount?: boolean;
   needs_second_account?: boolean;
   needs_account_pick?: "from" | "to";
+  category_promotion?: { candidate_id: number; suggested_name: string } | null;
 }
 
 type AccountPickMode = "single" | "from" | "to";
@@ -70,6 +71,8 @@ interface Message {
   pickedFromAccountId?: string; // conto origine già scelto (transfer), per escluderlo dal picker "to"
   transcription?: string;      // testo trascritto dal vocale
   noAccountAction?: boolean;   // true = mostra bottone "Vai ai Conti" (nessun conto configurato)
+  categoryPromotion?: { candidateId: number; suggestedName: string }; // proposta creazione categoria (Sì/No)
+  categoryPromotionResolved?: boolean; // true = utente ha già risposto Sì/No
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -373,6 +376,26 @@ export default function ChatPage() {
       // e si presentano una alla volta — expense_queue in bot.py.
       sequentialQueueRef.current.push(...sequential);
       presentNextSequential();
+
+      // Categorizzazione adattiva — bubble separata (non attaccata alla card di
+      // conferma spesa), stessa UX del bot Telegram: un messaggio dedicato con
+      // bottoni Sì/No dopo aver notato un pattern ricorrente non categorizzato.
+      const promotions = transactions
+        .map((tx) => tx.category_promotion)
+        .filter((p): p is { candidate_id: number; suggested_name: string } => !!p);
+      if (promotions.length > 0) {
+        setMessages((prev) => [
+          ...prev,
+          ...promotions.map((p, i) => ({
+            id: `bot-catpromote-${Date.now()}-${i}`,
+            role: "bot" as MessageRole,
+            text: `📂 Ho notato che scrivi spesso spese simili — vuoi che crei una categoria dedicata «${p.suggested_name}»?`,
+            timestamp: new Date(),
+            status: "sent" as MessageStatus,
+            categoryPromotion: { candidateId: p.candidate_id, suggestedName: p.suggested_name },
+          })),
+        ]);
+      }
     },
     [presentNextSequential]
   );
@@ -526,6 +549,49 @@ export default function ChatPage() {
         return { ...m, parsed, awaitingCategoryPick: false, awaitingConfirm: true, text: buildConfirmText(parsed) };
       })
     );
+  }, []);
+
+  // ── Conferma/rifiuto creazione categoria (categorizzazione adattiva) ─────
+
+  const handleCategoryPromotionDecision = useCallback(async (
+    botMsgId: string,
+    candidateId: number,
+    decision: "yes" | "no"
+  ) => {
+    setMessages((prev) =>
+      prev.map((m) => (m.id === botMsgId ? { ...m, categoryPromotionResolved: true } : m))
+    );
+
+    try {
+      const res = await fetch("/api/chat/category-confirm", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...(await buildHeaders()) },
+        credentials: "same-origin",
+        body: JSON.stringify({ candidate_id: candidateId, decision }),
+      });
+      const data = await res.json();
+      setMessages((prev) => [
+        ...prev,
+        {
+          id: `catpromote-result-${Date.now()}`,
+          role: "bot",
+          text: data.reply || (decision === "yes" ? "✅ Categoria creata!" : "👍 Nessun problema."),
+          timestamp: new Date(),
+          status: "sent",
+        },
+      ]);
+    } catch {
+      setMessages((prev) => [
+        ...prev,
+        {
+          id: `catpromote-err-${Date.now()}`,
+          role: "bot",
+          text: "⚠️ Errore durante la richiesta. Riprova più tardi.",
+          timestamp: new Date(),
+          status: "sent",
+        },
+      ]);
+    }
   }, []);
 
   // ── Risposta a "quanto vuoi trasferire/spendere?" (importo mancante) ─────
@@ -916,6 +982,28 @@ export default function ChatPage() {
                           </button>
                         </div>
                       </>
+                    )}
+
+                    {/* Conferma creazione categoria (categorizzazione adattiva) */}
+                    {msg.categoryPromotion && !msg.categoryPromotionResolved && (
+                      <div className={styles.confirmRow}>
+                        <button
+                          className={`${styles.confirmBtn} ${styles.confirmBtnYes}`}
+                          onClick={() =>
+                            handleCategoryPromotionDecision(msg.id, msg.categoryPromotion!.candidateId, "yes")
+                          }
+                        >
+                          ✅ Sì
+                        </button>
+                        <button
+                          className={`${styles.confirmBtn} ${styles.confirmBtnNo}`}
+                          onClick={() =>
+                            handleCategoryPromotionDecision(msg.id, msg.categoryPromotion!.candidateId, "no")
+                          }
+                        >
+                          ❌ No
+                        </button>
+                      </div>
                     )}
 
                     {/* Picker categoria (cambio rapido) */}

@@ -23,6 +23,8 @@ type PreferencesResponse = {
 
 type SettingsResponse = {
   account?: {
+    first_name?: string | null;
+    last_name?: string | null;
     privacy_policy_version_accepted?: string | null;
     privacy_policy_current_version?: string;
   };
@@ -48,7 +50,7 @@ async function downloadFile(url: string, filename: string): Promise<void> {
 export default function PrivacyPage() {
   const router = useRouter();
   const [busy, setBusy] = useState<
-    "json" | "csv" | "delete" | "notifications" | "email" | "password" | "consent" | null
+    "json" | "csv" | "delete" | "notifications" | "name" | "email" | "password" | "consent" | null
   >(null);
   const [notificationsEnabled, setNotificationsEnabled] = useState(true);
   const [deleteConfirm, setDeleteConfirm] = useState("");
@@ -58,6 +60,8 @@ export default function PrivacyPage() {
   const [policyAccepted, setPolicyAccepted] = useState<string | null>(null);
   const [policyCurrent, setPolicyCurrent] = useState<string | null>(null);
 
+  const [firstName, setFirstName] = useState("");
+  const [lastName, setLastName] = useState("");
   const [currentPasswordForEmail, setCurrentPasswordForEmail] = useState("");
   const [newEmail, setNewEmail] = useState("");
   const [currentPasswordForPassword, setCurrentPasswordForPassword] = useState("");
@@ -84,6 +88,8 @@ export default function PrivacyPage() {
       const json: SettingsResponse = await res.json();
       setPolicyAccepted(json.account?.privacy_policy_version_accepted ?? null);
       setPolicyCurrent(json.account?.privacy_policy_current_version ?? null);
+      setFirstName(json.account?.first_name ?? "");
+      setLastName(json.account?.last_name ?? "");
     } catch {
       // Stato consenso non disponibile: il banner resta nascosto.
     }
@@ -111,6 +117,28 @@ export default function PrivacyPage() {
       setInfo("Privacy policy accettata.");
     } catch {
       setError("Non sono riuscito a registrare l'accettazione. Riprova.");
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function handleChangeName() {
+    setBusy("name");
+    setError(null);
+    setInfo(null);
+    try {
+      const csrfToken = await getCsrfToken();
+      const res = await fetch("/api/settings/change-name", {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { "Content-Type": "application/json", "X-CSRFToken": csrfToken },
+        body: JSON.stringify({ first_name: firstName, last_name: lastName }),
+      });
+      const json = await res.json();
+      if (!res.ok || !json.ok) throw new Error(json.error || "change_name_failed");
+      setInfo("Nome aggiornato con successo.");
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Non sono riuscito ad aggiornare il nome.");
     } finally {
       setBusy(null);
     }
@@ -328,6 +356,40 @@ export default function PrivacyPage() {
               label="Ricevi notifiche e promemoria (opposizione Art. 21: disattivala in qualsiasi momento)"
             />
           </CardContent>
+        </Card>
+
+        <Card sx={{ borderRadius: 4 }}>
+          <CardContent>
+            <Typography variant="h6" fontWeight={700} gutterBottom>
+              Cambia nome
+            </Typography>
+            <Typography color="text.secondary" sx={{ mb: 2 }}>
+              Correggi nome e cognome associati al tuo account (diritto di rettifica, Art. 16).
+            </Typography>
+            <Stack spacing={2} sx={{ maxWidth: 420 }}>
+              <TextField
+                label="Nome"
+                value={firstName}
+                onChange={(e) => setFirstName(e.target.value)}
+                fullWidth
+              />
+              <TextField
+                label="Cognome"
+                value={lastName}
+                onChange={(e) => setLastName(e.target.value)}
+                fullWidth
+              />
+            </Stack>
+          </CardContent>
+          <CardActions sx={{ px: 2, pb: 2, pt: 0 }}>
+            <Button
+              variant="outlined"
+              onClick={handleChangeName}
+              disabled={busy !== null || !firstName}
+            >
+              {busy === "name" ? "Aggiornamento..." : "Aggiorna nome"}
+            </Button>
+          </CardActions>
         </Card>
 
         <Card sx={{ borderRadius: 4 }}>

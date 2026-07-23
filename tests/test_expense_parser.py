@@ -1,7 +1,7 @@
 import pytest
-from unittest.mock import patch
-from src.expense_parser import ExpenseParser
-from datetime import date
+from unittest.mock import patch, MagicMock
+from src.expense_parser import ExpenseParser, _build_user_prompt
+from datetime import date, datetime
 
 pytestmark = pytest.mark.unit
 
@@ -203,7 +203,50 @@ def test_expense_and_income_have_null_account_hints():
 def test_extract_json_garbage():
     """Testa cosa succede se l'AI risponde con spazzatura totale."""
     from src.expense_parser import _extract_json
-    
+
     assert _extract_json("Spiacente, non posso aiutarti.") is None
     assert _extract_json("--- { 'not': 'valid' } ---") is None
     assert _extract_json("") is None
+
+
+@pytest.mark.parametrize(
+    "message, when, categories, expect_block",
+    [
+        # keyword "coca" + orario aperitivo + categoria "Aperitivo" esiste -> blocco presente
+        ("una coca al bar", datetime(2026, 7, 22, 19, 30), ["Aperitivo", "Ristoranti"], True),
+        # stessa keyword, orario colazione + categoria "Colazione" esiste -> blocco presente
+        ("coca a colazione", datetime(2026, 7, 22, 8, 30), ["Colazione", "Ristoranti"], True),
+        # nessuna keyword ambigua -> blocco assente indipendentemente da orario/categorie
+        ("netflix", datetime(2026, 7, 22, 19, 30), ["Aperitivo", "Abbonamenti"], False),
+        # keyword + orario ok, ma la categoria hint non esiste tra quelle dell'utente -> blocco assente
+        ("una coca al bar", datetime(2026, 7, 22, 19, 30), ["Ristoranti", "Trasporti"], False),
+        # keyword presente ma orario fuori da ogni fascia configurata -> blocco assente
+        ("una coca al bar", datetime(2026, 7, 22, 3, 0), ["Aperitivo", "Colazione"], False),
+    ],
+)
+def test_time_sensitive_hint_injection(message, when, categories, expect_block):
+    """Mostra esplicitamente con quali messaggi/orari/categorie si attiva la nota
+    contestuale dinamica nel prompt reale inviato a Mistral, e con quali no."""
+    mock_call = MagicMock(return_value=(
+        '{"type": "expense", "amount": 5.0, "category": "Aperitivo", "name": "Coca", "date": "2026-07-22"}',
+        {},
+    ))
+    with patch.object(ExpenseParser, "_call_mistral", mock_call):
+        parser = ExpenseParser(categories)
+        parser.parse_with_usage(message, "test_chat", when=when)
+
+    assert mock_call.called
+    user_prompt = mock_call.call_args[0][0]
+    assert ("NOTA CONTESTUALE" in user_prompt) == expect_block
+
+
+def test_prompt_byte_identical_when_no_hint_triggers():
+    """Se nessuna keyword ambigua è presente, il prompt utente deve restare identico
+    a quello prodotto oggi (nessuna riga aggiuntiva, nessuna regressione)."""
+    when = datetime(2026, 7, 22, 12, 0)
+    prompt = _build_user_prompt("netflix", ["Abbonamenti"], when)
+    assert prompt == (
+        "Data di oggi: 2026-07-22\n"
+        "Categorie disponibili: [Abbonamenti]\n\n"
+        "Messaggio dell'utente: \"netflix\""
+    )

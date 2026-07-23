@@ -4,6 +4,7 @@ import sys
 import json
 import time
 import uuid
+import asyncio
 import secrets
 import difflib
 import logging
@@ -38,6 +39,7 @@ from src.notion_client import NotionFinanceClient
 from src.storage.notion_storage import NotionStorage
 from src.storage.postgres_storage import PostgresStorage
 from src.workspace_bootstrapper import bootstrap_workspace, bootstrap_lifestyle_categories
+from src.telegram_client import TelegramClient
 from src.category_sync import refresh_category_averages
 from src.dashboard_message import build_dashboard_text
 
@@ -2480,7 +2482,7 @@ def _chat_parse_text(
     # Parsing LLM (multi-transazione: un messaggio può contenere più spese/entrate)
     try:
         parser = ExpenseParser(categories=categories)
-        results, usage = parser.parse_multi_with_usage(safe_input, chat_id)
+        results, usage = parser.parse_multi_with_usage(safe_input, chat_id, when=datetime.now())
     except Exception as e:
         logger.exception("Errore ExpenseParser chat: %s", e)
         return None, None, "⚠️ Errore interno durante il parsing. Riprova."
@@ -2673,8 +2675,30 @@ def _build_chat_parse_result(chat_id: str, results: list[dict] | None, error_rep
             pass
         return {"ok": False, "type": "no_account", "reply": no_account_reply, "saved": False, "setup_path": "/spazio"}
 
+    # Categorizzazione adattiva — stessa logica del bot Telegram (bot.py::_process_expense_text),
+    # condivisa via src/category_matcher.py: dopo N ricorrenze chiede conferma prima di
+    # creare una categoria reale invece di promuovere silenziosamente.
+    category_promotion_by_index: dict[int, dict] = {}
+    expense_results = [(i, r) for i, r in enumerate(results) if r.get("type") == "expense" and r.get("category")]
+    if expense_results:
+        from src import category_matcher
+        known_categories = store.get_user_category_names(chat_id)
+        with store.Session() as cm_session:
+            for i, r in expense_results:
+                match_result = category_matcher.evaluate_and_track(
+                    cm_session, storage, store, chat_id, r.get("name") or "", r["category"], known_categories,
+                )
+                r["category"] = match_result.category_name
+                if match_result.awaiting_confirmation:
+                    category_promotion_by_index[i] = {
+                        "candidate_id": match_result.candidate_id,
+                        "suggested_name": match_result.suggested_name,
+                    }
+
     transactions = [_build_transaction_payload(r, accounts, categories) for r in results]
-    for tx in transactions:
+    for i, tx in enumerate(transactions):
+        if i in category_promotion_by_index:
+            tx["category_promotion"] = category_promotion_by_index[i]
         try:
             store.log_message(chat_id, source="webapp", role="bot", text=tx["reply"], metadata=tx["parsed"])
         except Exception:
@@ -2807,7 +2831,16 @@ def api_chat_confirm():
             "transaction_type": parsed_type,
             "platform": "web",
         })
-        store.record_tx_event(chat_id, parsed_type, input_method, "confirmed", "webapp")
+        streak_result = store.record_tx_event(chat_id, parsed_type, input_method, "confirmed", "webapp")
+        if streak_result:
+            try:
+                asyncio.run(TelegramClient(chat_id).send_report(
+                    f"🎉 Hai completato {streak_result['cycle_completed_days']} giorni di streak!\n"
+                    f"Ti abbiamo regalato 2 settimane di Pro.\n"
+                    f"La prossima streak sarà di {streak_result['next_target_days']} giorni."
+                ))
+            except Exception as _se:
+                logger.warning("Errore invio messaggio streak per %s: %s", chat_id, _se)
         if _is_first_expense:
             analytics.track(chat_id, "first_expense_tracked", {"input_method": input_method, "platform": "web"})
     else:
@@ -2847,6 +2880,55 @@ def api_chat_confirm():
         pass
 
     return jsonify({"ok": saved, "saved": saved, "reply": reply, "is_first_expense": _is_first_expense and saved})
+
+
+@app.route("/api/chat/category-confirm", methods=["POST"])
+def api_chat_category_confirm():
+    """Esito della richiesta di conferma categorizzazione adattiva (Sì/No).
+
+    Stessa logica di bot.py::handle_callback per i callback catpromote_yes/catpromote_no
+    — chiama le stesse funzioni condivise di src/category_matcher.py, nessuna
+    duplicazione di logica tra bot Telegram e webapp.
+    """
+    from src import category_matcher
+
+    chat_id, _ = _resolve_request_chat_id()
+    if not chat_id:
+        return jsonify({"error": "Unauthorized"}), 401
+
+    data = request.get_json(silent=True) or {}
+    candidate_id = data.get("candidate_id")
+    decision = data.get("decision")
+    if not candidate_id or decision not in ("yes", "no"):
+        return jsonify({"error": "Parametri mancanti"}), 400
+
+    if decision == "no":
+        with store.Session() as cm_session:
+            category_matcher.decline_promotion(cm_session, int(candidate_id))
+        return jsonify({"ok": True, "reply": "👍 Nessun problema, non creo la categoria."})
+
+    user = _get_user_by_chat_id(chat_id)
+    if not user:
+        return jsonify({"error": "Utente non trovato"}), 404
+
+    with store.Session() as cm_session:
+        if user.storage_backend == "postgres":
+            storage = _build_financial_storage(user, pg_session=cm_session)
+        else:
+            storage = _build_financial_storage(user)
+        match_result = category_matcher.confirm_promotion(cm_session, storage, store, int(candidate_id))
+
+    if match_result.promoted:
+        reply = (
+            f"✅ Categoria «{match_result.promoted_category_name}» creata! Le prossime spese simili "
+            "verranno categorizzate automaticamente."
+        )
+    else:
+        reply = (
+            "⚠️ Non sono riuscito a creare la categoria in questo momento (problema temporaneo col tuo "
+            "storage). Riproverò automaticamente alla prossima spesa simile."
+        )
+    return jsonify({"ok": bool(match_result.promoted), "reply": reply})
 
 
 @app.route("/api/chat/voice", methods=["POST"])
@@ -3229,6 +3311,38 @@ def api_settings_logout():
     store.logout_user(chat_id)
     session.clear()
     return jsonify({"ok": True, "redirect_url": "/login"})
+
+
+@app.route("/api/settings/change-name", methods=["POST"])
+@limiter.limit("5 per minute")
+def api_settings_change_name():
+    """Aggiorna nome e cognome dell'account (diritto di rettifica, Art. 16 GDPR)."""
+    chat_id, _ = _resolve_request_chat_id()
+    if not chat_id:
+        return jsonify({"error": "Unauthorized"}), 401
+
+    body = request.get_json(silent=True) or {}
+    first_name = (body.get("first_name") or "").strip()
+    last_name = (body.get("last_name") or "").strip()
+
+    if not first_name:
+        return jsonify({"error": "Il nome non può essere vuoto."}), 400
+
+    new_name = f"{first_name} {last_name}".strip()
+
+    with store.Session() as s:
+        user = s.query(User).filter_by(chat_id=chat_id).first()
+        if not user:
+            return jsonify({"error": "User not found"}), 404
+        old_name = user.username
+
+    store.update_username(chat_id, new_name)
+    store.write_audit_log(
+        chat_id, actor="user", action="change_name",
+        metadata={"old_name": old_name, "new_name": new_name},
+        ip_address=request.remote_addr, user_agent=request.headers.get("User-Agent"),
+    )
+    return jsonify({"ok": True})
 
 
 @app.route("/api/settings/change-email", methods=["POST"])

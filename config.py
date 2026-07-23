@@ -15,6 +15,17 @@ from dotenv import load_dotenv
 # Carica il file .env dalla root del progetto
 load_dotenv(dotenv_path=Path(__file__).parent / ".env")
 
+# Ambiente Postgres locale dockerizzato (development documentation): se .env.local esiste,
+# le sue variabili (DATABASE_URL su localhost:5433, ecc.) vincono su .env. Senza questo,
+# qualsiasi script/processo lanciato in un terminale dove non è stato fatto
+# `source .env.local` a mano ricade silenziosamente sul fallback sqlite di
+# Config.DATABASE_URL, con schema disallineato dalle migration Alembic più recenti.
+# In produzione .env.local non esiste: load_dotenv su un path assente è un no-op innocuo.
+# Esclusa la modalità test (conftest.py imposta TESTING=True prima di ogni import,
+# vedi tests/conftest.py riga 18): i test devono restare sqlite-in-memory, mai Postgres.
+if os.getenv("TESTING") != "True":
+    load_dotenv(dotenv_path=Path(__file__).parent / ".env.local", override=True)
+
 
 class Config:
     """Configurazione centralizzata dell'agente finanziario."""
@@ -192,6 +203,9 @@ class Config:
             "NOTION_CLIENT_SECRET": cls.NOTION_CLIENT_SECRET,
         }
         required["MISTRAL_API_KEY"] = cls.MISTRAL_API_KEY
+        # Usata per firmare i token di unsubscribe (src/unsubscribe_token.py via bot.py):
+        # se assente, i token verrebbero firmati con secret vuoto (HMAC prevedibile).
+        required["FLASK_SECRET_KEY"] = cls.FLASK_SECRET_KEY
         missing = [k for k, v in required.items() if not v]
         if missing:
             raise EnvironmentError(

@@ -4,10 +4,12 @@ src/category_matcher.py — Categorizzazione adattiva delle spese.
 Quando la categoria proposta dal parser LLM non matcha con sufficiente confidenza
 nessuna categoria esistente dell'utente, la spesa resta su una categoria fallback
 mentre il pattern (nome spesa normalizzato) viene tracciato in `category_candidates`.
-Superata una soglia di occorrenze entro una finestra temporale, il pattern viene
-promosso a categoria reale tramite `FinancialStorage.create_category` — mai un
-accesso diretto a Notion/Postgres da questo modulo, per rispettare l'astrazione
-del layer di storage (vedi CLAUDE.md).
+Superata una soglia di occorrenze entro una finestra temporale, l'utente viene
+interpellato (Sì/No): solo alla conferma il pattern viene promosso a categoria reale
+tramite `FinancialStorage.create_category` — mai un accesso diretto a Notion/Postgres
+da questo modulo, per rispettare l'astrazione del layer di storage (vedi CLAUDE.md).
+Condiviso da bot Telegram (bot.py) e webapp (src/dashboard/app.py), nessuna duplicazione
+di logica tra i due canali.
 """
 
 import difflib
@@ -33,12 +35,21 @@ _MULTI_SPACE_RE = re.compile(r"\s+")
 
 @dataclass
 class MatchResult:
-    """Esito della valutazione di categorizzazione per una spesa."""
+    """Esito della valutazione di categorizzazione per una spesa.
+
+    `awaiting_confirmation`/`candidate_id`/`suggested_name` sono valorizzati solo
+    quando la soglia di promozione è stata appena raggiunta: il chiamante (bot.py o
+    src/dashboard/app.py) deve chiedere conferma Sì/No all'utente prima che la
+    promozione avvenga davvero (vedi `confirm_promotion`/`decline_promotion`).
+    """
 
     category_name: str
     score: float
     promoted: bool = False
     promoted_category_name: str | None = None
+    awaiting_confirmation: bool = False
+    candidate_id: int | None = None
+    suggested_name: str | None = None
 
 
 def normalize_event_name(raw_name: str) -> str:
@@ -54,6 +65,15 @@ def normalize_event_name(raw_name: str) -> str:
     cleaned = _NON_WORD_RE.sub("", raw_name.lower().strip())
     tokens = [t for t in _MULTI_SPACE_RE.split(cleaned) if t and not _NUMERIC_TOKEN_RE.match(t)]
     return " ".join(tokens)
+
+
+def _capitalize_display_name(name: str) -> str:
+    """Capitalizza parola per parola il nome da mostrare/creare come categoria.
+
+    Evita il bug di `str.title()` sugli apostrofi (es. "mcdonald's" -> "Mcdonald's",
+    non "Mcdonald'S" come produrrebbe `.title()`).
+    """
+    return " ".join(w[:1].upper() + w[1:] for w in name.strip().split() if w)
 
 
 def compute_llm_confidence(category_from_llm: str | None, known_categories: list[str]) -> float:
@@ -74,9 +94,17 @@ def compute_historical_score(
     """Cerca tra i candidate esistenti dell'utente il pattern più simile.
 
     Match esatto sul nome normalizzato -> candidate trovato direttamente.
-    Altrimenti fuzzy clustering (difflib) entro `cluster_cutoff` tra i candidate
-    pending/promoted dell'utente. Lo score è proporzionale a occorrenze/soglia
-    di promozione, clampato a 1.0.
+    Altrimenti clustering tra i candidate pending/promoted dell'utente, con due
+    criteri alternativi:
+    - fuzzy ratio (difflib) >= `cluster_cutoff` — cattura typo/variazioni minori;
+    - containment di token — se l'insieme di parole del pattern più corto è
+      sottoinsieme di quello del pattern più lungo (es. {netflix} ⊆ {netflix,
+      mensile}), sono considerati lo stesso pattern anche se il ratio testuale è
+      basso (0.636 per "netflix"/"netflix mensile", sotto il cutoff 0.8) — copre il
+      caso comune di una parola descrittiva aggiunta/rimossa tra un'occorrenza e
+      l'altra, che altrimenti frammenterebbe lo stesso pattern reale in più
+      candidate, nessuno dei quali raggiunge mai la soglia di promozione da solo.
+    Lo score è proporzionale a occorrenze/soglia di promozione, clampato a 1.0.
     """
     cluster_cutoff = Config.CATEGORY_CANDIDATE_CLUSTER_CUTOFF if cluster_cutoff is None else cluster_cutoff
     promotion_threshold = Config.CATEGORY_PROMOTION_THRESHOLD if promotion_threshold is None else promotion_threshold
@@ -96,13 +124,25 @@ def compute_historical_score(
         session.query(CategoryCandidate)
         .filter(
             CategoryCandidate.user_id == user_id,
-            CategoryCandidate.status.in_(("pending", "promoted")),
+            CategoryCandidate.status.in_(("pending", "promoted", "awaiting_confirm")),
         )
         .all()
     )
+    name_tokens = set(normalized_name.split())
     best_candidate: CategoryCandidate | None = None
     best_ratio = 0.0
     for candidate in candidates:
+        candidate_tokens = set(candidate.normalized_name.split())
+        is_subset_match = bool(
+            name_tokens and candidate_tokens
+            and (name_tokens <= candidate_tokens or candidate_tokens <= name_tokens)
+        )
+        if is_subset_match:
+            # Containment è una decisione definitiva (parola descrittiva in più/meno
+            # rispetto a un pattern già tracciato) — si accetta subito, non serve
+            # confrontare il ratio con gli altri candidate.
+            return min(candidate.occurrences / promotion_threshold, 1.0), candidate
+
         ratio = difflib.SequenceMatcher(None, normalized_name, candidate.normalized_name).ratio()
         if ratio > best_ratio:
             best_ratio, best_candidate = ratio, candidate
@@ -138,26 +178,110 @@ def _promote_candidate(
     Allinea subito il mirror locale `user_categories` (via `upsert_user_categories`)
     indipendentemente dal backend: per Notion la creazione tocca solo l'API esterna,
     senza questo allineamento la nuova categoria resterebbe invisibile al parser
-    fino al sync notturno.
+    fino al sync notturno. Il nome è sempre capitalizzato parola per parola, mai il
+    testo grezzo dell'ultima occorrenza (che potrebbe essere tutto minuscolo).
+
+    Può sollevare (chiamata API storage esterna, es. Notion) — il chiamante
+    (`confirm_promotion`) è responsabile della gestione dell'errore.
     """
-    created = storage.create_category(candidate.display_name)
+    display_name = _capitalize_display_name(candidate.display_name)
+
+    created = storage.create_category(display_name)
     notion_page_id = created.get("id") if isinstance(created.get("id"), str) else None
 
-    category_payload = {"name": candidate.display_name}
+    category_payload = {"name": display_name}
     if notion_page_id:
         category_payload["notion_page_id"] = notion_page_id
     user_store.upsert_user_categories(user_id, [category_payload])
 
     user_category = (
         session.query(UserCategory)
-        .filter_by(user_id=user_id, name=candidate.display_name)
+        .filter_by(user_id=user_id, name=display_name)
         .first()
     )
+    candidate.display_name = display_name
     candidate.status = "promoted"
     candidate.promoted_category_id = user_category.id if user_category else None
     candidate.promoted_at = datetime.utcnow()
 
-    return candidate.display_name
+    return display_name
+
+
+def confirm_promotion(
+    session: Session,
+    storage: FinancialStorage,
+    user_store: UserStore,
+    candidate_id: int,
+) -> MatchResult:
+    """L'utente ha confermato (Sì) la creazione della categoria suggerita.
+
+    Se `storage.create_category()` fallisce (es. Notion API rate-limited/down), non
+    propaga l'eccezione: il candidate torna a `status="pending"` (le occorrenze
+    restano oltre soglia) così la prossima occorrenza dello stesso pattern rifà la
+    richiesta di conferma automaticamente, invece di rompere il flusso di conferma
+    spesa in corso per l'utente.
+    """
+    candidate = session.query(CategoryCandidate).filter_by(id=candidate_id).first()
+    if candidate is None:
+        return MatchResult(category_name=Config.CATEGORY_FALLBACK_NAME, score=0.0)
+
+    try:
+        promoted_category_name = _promote_candidate(session, storage, user_store, candidate.user_id, candidate)
+        session.commit()
+    except Exception as e:
+        session.rollback()
+        candidate.status = "pending"
+        session.commit()
+        logger.error(
+            "category_promotion_failed",
+            extra={
+                "domain": "usage",
+                "event": "category_promotion_failed",
+                "chat_id": candidate.user_id,
+                "meta": {"candidate_id": candidate.id, "error_type": type(e).__name__},
+            },
+        )
+        return MatchResult(category_name=candidate.display_name, score=0.0)
+
+    logger.info(
+        "category_promoted",
+        extra={
+            "domain": "usage",
+            "event": "category_promoted",
+            "chat_id": candidate.user_id,
+            "meta": {"candidate_id": candidate.id},
+        },
+    )
+    return MatchResult(
+        category_name=promoted_category_name,
+        score=1.0,
+        promoted=True,
+        promoted_category_name=promoted_category_name,
+    )
+
+
+def decline_promotion(session: Session, candidate_id: int) -> None:
+    """L'utente ha rifiutato (No) la creazione della categoria suggerita.
+
+    Azzera il contatore occorrenze: il pattern deve ripresentarsi altre
+    `CATEGORY_PROMOTION_THRESHOLD` volte da capo per essere richiesto di nuovo,
+    invece di richiedere conferma a ogni occorrenza successiva.
+    """
+    candidate = session.query(CategoryCandidate).filter_by(id=candidate_id).first()
+    if candidate is None:
+        return
+    candidate.occurrences = 0
+    candidate.status = "pending"
+    session.commit()
+    logger.info(
+        "category_promotion_declined",
+        extra={
+            "domain": "usage",
+            "event": "category_promotion_declined",
+            "chat_id": candidate.user_id,
+            "meta": {"candidate_id": candidate.id},
+        },
+    )
 
 
 def evaluate_and_track(
@@ -170,13 +294,15 @@ def evaluate_and_track(
     known_categories: list[str],
     fallback_category_name: str | None = None,
 ) -> MatchResult:
-    """Entry point unico chiamato da bot.py dopo il parsing di una spesa.
+    """Entry point unico chiamato da bot.py e src/dashboard/app.py dopo il parsing
+    di una spesa.
 
     Se la categoria proposta matcha una categoria esistente con confidenza >=
-    soglia, viene accettata invariata (comportamento identico a oggi). Altrimenti
-    la spesa resta sulla categoria fallback mentre l'occorrenza del pattern viene
-    tracciata; superata la soglia di promozione, il pattern diventa una categoria
-    reale tramite `FinancialStorage.create_category`.
+    soglia, viene accettata invariata (comportamento identico a prima del feature).
+    Altrimenti la spesa resta sulla categoria fallback mentre l'occorrenza del
+    pattern viene tracciata; superata la soglia di promozione, l'utente viene
+    interpellato (Sì/No) — vedi `MatchResult.awaiting_confirmation` — e solo alla
+    conferma esplicita (`confirm_promotion`) il pattern diventa una categoria reale.
     """
     fallback_category_name = fallback_category_name or Config.CATEGORY_FALLBACK_NAME
 
@@ -195,20 +321,25 @@ def evaluate_and_track(
 
     historical_score, candidate = compute_historical_score(session, user_id, normalized)
 
+    resolved_fallback = (
+        fallback_category_name
+        if fallback_category_name in known_categories
+        else (known_categories[0] if known_categories else fallback_category_name)
+    )
+
     if candidate is not None and candidate.status == "promoted":
         return MatchResult(category_name=candidate.display_name, score=1.0)
+
+    if candidate is not None and candidate.status == "awaiting_confirm":
+        # Promozione già proposta, in attesa della risposta Sì/No dell'utente — non
+        # richiedere di nuovo né incrementare le occorrenze nel frattempo.
+        return MatchResult(category_name=resolved_fallback, score=historical_score)
 
     # Sotto soglia: lo score combinato serve solo da telemetria/osservabilità
     # (salvato su candidate.last_score), non da ulteriore gate di accettazione — evita
     # di accettare `category_from_llm` grezzo (non presente in known_categories) solo
     # perché lo storico ha fatto crescere il punteggio combinato.
     score = score_categorization(llm_confidence, historical_score)
-
-    resolved_fallback = (
-        fallback_category_name
-        if fallback_category_name in known_categories
-        else (known_categories[0] if known_categories else fallback_category_name)
-    )
 
     window = timedelta(days=Config.CATEGORY_PROMOTION_WINDOW_DAYS)
     if candidate is None:
@@ -233,38 +364,37 @@ def evaluate_and_track(
         candidate.last_score = score
         candidate.display_name = raw_name
 
-    # Commit dell'incremento PRIMA di tentare la promozione: `_promote_candidate`
-    # chiama `user_store.upsert_user_categories`, che apre una propria sessione sulla
-    # stessa connessione SQLite. Se la transazione corrente restasse aperta, la scrittura
-    # concorrente fallirebbe con "database is locked". Committare qui prima è anche più
-    # sicuro semanticamente: se la promozione fallisce, il conteggio resta comunque salvato.
+    # Commit dell'incremento prima di valutare la soglia — se poi la promozione viene
+    # rifiutata o fallisce, il conteggio fin qui resta comunque salvato.
     session.commit()
 
-    promoted = False
-    promoted_category_name = None
+    awaiting_confirmation = False
+    suggested_name = None
     if candidate.occurrences >= Config.CATEGORY_PROMOTION_THRESHOLD:
-        promoted_category_name = _promote_candidate(session, storage, user_store, user_id, candidate)
-        promoted = True
+        candidate.status = "awaiting_confirm"
         session.commit()
+        awaiting_confirmation = True
+        suggested_name = _capitalize_display_name(candidate.display_name)
 
     logger.info(
         "category_candidate_evaluated",
         extra={
-            "domain": "categorization",
-            "event": "category_promoted" if promoted else "category_candidate_tracked",
+            "domain": "usage",
+            "event": "category_awaiting_confirm" if awaiting_confirmation else "category_candidate_tracked",
+            "chat_id": user_id,
             "meta": {
                 "candidate_id": candidate.id,
                 "occurrences": candidate.occurrences,
                 "score": round(score, 3),
                 "threshold": Config.CATEGORY_MATCH_THRESHOLD,
-                "promoted": promoted,
             },
         },
     )
 
     return MatchResult(
-        category_name=promoted_category_name or resolved_fallback,
+        category_name=resolved_fallback,
         score=score,
-        promoted=promoted,
-        promoted_category_name=promoted_category_name,
+        awaiting_confirmation=awaiting_confirmation,
+        candidate_id=candidate.id if awaiting_confirmation else None,
+        suggested_name=suggested_name,
     )
