@@ -2,7 +2,10 @@ import os
 import re
 import sys
 import json
+import time
 import uuid
+import secrets
+import difflib
 import logging
 import threading
 from pathlib import Path
@@ -18,6 +21,7 @@ from flask_limiter.util import get_remote_address
 import psutil
 from datetime import date, datetime, timedelta
 import requests
+from sqlalchemy import func
 from notion_client import Client as NotionClient
 
 ROOT_DIR = Path(__file__).resolve().parents[2]
@@ -64,6 +68,13 @@ app.config['WTF_CSRF_CHECK_DEFAULT'] = False   # CSRF applicato solo ai form, no
 app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'  # blocca invio cookie su richieste cross-origin
 app.config['SESSION_COOKIE_HTTPONLY'] = True    # cookie non accessibile da JavaScript
 app.config['SESSION_COOKIE_SECURE'] = os.getenv('FLASK_ENV') == 'production'  # HTTPS only in prod
+# "Ricordami": una sessione marcata permanente (session.permanent = True) sopravvive
+# alla chiusura del browser fino a PERMANENT_SESSION_LIFETIME. Con REFRESH_EACH_REQUEST
+# la scadenza è *scorrevole*: ogni richiesta la sposta avanti di 30 giorni, quindi
+# l'utente resta loggato finché torna almeno una volta ogni 30 giorni. Senza spuntare
+# "ricordami" la sessione resta un cookie di sessione del browser (muore alla chiusura).
+app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(days=30)
+app.config['SESSION_REFRESH_EACH_REQUEST'] = True
 csrf = CSRFProtect(app)
 limiter = Limiter(app=app, key_func=get_remote_address, default_limits=[])
 
@@ -118,6 +129,42 @@ def api_csrf_token():
     """
     return jsonify({"csrf_token": generate_csrf()})
 
+
+_public_stats_cache: dict | None = None
+_PUBLIC_STATS_TTL_SECONDS = 300
+
+
+@app.route("/api/public/stats", methods=["GET"])
+@limiter.limit("30 per minute")
+def api_public_stats():
+    """Statistiche pubbliche aggregate per il social proof sulla landing page.
+
+    Conta tx_events.outcome='confirmed', NON la tabella `expenses`: `expenses`
+    esiste solo per gli utenti su backend Postgres, ma storage_backend di
+    default è 'notion' (vedi User.storage_backend), quindi `expenses` è quasi
+    sempre vuota e il conteggio risultava 0. `tx_events` è l'unica tabella
+    pensata cross-backend (Notion + Postgres, vedi sua docstring): esiste solo
+    dal 14/07/2026, quindi parte basso, ma è l'unico numero onesto e cresce
+    correttamente da qui in avanti su entrambi i backend. Cache in-memory con
+    TTL perché la rotta è pubblica, non autenticata, e potenzialmente ad alto
+    traffico.
+    """
+    from src.user_store import TxEvent
+
+    global _public_stats_cache
+    now = time.time()
+    if _public_stats_cache and now - _public_stats_cache["ts"] < _PUBLIC_STATS_TTL_SECONDS:
+        return jsonify(_public_stats_cache["data"])
+
+    with store.Session() as s:
+        total_confirmed = s.query(func.count(TxEvent.id)).filter(
+            TxEvent.outcome == "confirmed"
+        ).scalar() or 0
+
+    data = {"total_expenses_tracked": int(total_confirmed)}
+    _public_stats_cache = {"ts": now, "data": data}
+    return jsonify(data)
+
 _TRACK_EVENT_RE = re.compile(r"^[a-z0-9_]{1,64}$")
 
 
@@ -126,13 +173,16 @@ _TRACK_EVENT_RE = re.compile(r"^[a-z0-9_]{1,64}$")
 def api_track():
     """Riceve un evento di analytics dal frontend e lo inoltra server-side.
 
-    Il browser non parla mai direttamente con PostHog/GA4/Meta: questa rotta
-    è same-origin, quindi la CSP non deve concedere script-src/connect-src a
-    nessuno di quei domini. Il consenso cookie (letto lato client dal CMP)
-    decide quali vendor vengono effettivamente notificati. PostHog è nella
-    categoria "analytics" del banner esattamente come GA4 (vedi
-    CookieConsent.tsx) e va quindi gated allo stesso modo — non è esente dal
-    consenso solo perché la chiamata è server-side.
+    Il browser non parla mai direttamente con PostHog/Meta: questa rotta è
+    same-origin, la CSP non concede script-src/connect-src a quei domini.
+    GA4 fa eccezione: gtag.js viene caricato lato browser (solo dopo consenso
+    "analytics", vedi CookieConsent.tsx) perché serve a calcolare sessioni e
+    provenienza del traffico, impossibili da ricostruire da qui. Per questo
+    il page_view "grezzo" NON viene rinoltrato a GA4 in questa rotta: lo
+    gestisce già gtag.js in autonomia, rimandarlo duplicherebbe il conteggio.
+    Tutti gli altri eventi (custom di prodotto) continuano ad arrivare a GA4
+    da qui, invariato. PostHog resta gated dallo stesso consenso "analytics"
+    del banner, non è esente solo perché la chiamata è server-side.
     """
     data = request.get_json(silent=True) or {}
     event = data.get("event", "")
@@ -144,17 +194,27 @@ def api_track():
         return jsonify({"error": "invalid properties"}), 400
 
     anonymous_id = data.get("anonymous_id")
-    distinct_id = _get_session_chat_id() or anonymous_id
+    session_chat_id = _get_session_chat_id()
+    distinct_id = session_chat_id or anonymous_id
     if not distinct_id or not isinstance(distinct_id, str) or len(distinct_id) > 128:
         return jsonify({"error": "missing distinct id"}), 400
 
     consent = data.get("consent") or {}
     if consent.get("analytics"):
+        properties.setdefault("platform", "web")
         if event == "identify":
             analytics.identify(distinct_id, properties)
             return jsonify({"ok": True})
         analytics.track(distinct_id, event, properties)
-        analytics.track_ga4(distinct_id, event, properties)
+        if event != "page_view":
+            # page_view lo gestisce già gtag.js lato browser (vedi docstring).
+            analytics.track_ga4(distinct_id, event, properties)
+        # Il tour guidato webapp prima viveva solo in localStorage: questi eventi
+        # rispecchiano lo stato in Postgres (solo per sessioni autenticate, mai
+        # per visitatori anonimi) così la dashboard admin sa chi lo salta e a
+        # quale step si ferma. Vedi frontend/src/context/TourContext.tsx.
+        if session_chat_id and event.startswith("tour_"):
+            store.record_tour_event(session_chat_id, event, properties.get("step_id"))
     if consent.get("marketing"):
         event_id = data.get("event_id") or str(uuid.uuid4())
         analytics.track_meta(event, event_id, properties)
@@ -195,6 +255,51 @@ def _extract_tally_name(fields: list) -> str:
     return ""
 
 
+def _extract_tally_ref(fields: list) -> str | None:
+    """Estrae il codice referral (campo hidden 'ref') da un submit Tally, se presente."""
+    for field in fields:
+        if not isinstance(field, dict):
+            continue
+        key = (field.get("key") or "").strip().lower()
+        label = (field.get("label") or "").strip().lower()
+        value = field.get("value")
+        if ("ref" in key or "ref" in label) and isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
+
+
+def _send_referral_reward_emails(applied_rewards: list, unlocked_lifetime_founder_email: str | None) -> None:
+    """Invia le email di notifica per i reward referral appena applicati/sbloccati.
+
+    Fire-and-forget: eventuali errori Brevo vengono loggati ma non propagati,
+    lo stato del reward in DB resta 'applied' anche se la mail fallisce.
+    """
+    for reward in applied_rewards:
+        try:
+            subject, html = beta_access.build_referral_reward_email(reward.days_granted)
+            brevo_client.send_transactional_email(
+                to_email=reward.beneficiary_email, subject=subject, html_content=html,
+            )
+        except Exception:
+            logger.exception(
+                "Errore invio email reward referral",
+                extra={"domain": "dashboard", "event": "referral_reward_email_failed"},
+            )
+        if reward.role == "referred" and reward.beneficiary_chat_id:
+            analytics.track(reward.beneficiary_chat_id, "referral_signup", {"days_granted": reward.days_granted, "platform": "web"})
+    if unlocked_lifetime_founder_email:
+        try:
+            subject, html = beta_access.build_lifetime_founder_unlocked_email()
+            brevo_client.send_transactional_email(
+                to_email=unlocked_lifetime_founder_email, subject=subject, html_content=html,
+            )
+        except Exception:
+            logger.exception(
+                "Errore invio email Lifetime Founder sbloccato",
+                extra={"domain": "dashboard", "event": "lifetime_founder_email_failed"},
+            )
+
+
 def _sync_tally_lead_to_brevo(tally_submission_id: str, email: str, name: str = "") -> None:
     """Sincronizza un lead Tally su Brevo e, se sotto il tetto configurato,
     crea subito l'account beta e invia le credenziali (in background: risponde
@@ -233,6 +338,18 @@ def _sync_tally_lead_to_brevo(tally_submission_id: str, email: str, name: str = 
             extra={"domain": "dashboard", "event": "beta_access_auto_failed"},
         )
 
+    # L'account beta appena creato (o già esistente) potrebbe sbloccare reward
+    # referral rimasti 'pending' (come 'referred' o come 'referrer' in attesa).
+    try:
+        applied = store.apply_pending_referral_rewards(email)
+        if applied:
+            _send_referral_reward_emails(applied, unlocked_lifetime_founder_email=None)
+    except Exception:
+        logger.exception(
+            "Errore applicazione reward referral pendenti",
+            extra={"domain": "dashboard", "event": "referral_reward_apply_failed"},
+        )
+
 
 @app.route("/webhooks/tally", methods=["POST"])
 @limiter.limit("60 per minute")
@@ -252,11 +369,14 @@ def webhook_tally():
     fields = data.get("fields") or []
     email = _extract_tally_email(fields) if isinstance(fields, list) else None
     name = _extract_tally_name(fields) if isinstance(fields, list) else ""
+    ref = _extract_tally_ref(fields) if isinstance(fields, list) else None
 
     lead, is_new = store.save_tally_lead(
         tally_submission_id=submission_id,
         email=email,
         raw_payload=json.dumps(payload),
+        referral_code=secrets.token_urlsafe(6),
+        referred_by_code=ref,
     )
 
     logger.info(
@@ -264,9 +384,30 @@ def webhook_tally():
         extra={
             "domain": "dashboard",
             "event": "tally_lead_received",
-            "meta": {"is_new": is_new, "has_email": bool(email)},
+            "meta": {"is_new": is_new, "has_email": bool(email), "has_ref": bool(ref)},
         },
     )
+
+    # Attribuzione referral: va fatta sincrona (non nel thread di background) così
+    # i ReferralReward esistono già prima che _sync_tally_lead_to_brevo tenti di
+    # applicarli alla creazione dell'account beta.
+    if is_new and ref:
+        referrer_lead = store.get_tally_lead_by_referral_code(ref)
+        if referrer_lead and referrer_lead.id != lead.id:
+            try:
+                result = store.create_referral_rewards(lead, referrer_lead)
+                unlocked_email = referrer_lead.email if result.get("lifetime_founder_unlocked") else None
+                if unlocked_email:
+                    threading.Thread(
+                        target=_send_referral_reward_emails,
+                        args=([], unlocked_email),
+                        daemon=True,
+                    ).start()
+            except Exception:
+                logger.exception(
+                    "Errore creazione reward referral",
+                    extra={"domain": "dashboard", "event": "referral_rewards_create_failed"},
+                )
 
     if is_new and email:
         threading.Thread(
@@ -284,7 +425,15 @@ def skip_ngrok_interstitial(response):
     return response
 
 # Inizializza la connessione allo storage SQLite
-store = UserStore(db_url=Config.DATABASE_URL)
+# pool piccolo apposta: dashboard admin, max 2 sessioni concorrenti reali (i due
+# cofounder) — vedi analisi 2026-07-16, il pool va condiviso col bot su max_connections=30
+store = UserStore(db_url=Config.DATABASE_URL, pool_size=3, max_overflow=2)
+
+# Dashboard admin: le route /admin/* vivono nel blueprint admin_bp, che legge lo
+# store condiviso da app.config["STORE"] (nessun import di app.py → nessun ciclo).
+app.config["STORE"] = store
+from src.dashboard.admin_routes import admin_bp  # noqa: E402
+app.register_blueprint(admin_bp)
 
 
 @app.route("/unsubscribe", methods=["GET"])
@@ -343,11 +492,22 @@ def webhook_stripe():
 
 
 def _get_session_chat_id() -> str | None:
-    """Ritorna il chat_id della sessione browser se valida."""
+    """Ritorna il chat_id della sessione browser se valida.
+
+    Oltre al flag di login, verifica la `token_version`: il valore salvato nel
+    cookie al login deve combaciare con quello corrente nel DB. In caso contrario
+    la sessione è stata revocata (cambio password, "esci da tutti i dispositivi")
+    o è una sessione legacy anteriore all'introduzione del meccanismo: in entrambi
+    i casi va invalidata forzando un nuovo login.
+    """
     if not session.get("user_logged_in"):
         return None
     chat_id = session.get("chat_id")
     if not chat_id:
+        return None
+    current_version = store.get_token_version(chat_id)
+    if current_version is None or session.get("token_version") != current_version:
+        session.clear()
         return None
     return str(chat_id)
 
@@ -359,6 +519,16 @@ def _get_user_by_chat_id(chat_id: str):
         return s.query(User).filter_by(chat_id=chat_id).first()
 
 
+def _user_has_web_access(user) -> bool:
+    """La web app è riservata agli utenti con backend PostgreSQL.
+
+    Chi ha collegato Notion gestisce le finanze esclusivamente dal bot Telegram
+    e dal proprio workspace Notion: per questi utenti la web app (login browser,
+    chat, onboarding, analytics, gestione spazi, impostazioni) non è disponibile.
+    """
+    return bool(user) and user.storage_backend != "notion"
+
+
 def _build_setup_redirect(chat_id: str) -> str:
     reg_token = store.create_oauth_session(chat_id)
     return url_for("setup_form") + f"?reg_token={reg_token}"
@@ -368,6 +538,10 @@ def _resolve_authenticated_redirect(chat_id: str) -> str:
     """Instrada un utente autenticato verso setup, onboarding o home app."""
     user = _get_user_by_chat_id(chat_id)
     if not user:
+        session.clear()
+        return url_for("web_login")
+    if not _user_has_web_access(user):
+        # Account Notion: nessun accesso alla web app, termina la sessione browser.
         session.clear()
         return url_for("web_login")
     if user.setup_completed_at is None:
@@ -383,7 +557,12 @@ def _resolve_request_chat_id() -> tuple[str | None, str | None]:
     if init_data:
         parsed = _validate_telegram_init_data(init_data)
         if parsed and parsed.get("chat_id"):
-            return str(parsed["chat_id"]), "telegram"
+            chat_id = str(parsed["chat_id"])
+            # Gli utenti Notion non hanno accesso alla web app: nega la risoluzione
+            # così ogni endpoint risponde 401 anche via Telegram WebApp.
+            if not _user_has_web_access(_get_user_by_chat_id(chat_id)):
+                return None, None
+            return chat_id, "telegram"
 
     chat_id = _get_session_chat_id()
     if not chat_id:
@@ -393,11 +572,37 @@ def _resolve_request_chat_id() -> tuple[str | None, str | None]:
     if not user:
         session.clear()
         return None, None
+    if not _user_has_web_access(user):
+        return None, None
     return chat_id, "browser"
 
 
 def _forbidden_setup_response():
     return "<h1>Accesso negato</h1><p>Link non valido o sessione non autorizzata.</p>", 403
+
+
+def _resync_category_cache_from_notion(user: "User") -> None:
+    """Riallinea la cache `user_categories` a Notion dopo una mutazione categoria.
+
+    Per gli utenti Notion, create/rename/delete di categorie dalla web app scrivono
+    solo su Notion: senza questo re-sync la cache (che alimenta il parser del bot)
+    resterebbe disallineata fino al job notturno. Best-effort: la scrittura su Notion
+    è già avvenuta, quindi eventuali errori qui vengono solo loggati.
+    """
+    if user.storage_backend != "notion" or not user.categories_db_id:
+        return
+    try:
+        from src.category_sync import sync_categories_to_local
+
+        notion_client = NotionFinanceClient(
+            api_key=user.notion_access_token,
+            categories_db_id=user.categories_db_id,
+        )
+        sync_categories_to_local(notion_client, user.chat_id, store)
+    except Exception as e:
+        logger.warning(
+            "[Manage] Re-sync cache categorie fallito per %s: %s", user.chat_id, e
+        )
 
 
 def _trigger_dashboard_refresh(user: "User", s) -> None:
@@ -464,7 +669,9 @@ def _trigger_dashboard_refresh(user: "User", s) -> None:
 def login_required(f):
     @wraps(f)
     def decorated_function(*args, **kwargs):
-        if not session.get("user_logged_in"):
+        # _get_session_chat_id valida anche la token_version: una sessione revocata
+        # viene azzerata qui e reindirizzata al login.
+        if not _get_session_chat_id():
             return redirect(url_for("web_login"))
         return f(*args, **kwargs)
     return decorated_function
@@ -548,8 +755,35 @@ def web_login():
                 store.reactivate_user(user.chat_id)
         if user:
             reset_failed_logins(email)
+            if not _user_has_web_access(user):
+                # Account collegato a Notion: la web app non è disponibile.
+                return render_template(
+                    "login.html",
+                    error="Questo account è collegato a Notion: gestisci le tue finanze "
+                          "dal bot Telegram e dal tuo workspace Notion. La web app è "
+                          "riservata agli account con backend PostgreSQL.",
+                    registration_enabled=Config.PUBLIC_REGISTRATION_ENABLED,
+                    next_url=next_url,
+                )
+            # "Ricordami": sessione persistente (sopravvive alla chiusura del
+            # browser); altrimenti cookie di sessione che muore alla chiusura.
+            session.permanent = bool(request.form.get("remember"))
             session["user_logged_in"] = True
             session["chat_id"] = user.chat_id
+            session["token_version"] = user.token_version or 0
+            try:
+                applied = store.apply_pending_referral_rewards(email)
+                if applied:
+                    threading.Thread(
+                        target=_send_referral_reward_emails,
+                        args=(applied, None),
+                        daemon=True,
+                    ).start()
+            except Exception:
+                logger.exception(
+                    "Errore applicazione reward referral pendenti al login",
+                    extra={"domain": "dashboard", "event": "referral_reward_apply_failed"},
+                )
             return redirect(next_url or _resolve_authenticated_redirect(user.chat_id))
 
         error = "Email o password errati."
@@ -642,9 +876,26 @@ def web_register():
         logger.exception("Errore registrazione web per email=%s", email)
         return _err("Errore durante la registrazione. Riprova.")
 
-    analytics.track(web_chat_id, "user_signed_up", {"auth_method": "web", "storage_backend": "postgres"})
+    analytics.track(web_chat_id, "user_signed_up", {"auth_method": "web", "storage_backend": "postgres", "platform": "web"})
+    analytics.identify(web_chat_id, {"auth_method": "web", "storage_backend": "postgres", "platform": "web"})
+    try:
+        applied = store.apply_pending_referral_rewards(email)
+        if applied:
+            threading.Thread(
+                target=_send_referral_reward_emails,
+                args=(applied, None),
+                daemon=True,
+            ).start()
+    except Exception:
+        logger.exception(
+            "Errore applicazione reward referral pendenti alla registrazione",
+            extra={"domain": "dashboard", "event": "referral_reward_apply_failed"},
+        )
+    # Appena registrato: sessione persistente, così non deve rifare login subito.
+    session.permanent = True
     session["user_logged_in"] = True
     session["chat_id"] = web_chat_id
+    session["token_version"] = 0
     return redirect("/onboarding")
 
 
@@ -668,28 +919,10 @@ def web_logout():
     return redirect(url_for("web_login"))
 
 
-# --- API e Utilità ---
-def get_system_metrics():
-    """Recupera l'utilizzo di risorse della macchina."""
-    # RAM
-    vmem = psutil.virtual_memory()
-    # CPU (interval=None è essenziale per non causare blocchi o lag del processo su alcuni OS)
-    cpu = psutil.cpu_percent(interval=None)
-    
-    # DB Size
-    db_path = Config.DATABASE_URL.replace("sqlite:///", "")
-    db_size = 0
-    if os.path.exists(db_path):
-        db_size = os.path.getsize(db_path) / (1024 * 1024) # MB
-        
-    return {
-        "cpu_percent": cpu,
-        "ram_percent": vmem.percent,
-        "ram_used_gb": round(vmem.used / (1024**3), 2),
-        "db_size_mb": round(db_size, 2)
-    }
-
 # --- Rotte Web (UI) ---
+# NB: get_system_metrics() e le route /admin di dashboard sono state estratte nel
+# blueprint src/dashboard/admin_routes.py (registrato più in basso). Qui restano
+# solo login/logout admin, accanto al rate limiter e all'audit log.
 
 ADMIN_LOCKOUT_KEY = "admin_login"
 
@@ -697,7 +930,7 @@ ADMIN_LOCKOUT_KEY = "admin_login"
 @app.route("/admin/login", methods=["GET", "POST"])
 def admin_login():
     if session.get("admin_logged_in"):
-        return redirect(url_for("index"))
+        return redirect(url_for("admin.index"))
 
     error = None
     if request.method == "POST":
@@ -730,7 +963,7 @@ def admin_login():
                 extra={"domain": "security", "event": "admin_login_success",
                        "meta": {"ip": request.remote_addr}},
             )
-            return redirect(url_for("index"))
+            return redirect(url_for("admin.index"))
         else:
             error = "Password amministratore errata!"
             track_failed_login(ADMIN_LOCKOUT_KEY, ACCOUNT_LOCKOUT_WINDOW_SECONDS)
@@ -752,316 +985,6 @@ def admin_logout():
     session.pop("admin_logged_in", None)
     return redirect(url_for("admin_login"))
 
-@app.route("/admin", strict_slashes=False)
-@admin_required
-def index():
-    from sqlalchemy import func, text
-    sys_metrics = get_system_metrics()
-    # Soglia storica ledger: solo dati dal 2026-05-01 in avanti
-    LEDGER_EPOCH = datetime(2026, 5, 1)
-
-    with store.Session() as s:
-        # Statistiche utenti
-        users_count = s.query(User).count()
-        active_users = s.query(User).filter(User.is_active == True).count()
-
-        # Statistiche feedback
-        unread_feedback = s.query(Feedback).filter(Feedback.status == "unread").count()
-
-        # --- TOKEN LEDGER KPI (da LEDGER_EPOCH in avanti) ---
-        ten_days_ago = datetime.utcnow() - timedelta(days=10)
-        thirty_days_ago = datetime.utcnow() - timedelta(days=30)
-
-        # Token usati oggi
-        today_start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
-        tokens_today = s.query(
-            func.coalesce(func.sum(LlmUsageEvent.total_tokens), 0)
-        ).filter(LlmUsageEvent.occurred_at >= today_start).scalar() or 0
-
-        # Token usati negli ultimi 30 giorni
-        tokens_month = s.query(
-            func.coalesce(func.sum(LlmUsageEvent.total_tokens), 0)
-        ).filter(
-            LlmUsageEvent.occurred_at >= max(thirty_days_ago, LEDGER_EPOCH)
-        ).scalar() or 0
-
-        # Costo stimato mese corrente
-        cost_month = s.query(
-            func.coalesce(func.sum(LlmUsageEvent.estimated_cost_amount), 0.0)
-        ).filter(
-            LlmUsageEvent.occurred_at >= max(thirty_days_ago, LEDGER_EPOCH)
-        ).scalar() or 0.0
-
-        # Costo totale storico (da LEDGER_EPOCH)
-        cost_total = s.query(
-            func.coalesce(func.sum(LlmUsageEvent.estimated_cost_amount), 0.0)
-        ).filter(
-            LlmUsageEvent.occurred_at >= LEDGER_EPOCH
-        ).scalar() or 0.0
-
-        # Breakdown token per giorno (ultimi 10 giorni) per grafico
-        ledger_rows = s.execute(
-            text(
-                "SELECT DATE(occurred_at) as d, "
-                "SUM(prompt_tokens) as pt, SUM(completion_tokens) as ct, SUM(total_tokens) as tt "
-                "FROM llm_usage_events "
-                "WHERE occurred_at >= :since "
-                "GROUP BY d ORDER BY d"
-            ),
-            {"since": max(ten_days_ago, LEDGER_EPOCH).isoformat()},
-        ).fetchall()
-
-        # Costruisci chart_data 10 giorni
-        chart_data = {}
-        for x in range(10):
-            d = (datetime.utcnow() - timedelta(days=9 - x)).date()
-            chart_data[d.isoformat()] = {"prompt": 0, "completion": 0, "total": 0}
-        for row in ledger_rows:
-            d_str = str(row[0])
-            if d_str in chart_data:
-                chart_data[d_str]["prompt"] += row[1] or 0
-                chart_data[d_str]["completion"] += row[2] or 0
-                chart_data[d_str]["total"] += row[3] or 0
-
-        labels = list(chart_data.keys())
-        data_prompt = [v["prompt"] for v in chart_data.values()]
-        data_completion = [v["completion"] for v in chart_data.values()]
-        data_total = [v["total"] for v in chart_data.values()]
-
-        # Totale messaggi (proxy: eventi ledger ultimi 10gg)
-        total_messages = sum(data_total)
-        avg_msg_per_user = round(total_messages / active_users, 0) if active_users > 0 else 0
-
-        # GCR e Fallback Rate: calcolati dai DailyMetrics (invariato)
-        ten_days_ago_date = datetime.utcnow().date() - timedelta(days=10)
-        ai_metrics = s.query(DailyMetrics).filter(DailyMetrics.metrics_date >= ten_days_ago_date).all()
-        total_completions = sum(m.goal_completions or 0 for m in ai_metrics)
-        total_fallbacks = sum(m.fallbacks or 0 for m in ai_metrics)
-        total_ai_interactions = total_completions + total_fallbacks
-        if total_ai_interactions > 0:
-            goal_completion_rate = round(total_completions / total_ai_interactions * 100, 1)
-            fallback_rate = round(total_fallbacks / total_ai_interactions * 100, 1)
-        else:
-            goal_completion_rate = None
-            fallback_rate = None
-
-        # --- TOKEN ANALYTICS (90 giorni, disaggregato per operazione e plan_type) ---
-        ninety_days_ago = datetime.utcnow() - timedelta(days=90)
-        
-        # Raw query: raggruppa per data, operazione, e plan_type
-        analytics_rows = s.execute(
-            text(
-                "SELECT "
-                "DATE(e.occurred_at) as d, "
-                "e.operation, "
-                "COALESCE(p.plan_type, 'free') as plan_type, "
-                "COUNT(*) as req_count, "
-                "AVG(CAST(e.total_tokens AS FLOAT)) as avg_tokens, "
-                "SUM(CASE WHEN e.total_tokens > 0 THEN 1 ELSE 0 END) as success_count "
-                "FROM llm_usage_events e "
-                "LEFT JOIN user_plans p ON e.chat_id = p.chat_id "
-                "WHERE e.occurred_at >= :since "
-                "GROUP BY DATE(e.occurred_at), e.operation, COALESCE(p.plan_type, 'free') "
-                "ORDER BY d DESC, e.operation, plan_type"
-            ),
-            {"since": max(ninety_days_ago, LEDGER_EPOCH).isoformat()},
-        ).fetchall()
-        
-        # Aggregazione 1: Richieste per tipo (Free vs Pro)
-        requests_by_op_date = {}
-        for row in analytics_rows:
-            date_str = str(row[0])
-            op = row[1]
-            plan = row[2]
-            count = row[3]
-            
-            if op not in requests_by_op_date:
-                requests_by_op_date[op] = {}
-            if date_str not in requests_by_op_date[op]:
-                requests_by_op_date[op][date_str] = {"free": 0, "pro": 0, "total": 0}
-            
-            requests_by_op_date[op][date_str][plan] = count
-            requests_by_op_date[op][date_str]["total"] += count
-        
-        # Aggregazione 2: Token medio per tipo (Free vs Pro)
-        token_stats_by_op = {}
-        for op in set(row[1] for row in analytics_rows):
-            token_stats_by_op[op] = {
-                "free": {"total_tokens": 0, "count": 0, "avg": 0},
-                "pro": {"total_tokens": 0, "count": 0, "avg": 0},
-            }
-        
-        for row in analytics_rows:
-            op = row[1]
-            plan = row[2]
-            count = row[3]
-            avg_tokens = row[4]
-            
-            if avg_tokens and op in token_stats_by_op:
-                token_stats_by_op[op][plan]["total_tokens"] += (avg_tokens * count)
-                token_stats_by_op[op][plan]["count"] += count
-        
-        # Calcola media finale
-        token_stats_display = {}
-        for op, plans in token_stats_by_op.items():
-            token_stats_display[op] = {}
-            grand_total = 0
-            grand_count = 0
-            
-            for plan in ["free", "pro"]:
-                if plans[plan]["count"] > 0:
-                    avg = round(plans[plan]["total_tokens"] / plans[plan]["count"], 0)
-                    token_stats_display[op][plan] = int(avg)
-                    grand_total += plans[plan]["total_tokens"]
-                    grand_count += plans[plan]["count"]
-                else:
-                    token_stats_display[op][plan] = 0
-            
-            token_stats_display[op]["total"] = int(round(grand_total / grand_count, 0)) if grand_count > 0 else 0
-        
-        # Aggregazione 3: Conversion rate per tipo (success = token > 0)
-        conversion_rates_by_op = {}
-        for op in set(row[1] for row in analytics_rows):
-            conversion_rates_by_op[op] = {
-                "free": {"success": 0, "total": 0},
-                "pro": {"success": 0, "total": 0},
-            }
-        
-        for row in analytics_rows:
-            op = row[1]
-            plan = row[2]
-            req_count = row[3]
-            success_count = row[5]
-            
-            if op in conversion_rates_by_op:
-                conversion_rates_by_op[op][plan]["success"] += success_count
-                conversion_rates_by_op[op][plan]["total"] += req_count
-        
-        # Calcola percentuali
-        conversion_display = {}
-        for op, plans in conversion_rates_by_op.items():
-            conversion_display[op] = {}
-            grand_success = 0
-            grand_total = 0
-            
-            for plan in ["free", "pro"]:
-                total = plans[plan]["total"]
-                success = plans[plan]["success"]
-                pct = round(100 * success / total, 1) if total > 0 else 0
-                conversion_display[op][plan] = pct
-                grand_success += success
-                grand_total += total
-            
-            conversion_display[op]["total"] = round(100 * grand_success / grand_total, 1) if grand_total > 0 else 0
-        
-        # Prepara dati per template (serializzati in modo sicuro da Jinja con |tojson)
-        analytics_data = {
-            "requests_by_operation": {k: {str(date): v for date, v in dates.items()} for k, dates in requests_by_op_date.items()},
-            "token_stats": token_stats_display,
-            "conversion_rates": conversion_display,
-        }
-
-    return render_template(
-        "index.html",
-        sys=sys_metrics,
-        users_count=users_count,
-        active_users=active_users,
-        unread_feedback=unread_feedback,
-        # Grafici token ledger
-        chart_labels=labels,
-        chart_prompt=data_prompt,
-        chart_completion=data_completion,
-        chart_total=data_total,
-        # KPI token
-        tokens_today=tokens_today,
-        tokens_month=tokens_month,
-        cost_month=round(cost_month, 4),
-        cost_total=round(cost_total, 4),
-        avg_msg_per_user=avg_msg_per_user,
-        goal_completion_rate=goal_completion_rate,
-        fallback_rate=fallback_rate,
-        # Token Analytics (90 giorni)
-        analytics_data=analytics_data,
-    )
-
-@app.route("/api/users/token-usage")
-@admin_required
-def users_token_usage():
-    """Restituisce il consumo token per ogni utente nel ciclo corrente."""
-    from sqlalchemy import func, text
-    rows = []
-    with store.Session() as s:
-        result = s.execute(text(
-            "SELECT e.chat_id, u.username, "
-            "COUNT(*) as req_count, "
-            "SUM(e.total_tokens) as total_tokens, "
-            "SUM(COALESCE(e.estimated_cost_amount, 0)) as total_cost, "
-            "MAX(e.occurred_at) as last_seen "
-            "FROM llm_usage_events e "
-            "LEFT JOIN users u ON u.chat_id = e.chat_id "
-            "GROUP BY e.chat_id, u.username "
-            "ORDER BY total_tokens DESC"
-        )).fetchall()
-        for r in result:
-            rows.append({
-                "chat_id": r[0],
-                "username": r[1] or r[0],
-                "req_count": r[2],
-                "total_tokens": r[3] or 0,
-                "total_cost_usd": round(r[4] or 0, 6),
-                "last_seen": str(r[5])[:16] if r[5] else "—",
-            })
-    return jsonify(rows)
-
-
-@app.route("/admin/users", strict_slashes=False)
-@admin_required
-def users_list():
-    with store.Session() as s:
-        users = s.query(User).order_by(User.created_at.desc()).all()
-    return render_template("users.html", users=users)
-
-@app.route("/api/toggle-user/<chat_id>", methods=["POST"])
-@admin_required
-def toggle_user(chat_id):
-    with store.Session() as s:
-        user = s.query(User).filter(User.chat_id == chat_id).first()
-        if user:
-            user.is_active = not user.is_active
-            s.commit()
-            return jsonify({"status": "ok", "new_state": user.is_active})
-    return jsonify({"error": "User not found"}), 404
-
-@app.route("/admin/feedbacks", strict_slashes=False)
-@admin_required
-def feedbacks_list():
-    with store.Session() as s:
-        fbs = s.query(Feedback).order_by(Feedback.created_at.desc()).all()
-    return render_template("feedbacks.html", feedbacks=fbs)
-
-@app.route("/api/resolve-feedback/<int:fb_id>", methods=["POST"])
-@admin_required
-def resolve_feedback(fb_id):
-    with store.Session() as s:
-        fb = s.query(Feedback).filter(Feedback.id == fb_id).first()
-        if fb:
-            fb.status = "resolved" if fb.status == "unread" else "unread"
-            s.commit()
-            return jsonify({"status": "ok", "new_state": fb.status})
-    return jsonify({"error": "Feedback not found"}), 404
-
-@app.route("/admin/logs", strict_slashes=False)
-@admin_required
-def logs_viewer():
-    log_file = Config.LOG_DIR / "agent.log"
-    log_lines = []
-    if os.path.exists(log_file):
-        with open(log_file, "r") as f:
-            # Raccogli le ultime 100 righe
-            lines = f.readlines()
-            log_lines = lines[-100:]
-            
-    return render_template("logs.html", log_lines=log_lines)
 
 # --- ROTTE OAUTH (Fase 2) ---
 
@@ -1159,6 +1082,8 @@ def _process_oauth_background(
             subscriptions_db_id=valid_discovered.get("subscriptions_db_id"),
             pay_transfer_db_id=valid_discovered.get("pay_transfer_db_id"),
         )
+        analytics.track(chat_id, "user_signed_up", {"auth_method": "telegram", "storage_backend": "notion", "platform": "telegram"})
+        analytics.identify(chat_id, {"auth_method": "telegram", "storage_backend": "notion", "platform": "telegram"})
 
         # 4. Cache degli schemi
         for db_key, schema_data in discovered_schemas.items():
@@ -1332,6 +1257,8 @@ def _process_postgres_background(chat_id: str) -> None:
         # Trigger A: prima sincronizzazione medie categorie per utente Postgres
         refresh_category_averages(chat_id, store, session=session)
         store.mark_setup_completed(chat_id)
+        analytics.track(chat_id, "user_signed_up", {"auth_method": "telegram", "storage_backend": "postgres", "platform": "telegram"})
+        analytics.identify(chat_id, {"auth_method": "telegram", "storage_backend": "postgres", "platform": "telegram"})
 
         reg_token = store.create_oauth_session(chat_id)
         miniapp_url = f"{Config.WEBAPP_BASE_URL}/setup?reg_token={reg_token}"
@@ -1615,6 +1542,10 @@ def setup_form():
         if not sess:
              return _forbidden_setup_response()
 
+        # Lega la RLS prima di qualsiasi altra query protetta (vedi rls.rebind_user).
+        from src.storage import rls
+        rls.rebind_user(s, sess.chat_id)
+
         user = s.query(User).filter_by(chat_id=sess.chat_id).first()
         if not user:
             return _forbidden_setup_response()
@@ -1727,11 +1658,13 @@ def setup_form():
             logger.exception("[Setup] fetch_categories da Notion fallito: %s", e)
             try:
                 from src.storage.models import UserCategory
-                cat_rows = s.query(UserCategory).filter_by(user_id=user.chat_id).all()
-                available_categories = [
-                    {"id": r.notion_page_id or str(r.id), "name": r.name, "monthly_budget": r.monthly_budget}
-                    for r in cat_rows
-                ]
+                # Sessione bindata al tenant per la RLS (user_categories è protetta).
+                with store._user_session(user.chat_id) as _cs:
+                    cat_rows = _cs.query(UserCategory).filter_by(user_id=user.chat_id).all()
+                    available_categories = [
+                        {"id": r.notion_page_id or str(r.id), "name": r.name, "monthly_budget": r.monthly_budget}
+                        for r in cat_rows
+                    ]
             except Exception as e2:
                 logger.exception("[Setup] fetch_categories da DB fallito: %s", e2)
 
@@ -1779,6 +1712,10 @@ def api_setup_complete():
         sess = s.query(OAuthSession).filter_by(state=reg_token).first()
         if not sess:
             return jsonify({"error": "Access denied"}), 403
+
+        # Lega la RLS prima di qualsiasi altra query protetta (vedi rls.rebind_user).
+        from src.storage import rls
+        rls.rebind_user(s, sess.chat_id)
 
         user = s.query(User).filter_by(chat_id=sess.chat_id).first()
         if not user:
@@ -2107,6 +2044,11 @@ def api_manage_add():
         sess = s.query(OAuthSession).filter_by(state=reg_token).first()
         if not sess:
             return jsonify({"error": "Access denied"}), 403
+
+        # Lega la RLS prima di qualsiasi altra query protetta (vedi rls.rebind_user).
+        from src.storage import rls
+        rls.rebind_user(s, sess.chat_id)
+
         user = s.query(User).filter_by(chat_id=sess.chat_id).first()
         if not user:
             return jsonify({"error": "Access denied"}), 403
@@ -2184,6 +2126,8 @@ def api_manage_add():
                 else:
                     return jsonify({"error": f"entity_type '{entity_type}' non supportato"}), 400
 
+            if entity_type == "category":
+                _resync_category_cache_from_notion(user)
             _trigger_dashboard_refresh(user, s)
             return jsonify({"status": "ok", "entity": result})
         except Exception as e:
@@ -2214,6 +2158,11 @@ def api_manage_remove():
         sess = s.query(OAuthSession).filter_by(state=reg_token).first()
         if not sess:
             return jsonify({"error": "Access denied"}), 403
+
+        # Lega la RLS prima di qualsiasi altra query protetta (vedi rls.rebind_user).
+        from src.storage import rls
+        rls.rebind_user(s, sess.chat_id)
+
         user = s.query(User).filter_by(chat_id=sess.chat_id).first()
         if not user:
             return jsonify({"error": "Access denied"}), 403
@@ -2235,6 +2184,8 @@ def api_manage_remove():
                 notion_raw = NotionClient(auth=user.notion_access_token)
                 notion_raw.pages.update(page_id=str(entity_id), archived=True)
 
+            if entity_type == "category":
+                _resync_category_cache_from_notion(user)
             _trigger_dashboard_refresh(user, s)
             return jsonify({"status": "ok"})
         except Exception as e:
@@ -2267,6 +2218,11 @@ def api_manage_update():
         sess = s.query(OAuthSession).filter_by(state=reg_token).first()
         if not sess:
             return jsonify({"error": "Access denied"}), 403
+
+        # Lega la RLS prima di qualsiasi altra query protetta (vedi rls.rebind_user).
+        from src.storage import rls
+        rls.rebind_user(s, sess.chat_id)
+
         user = s.query(User).filter_by(chat_id=sess.chat_id).first()
         if not user:
             return jsonify({"error": "Access denied"}), 403
@@ -2408,6 +2364,8 @@ def api_manage_update():
                             raise
                 result = {"id": entity_id, **data}
 
+            if entity_type == "category":
+                _resync_category_cache_from_notion(user)
             _trigger_dashboard_refresh(user, s)
             return jsonify({"status": "ok", "entity": result})
         except Exception as e:
@@ -2447,12 +2405,37 @@ def _build_financial_storage(user, pg_session=None):
     return NotionStorage(notion_client, store=store, user_id=user.chat_id)
 
 
-def _chat_parse_text(chat_id: str, text: str, skip_length_check: bool = False) -> tuple[dict | None, dict | None, str]:
-    """Valida, sanitizza e lancia il parsing LLM su un messaggio testuale.
+def _resolve_account_hint(hint: str | None, accounts: list[dict]) -> dict | None:
+    """Risolve un nome conto libero (hint estratto dall'NLP) su un conto reale dell'utente.
 
-    Ritorna (result, usage, error_reply). Se error_reply è non-None il chiamante
-    deve restituire un errore al client senza procedere.
+    Stessa logica di `_resolve_account_hint` in bot.py: match esatto case-insensitive,
+    poi fuzzy match (soglia 0.6) sui nomi conto. None se non menzionato o senza match.
+    """
+    if not hint:
+        return None
+    hint_low = hint.strip().lower()
+    for acc in accounts:
+        if acc["name"].strip().lower() == hint_low:
+            return acc
+    names_low = [a["name"].strip().lower() for a in accounts]
+    matches = difflib.get_close_matches(hint_low, names_low, n=1, cutoff=0.6)
+    if matches:
+        return next(a for a in accounts if a["name"].strip().lower() == matches[0])
+    return None
+
+
+def _chat_parse_text(
+    chat_id: str, text: str, skip_length_check: bool = False, input_method: str = "text",
+) -> tuple[list[dict] | None, dict | None, str]:
+    """Valida, sanitizza e lancia il parsing LLM (multi-transazione) su un messaggio testuale.
+
+    Ritorna (results, usage, error_reply). Se error_reply è non-None il chiamante
+    deve restituire un errore al client senza procedere. `results` è una lista di
+    transazioni rilevate (può contenerne più di una, es. scontrino con più voci).
     skip_length_check=True per testo OCR (generato dal sistema, non digitato dall'utente).
+    input_method taggato nel ledger token: 'text' (default, chat scritta),
+    'voice' (dopo trascrizione) o 'photo' (dopo OCR scontrino) — impostato dal
+    chiamante, che sa da quale endpoint (/api/chat/message|voice|photo) proviene.
     """
     from src.expense_parser import ExpenseParser
     from src.rate_limiter import is_rate_limited
@@ -2495,10 +2478,10 @@ def _chat_parse_text(chat_id: str, text: str, skip_length_check: bool = False) -
     except Exception:
         pass
 
-    # Parsing LLM
+    # Parsing LLM (multi-transazione: un messaggio può contenere più spese/entrate)
     try:
         parser = ExpenseParser(categories=categories)
-        result, usage = parser.parse_with_usage(safe_input)
+        results, usage = parser.parse_multi_with_usage(safe_input, chat_id)
     except Exception as e:
         logger.exception("Errore ExpenseParser chat: %s", e)
         return None, None, "⚠️ Errore interno durante il parsing. Riprova."
@@ -2516,6 +2499,7 @@ def _chat_parse_text(chat_id: str, text: str, skip_length_check: bool = False) -
                 prompt_tokens=usage.get("prompt_tokens", 0),
                 completion_tokens=usage.get("completion_tokens", 0),
                 total_tokens=usage.get("total_tokens", 0),
+                input_method=input_method,
             )
         except Exception:
             pass
@@ -2523,7 +2507,11 @@ def _chat_parse_text(chat_id: str, text: str, skip_length_check: bool = False) -
     # Categorizzazione adattiva — stesso hook usato da bot.py (src/category_matcher.py),
     # qui mancava: senza questo la chat webapp non traccia mai le occorrenze e resta
     # bloccata sulla categoria fallback anche dopo N ripetizioni dello stesso pattern.
-    if result and result.get("type") == "expense" and result.get("category"):
+    # parse_multi_with_usage ritorna una lista (un messaggio può contenere più transazioni):
+    # il tracking va applicato a ciascun elemento, non al risultato nel suo insieme.
+    for item in results or []:
+        if not (item and item.get("type") == "expense" and item.get("category")):
+            continue
         try:
             cm_user = _get_user_by_chat_id(chat_id)
             if cm_user.storage_backend == "postgres":
@@ -2531,23 +2519,23 @@ def _chat_parse_text(chat_id: str, text: str, skip_length_check: bool = False) -
                     cm_storage = _build_financial_storage(cm_user, pg_session=s)
                     match_result = category_matcher.evaluate_and_track(
                         s, cm_storage, store, chat_id,
-                        result["name"], result["category"], categories,
+                        item["name"], item["category"], categories,
                     )
             else:
                 cm_storage = _build_financial_storage(cm_user)
                 with store.Session() as cm_session:
                     match_result = category_matcher.evaluate_and_track(
                         cm_session, cm_storage, store, chat_id,
-                        result["name"], result["category"], categories,
+                        item["name"], item["category"], categories,
                     )
-            result["category"] = match_result.category_name
+            item["category"] = match_result.category_name
         except Exception:
             logger.exception("Errore categorizzazione adattiva chat webapp")
 
-    return result, usage, ""
+    return results, usage, ""
 
 
-def _build_parse_reply(result: dict) -> tuple[str, dict]:
+def _build_parse_reply(result: dict, from_name: str | None = None, to_name: str | None = None) -> tuple[str, dict]:
     """Costruisce il testo di preview e il dict parsed da mandare al client."""
     parsed_type = result.get("type", "expense")
     amount_str = f"€{result['amount']:.2f}" if result.get("amount") else "importo non specificato"
@@ -2558,6 +2546,15 @@ def _build_parse_reply(result: dict) -> tuple[str, dict]:
         cat = result.get("category") or "Altro"
         name = result.get("name") or "Spesa"
         reply = f"Ho interpretato **{name}** di {amount_str} nella categoria _{cat}_ ({date_str}). Confermi?"
+    elif parsed_type == "transfer":
+        name = result.get("name") or "Trasferimento"
+        reply = (
+            f"📝 Nuovo trasferimento riconosciuto:\n\n"
+            f"💰 Importo: **{amount_str}**\n"
+            f"🏦 Da: **{from_name or '—'}**\n"
+            f"🏦 A: **{to_name or '—'}**\n"
+            f"📝 Descrizione: **{name}**\n\nConfermi?"
+        )
     else:
         income_type = result.get("income_type") or "Entrata"
         name = result.get("name") or "Entrata"
@@ -2574,9 +2571,150 @@ def _build_parse_reply(result: dict) -> tuple[str, dict]:
     return reply, parsed
 
 
+def _build_transaction_payload(result: dict, accounts: list[dict], categories: list[str]) -> dict:
+    """Arricchisce un item parsato con conti/categorie e i flag di step successivo.
+
+    Replica le domande sequenziali del bot Telegram: importo mancante, risoluzione
+    conti (con hint LLM) per i trasferimenti, e blocco se mancano conti sufficienti.
+    I conti (e per i trasferimenti gli hint risolti) sono sempre inclusi nel `parsed`,
+    anche quando manca l'importo, così il frontend non deve rifare un giro di rete
+    quando l'utente completa l'importo in un messaggio successivo.
+    """
+    parsed_type = result.get("type", "expense")
+    amount_missing = result.get("amount") is None
+
+    if parsed_type == "transfer":
+        from_match = _resolve_account_hint(result.get("from_account"), accounts)
+        to_match = _resolve_account_hint(result.get("to_account"), accounts)
+        if from_match and to_match and str(from_match["id"]) == str(to_match["id"]):
+            to_match = None
+        from_name = from_match["name"] if from_match else None
+        to_name = to_match["name"] if to_match else None
+
+        reply, parsed = _build_parse_reply(result, from_name=from_name, to_name=to_name)
+        parsed["accounts"] = accounts
+        parsed["resolved_from_account_id"] = from_match["id"] if from_match else None
+        parsed["resolved_from_account_name"] = from_match["name"] if from_match else None
+        parsed["resolved_to_account_id"] = to_match["id"] if to_match else None
+        parsed["resolved_to_account_name"] = to_match["name"] if to_match else None
+
+        if amount_missing:
+            return {
+                "type": parsed_type,
+                "reply": "📝 Quanto vuoi trasferire? Scrivi solo l'importo (es. 100).",
+                "parsed": parsed,
+                "needs_amount": True,
+                "awaiting_confirm": False,
+            }
+        if len(accounts) < 2:
+            return {
+                "type": parsed_type,
+                "reply": (
+                    "🏦 Ti servono almeno due conti per fare un trasferimento.\n\n"
+                    "Aggiungine uno nella tab \"Conti\" del tuo spazio."
+                ),
+                "parsed": parsed,
+                "needs_second_account": True,
+                "awaiting_confirm": False,
+            }
+        # Come bot.py:_advance_transfer_flow — se un conto non è stato risolto dagli hint
+        # LLM, si chiede via picker PRIMA di mostrare il riepilogo di conferma.
+        if not from_match:
+            return {
+                "type": parsed_type,
+                "reply": "🏦 Da quale conto vuoi spostare i soldi?",
+                "parsed": parsed,
+                "needs_account_pick": "from",
+                "awaiting_confirm": False,
+            }
+        if not to_match:
+            return {
+                "type": parsed_type,
+                "reply": "🏦 Su quale conto vuoi spostare i soldi?",
+                "parsed": parsed,
+                "needs_account_pick": "to",
+                "awaiting_confirm": False,
+            }
+        return {"type": parsed_type, "reply": reply, "parsed": parsed, "awaiting_confirm": True}
+
+    reply, parsed = _build_parse_reply(result)
+    parsed["accounts"] = accounts
+    if parsed_type == "expense":
+        parsed["categories"] = categories
+
+    if amount_missing:
+        return {
+            "type": parsed_type,
+            "reply": "📝 Non ho capito l'importo. Prova a ridirmelo, scrivendo solo il numero (es. 20 o 20,50).",
+            "parsed": parsed,
+            "needs_amount": True,
+            "awaiting_confirm": False,
+        }
+    return {"type": parsed_type, "reply": reply, "parsed": parsed, "awaiting_confirm": True}
+
+
+def _build_chat_parse_result(chat_id: str, results: list[dict] | None, error_reply: str) -> dict:
+    """Costruisce il payload JSON-able per una risposta di parsing chat (0+ transazioni).
+
+    Condiviso da /api/chat/message, /api/chat/voice, /api/chat/photo: tutti e tre
+    lanciano lo stesso parsing multi-transazione e devono offrire la stessa UX
+    (conti, categorie, trasferimenti) indipendentemente dal canale di input.
+    """
+    if error_reply:
+        try:
+            store.log_message(chat_id, source="webapp", role="bot", text=error_reply)
+        except Exception:
+            pass
+        return {"ok": False, "type": "error", "reply": error_reply, "saved": False}
+
+    if not results:
+        unknown_reply = "Non ho riconosciuto una transazione nel tuo messaggio. Prova con qualcosa come «ho speso 20€ al supermercato» 🛒"
+        try:
+            store.log_message(chat_id, source="webapp", role="bot", text=unknown_reply)
+        except Exception:
+            pass
+        return {"ok": True, "type": "unknown", "reply": unknown_reply, "saved": False}
+
+    accounts: list[dict] = []
+    categories: list[str] = []
+    try:
+        user = _get_user_by_chat_id(chat_id)
+        if user.storage_backend == "postgres":
+            with store.Session() as s:
+                storage = _build_financial_storage(user, pg_session=s)
+                accounts = storage.fetch_accounts()
+                categories = storage.get_category_names()
+        else:
+            storage = _build_financial_storage(user)
+            accounts = storage.fetch_accounts()
+            categories = storage.get_category_names()
+    except Exception as e:
+        logger.exception("Errore fetch accounts/categorie chat: %s", e)
+
+    if not accounts:
+        no_account_reply = (
+            "🏦 Non hai ancora nessun conto su Expensum, quindi non posso registrare la transazione.\n\n"
+            "Aggiungine uno nella tab \"Conti\" del tuo spazio, poi rimanda il messaggio."
+        )
+        try:
+            store.log_message(chat_id, source="webapp", role="bot", text=no_account_reply)
+        except Exception:
+            pass
+        return {"ok": False, "type": "no_account", "reply": no_account_reply, "saved": False, "setup_path": "/spazio"}
+
+    transactions = [_build_transaction_payload(r, accounts, categories) for r in results]
+    for tx in transactions:
+        try:
+            store.log_message(chat_id, source="webapp", role="bot", text=tx["reply"], metadata=tx["parsed"])
+        except Exception:
+            pass
+
+    return {"ok": True, "transactions": transactions}
+
+
 @app.route("/api/chat/message", methods=["POST"])
 def api_chat_message():
-    """Parse-only: interpreta il messaggio via LLM ma non salva. Richiede conferma."""
+    """Parse-only: interpreta il messaggio via LLM (anche multi-transazione), non salva."""
     chat_id, _ = _resolve_request_chat_id()
     if not chat_id:
         return jsonify({"error": "Unauthorized"}), 401
@@ -2586,48 +2724,24 @@ def api_chat_message():
     if not text:
         return jsonify({"error": "Testo vuoto"}), 400
 
-    result, _usage, error_reply = _chat_parse_text(chat_id, text)
+    results, _usage, error_reply = _chat_parse_text(chat_id, text)
 
-    if error_reply:
-        # Distinguiamo tra errore di validazione e parsing fallito
-        if result is None and error_reply.startswith("⚠️") or error_reply.startswith("🔒") or error_reply.startswith("⏳"):
-            # Log il messaggio utente anche in caso di errore lieve
-            try:
-                store.log_message(chat_id, source="webapp", role="user", text=text)
-                store.log_message(chat_id, source="webapp", role="bot", text=error_reply)
-            except Exception:
-                pass
-            return jsonify({"ok": False, "type": "error", "reply": error_reply, "saved": False})
-        return jsonify({"ok": False, "type": "error", "reply": error_reply, "saved": False})
-
-    # Log messaggio utente
     try:
         store.log_message(chat_id, source="webapp", role="user", text=text)
     except Exception:
         pass
 
-    if result is None:
-        unknown_reply = "Non ho riconosciuto una transazione nel tuo messaggio. Prova con qualcosa come «ho speso 20€ al supermercato» 🛒"
-        try:
-            store.log_message(chat_id, source="webapp", role="bot", text=unknown_reply)
-        except Exception:
-            pass
-        return jsonify({"ok": True, "type": "unknown", "reply": unknown_reply, "saved": False})
-
-    reply, parsed = _build_parse_reply(result)
-
-    # Log preview bot (non ancora confermata)
-    try:
-        store.log_message(chat_id, source="webapp", role="bot", text=reply, metadata=parsed)
-    except Exception:
-        pass
-
-    return jsonify({"ok": True, "type": parsed["type"], "parsed": parsed, "reply": reply, "saved": False})
+    return jsonify(_build_chat_parse_result(chat_id, results, error_reply))
 
 
 @app.route("/api/chat/confirm", methods=["POST"])
 def api_chat_confirm():
-    """Salva la transazione parsata dopo conferma esplicita dell'utente."""
+    """Salva la transazione parsata dopo conferma esplicita dell'utente.
+
+    Il conto (o i due conti, per un trasferimento) va scelto esplicitamente dal
+    frontend — niente più default silenzioso sul primo conto dell'utente, per
+    parità con il bot Telegram (bot.py:2472-2515, 2517-2549).
+    """
     chat_id, _ = _resolve_request_chat_id()
     if not chat_id:
         return jsonify({"error": "Unauthorized"}), 401
@@ -2635,9 +2749,21 @@ def api_chat_confirm():
     data = request.get_json(silent=True) or {}
     parsed = data.get("parsed") or {}
     parsed_type = parsed.get("type", "expense")
+    category_override = data.get("category")
+    account_id = data.get("account_id")
+    from_account_id = data.get("from_account_id")
+    to_account_id = data.get("to_account_id")
 
     if not parsed.get("amount"):
         return jsonify({"error": "Dati transazione mancanti"}), 400
+
+    if parsed_type == "transfer":
+        if not from_account_id or not to_account_id:
+            return jsonify({"error": "Conto di origine/destinazione mancante"}), 400
+        if str(from_account_id) == str(to_account_id):
+            return jsonify({"error": "Il conto di destinazione deve essere diverso da quello di origine"}), 400
+    elif not account_id:
+        return jsonify({"error": "Conto mancante"}), 400
 
     user = _get_user_by_chat_id(chat_id)
     if not user:
@@ -2655,84 +2781,52 @@ def api_chat_confirm():
     _is_first_expense = False
     try:
         if user.storage_backend == "postgres" and parsed_type == "expense":
-            with store.Session() as _s:
+            # Sessione bindata al tenant per la RLS (expenses è protetta).
+            with store._user_session(chat_id) as _s:
                 from src.storage.models import Expense as _ExpenseModel
                 _count = _s.query(_ExpenseModel).filter_by(user_id=chat_id).count()
                 _is_first_expense = _count == 0
     except Exception:
         pass
 
+    def _save(storage) -> None:
+        if parsed_type == "expense":
+            storage.create_expense(
+                expense_date=tx_date,
+                amount=float(parsed.get("amount") or 0),
+                category_name=category_override or parsed.get("category") or "Altro",
+                name=parsed.get("name") or "Spesa",
+                account_id=account_id,
+            )
+        elif parsed_type == "transfer":
+            storage.create_transfer(
+                transfer_date=tx_date,
+                amount=float(parsed.get("amount") or 0),
+                from_account_id=from_account_id,
+                to_account_id=to_account_id,
+                name=parsed.get("name") or "Trasferimento",
+            )
+        else:
+            storage.create_income(
+                income_date=tx_date,
+                amount=float(parsed.get("amount") or 0),
+                income_type=parsed.get("income_type") or "Stipendio",
+                name=parsed.get("name") or "Entrata",
+                account_id=account_id,
+            )
+
     saved = False
-    no_account = False
     try:
         if user.storage_backend == "postgres":
             with store.Session() as s:
                 storage = _build_financial_storage(user, pg_session=s)
-                accounts = storage.fetch_accounts()
-                if not accounts:
-                    no_account = True
-                else:
-                    default_account_id = accounts[0]["id"]
-                    if parsed_type == "expense":
-                        storage.create_expense(
-                            expense_date=tx_date,
-                            amount=float(parsed.get("amount") or 0),
-                            category_name=parsed.get("category") or "Altro",
-                            name=parsed.get("name") or "Spesa",
-                            account_id=default_account_id,
-                        )
-                    else:
-                        storage.create_income(
-                            income_date=tx_date,
-                            amount=float(parsed.get("amount") or 0),
-                            income_type=parsed.get("income_type") or "Stipendio",
-                            name=parsed.get("name") or "Entrata",
-                            account_id=default_account_id,
-                        )
+                _save(storage)
         else:
             storage = _build_financial_storage(user)
-            accounts = storage.fetch_accounts()
-            if not accounts:
-                no_account = True
-            else:
-                default_account_id = accounts[0]["id"]
-                if parsed_type == "expense":
-                    storage.create_expense(
-                        expense_date=tx_date,
-                        amount=float(parsed.get("amount") or 0),
-                        category_name=parsed.get("category") or "Altro",
-                        name=parsed.get("name") or "Spesa",
-                        account_id=default_account_id,
-                    )
-                else:
-                    storage.create_income(
-                        income_date=tx_date,
-                        amount=float(parsed.get("amount") or 0),
-                        income_type=parsed.get("income_type") or "Stipendio",
-                        name=parsed.get("name") or "Entrata",
-                        account_id=default_account_id,
-                    )
-        saved = not no_account
+            _save(storage)
+        saved = True
     except Exception as e:
         logger.exception("Errore salvataggio transazione confermata: %s", e)
-
-    if no_account:
-        analytics.track(chat_id, "expense_tracking_failed", {"reason": "no_account", "input_method": data.get("input_method", "text")})
-        reply = (
-            "🏦 Non hai ancora nessun conto su Expensum, quindi non posso registrare la transazione. "
-            "Aggiungine uno nella tab \"Conti\" del tuo spazio."
-        )
-        try:
-            store.log_message(chat_id, source="webapp", role="bot", text=reply, metadata=None)
-        except Exception:
-            pass
-        return jsonify({
-            "ok": False,
-            "saved": False,
-            "error": "no_account",
-            "reply": reply,
-            "setup_path": "/spazio",
-        })
 
     if saved:
         input_method = data.get("input_method", "text")
@@ -2740,20 +2834,33 @@ def api_chat_confirm():
             "input_method": input_method,
             "storage_backend": user.storage_backend,
             "transaction_type": parsed_type,
+            "platform": "web",
         })
+        store.record_tx_event(chat_id, parsed_type, input_method, "confirmed", "webapp")
         if _is_first_expense:
-            analytics.track(chat_id, "first_expense_tracked", {"input_method": input_method})
+            analytics.track(chat_id, "first_expense_tracked", {"input_method": input_method, "platform": "web"})
     else:
-        analytics.track(chat_id, "expense_tracking_failed", {"reason": "save_error"})
+        analytics.track(chat_id, "expense_tracking_failed", {"reason": "save_error", "platform": "web"})
+        store.record_tx_event(
+            chat_id, parsed_type, data.get("input_method", "text"), "failed", "webapp",
+            reason="save_error",
+        )
 
     amount_str = f"€{float(parsed.get('amount', 0)):.2f}"
     if parsed_type == "expense":
-        cat = parsed.get("category") or "Altro"
+        cat = category_override or parsed.get("category") or "Altro"
         name = parsed.get("name") or "Spesa"
         if saved:
             reply = f"✅ Ho registrato **{name}** di {amount_str} nella categoria _{cat}_."
         else:
             reply = f"⚠️ Ho interpretato **{name}** di {amount_str}, ma non sono riuscito a salvarlo. Riprova."
+    elif parsed_type == "transfer":
+        from_name = parsed.get("resolved_from_account_name") or "—"
+        to_name = parsed.get("resolved_to_account_name") or "—"
+        if saved:
+            reply = f"✅ Trasferiti {amount_str} da **{from_name}** a **{to_name}**."
+        else:
+            reply = f"⚠️ Ho interpretato il trasferimento di {amount_str}, ma non sono riuscito a salvarlo. Riprova."
     else:
         income_type = parsed.get("income_type") or "Entrata"
         name = parsed.get("name") or "Entrata"
@@ -2799,8 +2906,9 @@ def api_chat_voice():
     # Trascrizione Gemini Vertex AI
     transcribed = ""
     try:
-        from google import genai
         from google.genai import types as genai_types
+
+        from src.vertex_ai_client import get_vertex_ai_client
 
         audio_bytes = audio_file.read()
         if len(audio_bytes) > max_bytes:
@@ -2812,11 +2920,7 @@ def api_chat_voice():
         if len(audio_bytes) < 100:
             return jsonify({"ok": False, "reply": "⚠️ Audio troppo corto o vuoto.", "saved": False})
 
-        client_ai = genai.Client(
-            vertexai=True,
-            project=Config.GOOGLE_CLOUD_PROJECT,
-            location=Config.VERTEX_AI_LOCATION,
-        )
+        client_ai = get_vertex_ai_client()
         audio_part = genai_types.Part.from_bytes(data=audio_bytes, mime_type="audio/webm")
         response = client_ai.models.generate_content(
             model=Config.GEMINI_MODEL,
@@ -2834,7 +2938,7 @@ def api_chat_voice():
     if not transcribed:
         return jsonify({"ok": False, "reply": "⚠️ Non sono riuscito a trascrivere l'audio. Parla più chiaramente o scrivi il messaggio.", "saved": False})
 
-    result, _usage, error_reply = _chat_parse_text(chat_id, transcribed)
+    results, _usage, error_reply = _chat_parse_text(chat_id, transcribed, input_method="voice")
 
     user_text = f"🎤 {transcribed}"
     try:
@@ -2842,28 +2946,9 @@ def api_chat_voice():
     except Exception:
         pass
 
-    if error_reply:
-        try:
-            store.log_message(chat_id, source="webapp", role="bot", text=error_reply)
-        except Exception:
-            pass
-        return jsonify({"ok": False, "type": "error", "reply": error_reply, "saved": False, "transcription": transcribed})
-
-    if result is None:
-        unknown_reply = "Non ho riconosciuto una transazione nel tuo messaggio vocale. Prova a descrivere la spesa più chiaramente."
-        try:
-            store.log_message(chat_id, source="webapp", role="bot", text=unknown_reply)
-        except Exception:
-            pass
-        return jsonify({"ok": True, "type": "unknown", "reply": unknown_reply, "saved": False, "transcription": transcribed})
-
-    reply, parsed = _build_parse_reply(result)
-    try:
-        store.log_message(chat_id, source="webapp", role="bot", text=reply, metadata=parsed)
-    except Exception:
-        pass
-
-    return jsonify({"ok": True, "type": parsed["type"], "parsed": parsed, "reply": reply, "saved": False, "transcription": transcribed})
+    payload = _build_chat_parse_result(chat_id, results, error_reply)
+    payload["transcription"] = transcribed
+    return jsonify(payload)
 
 
 @app.route("/api/chat/photo", methods=["POST"])
@@ -2908,7 +2993,7 @@ def api_chat_photo():
             }), 413
 
         try:
-            ocr_text = OcrClient().extract_text_from_image(tmp_path)
+            ocr_text = OcrClient().extract_text_from_image(tmp_path, chat_id)
         except OCRError:
             return jsonify({"ok": False, "reply": "⚠️ Non riesco a leggere lo scontrino. Riprova con una foto più nitida e ben illuminata.", "saved": False})
         finally:
@@ -2937,7 +3022,7 @@ def api_chat_photo():
             "banned": True,
         })
 
-    result, _usage, error_reply = _chat_parse_text(chat_id, ocr_text, skip_length_check=True)
+    results, _usage, error_reply = _chat_parse_text(chat_id, ocr_text, skip_length_check=True, input_method="photo")
 
     user_text = f"📷 {ocr_text[:200]}"
     try:
@@ -2945,28 +3030,10 @@ def api_chat_photo():
     except Exception:
         pass
 
-    if error_reply:
-        try:
-            store.log_message(chat_id, source="webapp", role="bot", text=error_reply)
-        except Exception:
-            pass
-        return jsonify({"ok": False, "type": "error", "reply": error_reply, "saved": False})
-
-    if result is None:
-        unknown_reply = "⚠️ Ho letto il testo dello scontrino ma non ho riconosciuto una transazione. Prova a scrivere la spesa manualmente."
-        try:
-            store.log_message(chat_id, source="webapp", role="bot", text=unknown_reply)
-        except Exception:
-            pass
-        return jsonify({"ok": True, "type": "unknown", "reply": unknown_reply, "saved": False})
-
-    reply, parsed = _build_parse_reply(result)
-    try:
-        store.log_message(chat_id, source="webapp", role="bot", text=reply, metadata=parsed)
-    except Exception:
-        pass
-
-    return jsonify({"ok": True, "type": parsed["type"], "parsed": parsed, "reply": reply, "saved": False})
+    payload = _build_chat_parse_result(chat_id, results, error_reply)
+    if payload.get("type") == "unknown":
+        payload["reply"] = "⚠️ Ho letto il testo dello scontrino ma non ho riconosciuto una transazione. Prova a scrivere la spesa manualmente."
+    return jsonify(payload)
 
 
 @app.route("/api/chat/history", methods=["GET"])
@@ -3253,12 +3320,39 @@ def api_settings_change_password():
     if not email or not store.verify_password(email, current_password):
         return jsonify({"error": "Password corrente errata."}), 401
 
+    # update_password incrementa token_version: tutte le sessioni esistenti
+    # (compresa questa) vengono invalidate. Riallineo la sessione del device
+    # corrente al nuovo valore così chi cambia password non viene sloggato,
+    # mentre gli altri dispositivi sì.
     store.update_password(chat_id, new_password)
+    if session.get("user_logged_in"):
+        session["token_version"] = store.get_token_version(chat_id)
     store.write_audit_log(
         chat_id, actor="user", action="change_password",
         ip_address=request.remote_addr, user_agent=request.headers.get("User-Agent"),
     )
     return jsonify({"ok": True})
+
+
+@app.route("/api/settings/logout-all-devices", methods=["POST"])
+def api_settings_logout_all_devices():
+    """Revoca tutte le sessioni dell'utente su ogni dispositivo, inclusa questa.
+
+    Incrementa `token_version`: ogni cookie di sessione emesso in precedenza
+    diventa invalido al confronto in `_get_session_chat_id`. A differenza di
+    /api/settings/logout NON sospende l'account (is_active resta True).
+    """
+    chat_id, _ = _resolve_request_chat_id()
+    if not chat_id:
+        return jsonify({"error": "Unauthorized"}), 401
+
+    store.bump_token_version(chat_id)
+    store.write_audit_log(
+        chat_id, actor="user", action="logout_all_devices",
+        ip_address=request.remote_addr, user_agent=request.headers.get("User-Agent"),
+    )
+    session.clear()
+    return jsonify({"ok": True, "redirect_url": "/login"})
 
 
 @app.route("/api/settings/delete-account", methods=["POST"])
@@ -3478,6 +3572,32 @@ def api_onboarding_age_confirm():
     ip = request.headers.get("X-Forwarded-For", request.remote_addr)
     store.set_age_attestation(chat_id, ip_address=ip, platform="web")
     return jsonify({"status": "ok"})
+
+
+@app.route("/api/referral/link", methods=["GET"])
+def api_referral_link():
+    """Ritorna il link referral personale dell'utente autenticato e il suo stato
+    (quante persone ha già invitato, se ha sbloccato Lifetime Founder garantito).
+
+    Mostrato nella schermata di condivisione on-site (fine onboarding /
+    impostazioni): l'utente deve essere già autenticato, il referral è un
+    beneficio per chi è già un utente Expensum.
+    """
+    chat_id, _ = _resolve_request_chat_id()
+    if not chat_id:
+        return jsonify({"error": "Unauthorized"}), 401
+    user = _get_user_by_chat_id(chat_id)
+    if not user or not user.email:
+        return jsonify({"error": "User not found"}), 404
+
+    status = store.get_referral_status(user.email)
+    link = f"{Config.WEBAPP_BASE_URL}?ref={status['referral_code']}"
+    return jsonify({
+        "referral_code": status["referral_code"],
+        "link": link,
+        "referred_count": status["referred_count"],
+        "lifetime_founder_guaranteed": status["lifetime_founder_guaranteed"],
+    })
 
 
 @app.route("/api/demo/load", methods=["POST"])
@@ -4249,12 +4369,16 @@ def _is_report_locked(plan_type: str, signup: date | None, report_date_str: str 
 
 
 @app.route("/api/reports/<share_token>", methods=["GET"])
+@_tg_webapp_auth
 def api_get_report_by_token(share_token: str):
-    """Endpoint pubblico: restituisce un report tramite share_token (no auth richiesta)."""
+    """Endpoint autenticato: restituisce un report tramite share_token, solo se
+    appartiene all'utente loggato corrente (RLS + controllo esplicito di ownership)."""
+    from flask import g
+
     with store.Session() as s:
-        storage = PostgresStorage(session=s, user_id="")
+        storage = PostgresStorage(session=s, user_id=g.chat_id)
         report = storage.get_report_by_token(share_token)
-        if not report:
+        if not report or report.get("user_id") != g.chat_id:
             return jsonify({"error": "Report non trovato"}), 404
         user = s.query(User).filter_by(chat_id=report["user_id"]).first()
         signup = user.created_at.date() if user and user.created_at else None
@@ -4359,6 +4483,12 @@ def api_get_reports_for_user():
 def _pg_or_401(s, chat_id):
     """Restituisce (PostgresStorage, None) o (None, response 400) se backend != postgres."""
     from src.user_store import User
+    from src.storage import rls
+    # La RLS si applica al primo statement della transazione (listener after_begin):
+    # va impostata PRIMA di qualunque query su questa sessione, altrimenti la query
+    # su User qui sotto apre la transazione senza app.user_id e ogni successivo
+    # INSERT/UPDATE sulle tabelle protette da RLS viene rifiutato dal database.
+    rls.bind_user(s, chat_id)
     user = s.query(User).filter_by(chat_id=chat_id).first()
     if not user or user.storage_backend != "postgres":
         return None, (jsonify({"error": "Solo backend PostgreSQL supportato"}), 400)
@@ -4430,6 +4560,73 @@ def space_accounts_delete(account_id: int):
         if not ok:
             return jsonify({"error": "Conto non trovato"}), 404
         return jsonify({"status": "ok"})
+
+
+# ── Transfers ────────────────────────────────────────────────────────────────
+
+@app.route("/api/space/transfers", methods=["GET"])
+@_tg_webapp_auth
+def space_transfers_list():
+    from flask import g
+    from datetime import date as _date, datetime as _dt
+    today = _date.today()
+    start = request.args.get("start", _date(today.year, today.month, 1).isoformat())
+    end = request.args.get("end", today.isoformat())
+    try:
+        start_d = _dt.strptime(start, "%Y-%m-%d").date()
+        end_d = _dt.strptime(end, "%Y-%m-%d").date()
+    except ValueError:
+        return jsonify({"error": "Formato data non valido (YYYY-MM-DD)"}), 400
+    with store.Session() as s:
+        pg, err = _pg_or_401(s, g.chat_id)
+        if err:
+            return err
+        items = pg.fetch_transfers(start_d, end_d)
+        for item in items:
+            if hasattr(item.get("date"), "isoformat"):
+                item["date"] = item["date"].isoformat()
+        return jsonify({"transfers": items})
+
+
+@app.route("/api/space/transfers", methods=["POST"])
+@_tg_webapp_auth
+def space_transfers_create():
+    from flask import g
+    from datetime import datetime as _dt
+    data = request.json or {}
+    try:
+        amount = float(data.get("amount"))
+    except (TypeError, ValueError):
+        return jsonify({"error": "Il campo 'amount' è obbligatorio ed è un numero"}), 400
+    if amount <= 0:
+        return jsonify({"error": "L'importo deve essere positivo"}), 400
+    from_account_id = data.get("from_account_id")
+    to_account_id = data.get("to_account_id")
+    if not from_account_id or not to_account_id:
+        return jsonify({"error": "I campi 'from_account_id' e 'to_account_id' sono obbligatori"}), 400
+    if str(from_account_id) == str(to_account_id):
+        return jsonify({"error": "Il conto di origine e di destinazione devono essere diversi"}), 400
+    try:
+        transfer_date = _dt.strptime(data.get("date") or _dt.today().strftime("%Y-%m-%d"), "%Y-%m-%d").date()
+    except ValueError:
+        return jsonify({"error": "Formato data non valido (YYYY-MM-DD)"}), 400
+    with store.Session() as s:
+        pg, err = _pg_or_401(s, g.chat_id)
+        if err:
+            return err
+        try:
+            result = pg.create_transfer(
+                transfer_date=transfer_date,
+                amount=amount,
+                from_account_id=from_account_id,
+                to_account_id=to_account_id,
+                name=(data.get("name") or "").strip() or None,
+            )
+        except ValueError as e:
+            return jsonify({"error": str(e)}), 400
+        if hasattr(result.get("date"), "isoformat"):
+            result["date"] = result["date"].isoformat()
+        return jsonify(result), 201
 
 
 # ── Categories ────────────────────────────────────────────────────────────────

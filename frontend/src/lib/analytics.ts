@@ -168,6 +168,26 @@ export function trackFirstExpenseTracked(inputMethod: InputMethod) {
 }
 
 // ---------------------------------------------------------------------------
+// Tour guidato webapp
+// ---------------------------------------------------------------------------
+
+export function trackTourStarted() {
+  void sendEvent("tour_started");
+}
+
+export function trackTourStepViewed(stepId: string, stepIndex: number) {
+  void sendEvent("tour_step_viewed", { step_id: stepId, step_index: stepIndex });
+}
+
+export function trackTourSkipped(stepId: string, stepIndex: number) {
+  void sendEvent("tour_skipped", { step_id: stepId, step_index: stepIndex });
+}
+
+export function trackTourCompleted() {
+  void sendEvent("tour_completed");
+}
+
+// ---------------------------------------------------------------------------
 // Report
 // ---------------------------------------------------------------------------
 
@@ -175,8 +195,8 @@ export function trackReportViewed(reportType: "weekly" | "monthly" | string) {
   void sendEvent("report_viewed", { report_type: reportType });
 }
 
-export function trackReportShared(reportType: "weekly" | "monthly" | string) {
-  void sendEvent("report_shared", { report_type: reportType });
+export function trackReportGenerated(reportType: "weekly" | "monthly" | string) {
+  void sendEvent("report_generated", { report_type: reportType });
 }
 
 // ---------------------------------------------------------------------------
@@ -212,9 +232,18 @@ export function trackFeedbackSubmitted() {
 }
 
 // ---------------------------------------------------------------------------
-// Stub futuri (sistemi non ancora implementati — G5/G6)
+// Referral
+// ---------------------------------------------------------------------------
+
+// referral_signup resta emesso lato backend (src/dashboard/app.py), al momento
+// dell'applicazione del reward 'referred' — non c'è un equivalente frontend.
+export function trackReferralLinkGenerated() {
+  void sendEvent("referral_link_generated");
+}
+
+// ---------------------------------------------------------------------------
+// Stub futuri (sistemi non ancora implementati — G5)
 // ---------------------------------------------------------------------------
 
 // TODO [G5]: habit_threshold_reached — emettere da backend Python quando il sistema streak è live
-// TODO [G6]: referral_link_generated — emettere quando il sistema referral è live
 // TODO [G6]: referral_signup — emettere da backend Python al completamento onboarding con referral

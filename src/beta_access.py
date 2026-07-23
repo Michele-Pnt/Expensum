@@ -64,6 +64,34 @@ def build_welcome_email(name: str, login_url: str, email: str, password: str) ->
     return subject, html
 
 
+def build_referral_reward_email(days_granted: int) -> tuple[str, str]:
+    """Ritorna (subject, html) dell'email di notifica reward referral sbloccato."""
+    login_url = f"{Config.WEBAPP_BASE_URL}/login"
+    subject = f"Hai sbloccato {days_granted} giorni extra di Pro 🎁"
+    html = f"""
+    <p>Ciao,</p>
+    <p>grazie al referral, il tuo account Expensum è stato esteso di
+    <strong>{days_granted} giorni</strong> di piano Pro.</p>
+    <p><a href="{login_url}">Accedi</a> per continuare a usarlo.</p>
+    <p>A presto,<br>Michele — Expensum</p>
+    """
+    return subject, html
+
+
+def build_lifetime_founder_unlocked_email() -> tuple[str, str]:
+    """Ritorna (subject, html) dell'email per lo sblocco dell'accesso garantito Lifetime Founder."""
+    subject = "Hai sbloccato l'accesso garantito a Lifetime Founder 🏆"
+    html = """
+    <p>Ciao,</p>
+    <p>hai portato 3 persone su Expensum tramite il tuo link di invito: come
+    ringraziamento, ti garantiamo un posto nell'offerta <strong>Lifetime Founder</strong>
+    quando la apriremo, senza rischiare di restare fuori dai posti disponibili.</p>
+    <p>Ti scriveremo appena l'offerta sarà attiva.</p>
+    <p>A presto,<br>Michele — Expensum</p>
+    """
+    return subject, html
+
+
 def grant_beta_access(store: UserStore, email: str, name: str = "") -> tuple[str, str] | None:
     """Crea l'account beta (se non esiste già) e invia l'email di accesso via Brevo.
 

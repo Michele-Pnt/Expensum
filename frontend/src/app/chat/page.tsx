@@ -19,6 +19,12 @@ import {
 type MessageRole = "user" | "bot";
 type MessageStatus = "sending" | "sent" | "error";
 
+interface Account {
+  id: string;
+  name: string;
+  current_balance?: number;
+}
+
 interface ParsedData {
   type?: string;
   amount?: number | null;
@@ -26,10 +32,29 @@ interface ParsedData {
   income_type?: string | null;
   name?: string | null;
   date?: string;
+  accounts?: Account[];
+  categories?: string[];
+  resolved_from_account_id?: string | null;
+  resolved_from_account_name?: string | null;
+  resolved_to_account_id?: string | null;
+  resolved_to_account_name?: string | null;
   // report metadata
   report_type?: string;
   share_token?: string;
 }
+
+// Item come restituito da /api/chat/message|voice|photo dentro "transactions"
+interface ChatTransaction {
+  type: string;
+  reply: string;
+  parsed: ParsedData;
+  awaiting_confirm?: boolean;
+  needs_amount?: boolean;
+  needs_second_account?: boolean;
+  needs_account_pick?: "from" | "to";
+}
+
+type AccountPickMode = "single" | "from" | "to";
 
 interface Message {
   id: string;
@@ -39,6 +64,10 @@ interface Message {
   status?: MessageStatus;
   parsed?: ParsedData;
   awaitingConfirm?: boolean;   // true = mostra bottoni ✅/❌
+  awaitingCategoryPick?: boolean; // true = mostra il picker categorie al posto del riepilogo
+  awaitingAccountPick?: AccountPickMode; // true = mostra il picker conti al posto del riepilogo
+  awaitingAmount?: boolean;    // true = in attesa che l'utente scriva l'importo mancante
+  pickedFromAccountId?: string; // conto origine già scelto (transfer), per escluderlo dal picker "to"
   transcription?: string;      // testo trascritto dal vocale
   noAccountAction?: boolean;   // true = mostra bottone "Vai ai Conti" (nessun conto configurato)
 }
@@ -68,6 +97,59 @@ function parseMarkdown(text: string): string {
     .replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>")
     .replace(/_(.+?)_/g, "<em>$1</em>")
     .replace(/`(.+?)`/g, "<code>$1</code>");
+}
+
+// ─── Riepilogo / step successivo (client-side, dopo che l'importo mancante è
+// stato completato dall'utente) — rispecchia _build_parse_reply e
+// _build_transaction_payload lato server, così non serve un altro round-trip. ──
+
+function buildConfirmText(parsed: ParsedData): string {
+  const amountStr = parsed.amount != null ? `€${Number(parsed.amount).toFixed(2)}` : "importo non specificato";
+  if (parsed.type === "expense") {
+    const cat = parsed.category || "Altro";
+    const name = parsed.name || "Spesa";
+    return `Ho interpretato **${name}** di ${amountStr} nella categoria _${cat}_. Confermi?`;
+  }
+  if (parsed.type === "transfer") {
+    const from = parsed.resolved_from_account_name || "—";
+    const to = parsed.resolved_to_account_name || "—";
+    const name = parsed.name || "Trasferimento";
+    return `📝 Nuovo trasferimento riconosciuto:\n\n💰 Importo: **${amountStr}**\n🏦 Da: **${from}**\n🏦 A: **${to}**\n📝 Descrizione: **${name}**\n\nConfermi?`;
+  }
+  const incomeType = parsed.income_type || "Entrata";
+  const name = parsed.name || "Entrata";
+  return `Ho interpretato **${name}** (${incomeType}) di ${amountStr}. Confermi?`;
+}
+
+interface NextStep {
+  awaitingConfirm: boolean;
+  awaitingAccountPick?: AccountPickMode;
+  text: string;
+}
+
+function nextStepAfterAmount(parsed: ParsedData): NextStep {
+  if (parsed.type === "transfer") {
+    if ((parsed.accounts?.length || 0) < 2) {
+      return {
+        awaitingConfirm: false,
+        text: "🏦 Ti servono almeno due conti per fare un trasferimento.\n\nAggiungine uno nella tab \"Conti\" del tuo spazio.",
+      };
+    }
+    if (!parsed.resolved_from_account_id) {
+      return { awaitingConfirm: false, awaitingAccountPick: "from", text: "🏦 Da quale conto vuoi spostare i soldi?" };
+    }
+    if (!parsed.resolved_to_account_id) {
+      return { awaitingConfirm: false, awaitingAccountPick: "to", text: "🏦 Su quale conto vuoi spostare i soldi?" };
+    }
+  }
+  return { awaitingConfirm: true, text: buildConfirmText(parsed) };
+}
+
+// Stesso fallback regex di bot.py:1667-1675: normalizza e ricava il primo numero.
+function parseAmountFallback(raw: string): number | null {
+  const cleaned = raw.toLowerCase().replace(/\s/g, "").replace(/€/g, "").replace(/euro/g, "").replace(",", ".");
+  const match = cleaned.match(/-?\d+(?:\.\d+)?/);
+  return match ? parseFloat(match[0]) : null;
 }
 
 function historyMsgToMessage(h: {
@@ -139,6 +221,15 @@ export default function ChatPage() {
   const audioChunksRef = useRef<Blob[]>([]);
   const pendingInputMethodRef = useRef<InputMethod>("text");
 
+  // Coda locale delle transazioni "sequenziali" (importo mancante o conto trasferimento
+  // da chiedere) rilevate in un messaggio multi-transazione: presentate una alla volta,
+  // mirror di expense_queue/waiting_for_amount in bot.py.
+  const sequentialQueueRef = useRef<ChatTransaction[]>([]);
+  const activeSequentialIdRef = useRef<string | null>(null);
+  // "amount" = il prossimo testo libero digitato va interpretato come importo
+  // (mirror di waiting_for_amount in bot.py); "account" = si aspetta un click sui bottoni.
+  const activeSequentialKindRef = useRef<"amount" | "account" | null>(null);
+
   // Whether to show the welcome screen (no user/bot messages yet except welcome)
   const hasConversation = messages.length > 0 && historyLoaded;
   const onlyWelcome = hasConversation && messages.length === 1 && messages[0].id === "welcome";
@@ -201,54 +292,115 @@ export default function ChatPage() {
     resizeTextarea();
   }, [inputText, resizeTextarea]);
 
-  // ── Handle API response (parse-only) ─────────────────────────────────────
+  // ── Coda sequenziale (importo mancante / conto trasferimento da chiedere) ──
+
+  const presentNextSequential = useCallback(() => {
+    if (activeSequentialIdRef.current) return; // uno alla volta, come expense_queue in bot.py
+    const next = sequentialQueueRef.current.shift();
+    if (!next) return;
+    const msgId = `bot-seq-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+    activeSequentialIdRef.current = msgId;
+    activeSequentialKindRef.current = next.needs_amount ? "amount" : "account";
+    setMessages((prev) => [
+      ...prev,
+      {
+        id: msgId,
+        role: "bot",
+        text: next.reply,
+        timestamp: new Date(),
+        status: "sent",
+        parsed: next.parsed,
+        awaitingAmount: !!next.needs_amount,
+        awaitingAccountPick: next.needs_account_pick,
+      },
+    ]);
+  }, []);
+
+  // ── Handle API response (parse-only, multi-transazione) ──────────────────
 
   const handleParseResponse = useCallback(
     (data: {
       ok: boolean;
       type?: string;
-      parsed?: ParsedData;
+      transactions?: ChatTransaction[];
       reply?: string;
       saved?: boolean;
       transcription?: string;
     }, userMsgId: string) => {
       setShowTypingIndicator(false);
+      setMessages((prev) => prev.map((m) => (m.id === userMsgId ? { ...m, status: "sent" as MessageStatus } : m)));
 
-      const botMsg: Message = {
-        id: `bot-${Date.now()}`,
-        role: "bot",
-        text: data.reply || "Non ho capito. Riprova con una descrizione più chiara.",
-        timestamp: new Date(),
-        status: "sent",
-        parsed: data.parsed,
-        // Mostra conferma se il server ha parsato correttamente ma non ha ancora salvato
-        awaitingConfirm: data.ok && data.type !== "unknown" && data.type !== "error" && !data.saved,
-        transcription: data.transcription,
-      };
+      // Errore, nessuna transazione riconosciuta, o nessun conto configurato: un'unica bubble.
+      if (!data.ok || data.type === "error" || data.type === "unknown" || data.type === "no_account") {
+        setMessages((prev) => [
+          ...prev,
+          {
+            id: `bot-${Date.now()}`,
+            role: "bot",
+            text: data.reply || "Non ho capito. Riprova con una descrizione più chiara.",
+            timestamp: new Date(),
+            status: "sent",
+            transcription: data.transcription,
+            noAccountAction: data.type === "no_account",
+          },
+        ]);
+        return;
+      }
 
-      setMessages((prev) => [
-        ...prev.map((m) => (m.id === userMsgId ? { ...m, status: "sent" as MessageStatus } : m)),
-        botMsg,
-      ]);
+      const transactions = data.transactions || [];
+      const immediate = transactions.filter((tx) => tx.awaiting_confirm || tx.needs_second_account);
+      const sequential = transactions.filter((tx) => !tx.awaiting_confirm && !tx.needs_second_account);
+
+      // Le transazioni "pronte" (importo noto, conti risolti o già bloccate per <2 conti)
+      // vengono mostrate tutte subito come bubble indipendenti — bot.py:1769-1791.
+      if (immediate.length > 0) {
+        setMessages((prev) => [
+          ...prev,
+          ...immediate.map((tx, i) => ({
+            id: `bot-${Date.now()}-${i}`,
+            role: "bot" as MessageRole,
+            text: tx.reply,
+            timestamp: new Date(),
+            status: "sent" as MessageStatus,
+            parsed: tx.parsed,
+            awaitingConfirm: !!tx.awaiting_confirm,
+            transcription: data.transcription,
+          })),
+        ]);
+      }
+
+      // Quelle che richiedono un'ulteriore domanda (importo, conto) vanno in coda
+      // e si presentano una alla volta — expense_queue in bot.py.
+      sequentialQueueRef.current.push(...sequential);
+      presentNextSequential();
     },
-    []
+    [presentNextSequential]
   );
 
-  // ── Confirm / Cancel ──────────────────────────────────────────────────────
+  // ── Salvataggio effettivo (dopo che conto/i sono stati scelti) ───────────
 
-  const handleConfirm = useCallback(async (botMsgId: string, parsed: ParsedData) => {
+  const saveTransaction = useCallback(async (
+    botMsgId: string,
+    parsed: ParsedData,
+    opts: { account_id?: string; from_account_id?: string; to_account_id?: string }
+  ) => {
     const inputMethod = pendingInputMethodRef.current;
     setMessages((prev) =>
-      prev.map((m) => (m.id === botMsgId ? { ...m, awaitingConfirm: false } : m))
+      prev.map((m) => (m.id === botMsgId ? { ...m, awaitingConfirm: false, awaitingAccountPick: undefined, awaitingCategoryPick: false } : m))
     );
     setShowTypingIndicator(true);
+
+    if (activeSequentialIdRef.current === botMsgId) {
+      activeSequentialIdRef.current = null;
+      activeSequentialKindRef.current = null;
+    }
 
     try {
       const res = await fetch("/api/chat/confirm", {
         method: "POST",
         headers: { "Content-Type": "application/json", ...(await buildHeaders()) },
         credentials: "same-origin",
-        body: JSON.stringify({ parsed, input_method: inputMethod }),
+        body: JSON.stringify({ parsed, input_method: inputMethod, ...opts }),
       });
       const data = await res.json();
       setShowTypingIndicator(false);
@@ -284,25 +436,163 @@ export default function ChatPage() {
           status: "sent",
         },
       ]);
+    } finally {
+      presentNextSequential();
     }
-  }, []);
+  }, [presentNextSequential]);
+
+  // ── Confirm / Cancel ──────────────────────────────────────────────────────
+
+  const handleConfirm = useCallback((botMsgId: string, parsed: ParsedData) => {
+    if (parsed.type === "transfer") {
+      // Qui arriviamo solo quando entrambi i conti sono già risolti dagli hint LLM
+      // (altrimenti la transazione sarebbe stata messa in coda con awaitingAccountPick).
+      saveTransaction(botMsgId, parsed, {
+        from_account_id: parsed.resolved_from_account_id ?? undefined,
+        to_account_id: parsed.resolved_to_account_id ?? undefined,
+      });
+      return;
+    }
+    // Mai skip automatico: si chiede sempre il conto, anche con un solo conto — bot.py:2472-2508.
+    setMessages((prev) =>
+      prev.map((m) => (m.id === botMsgId ? { ...m, awaitingConfirm: false, awaitingAccountPick: "single" } : m))
+    );
+  }, [saveTransaction]);
 
   const handleCancel = useCallback((botMsgId: string) => {
     trackExpenseTrackingFailed("user_cancelled", pendingInputMethodRef.current);
     setMessages((prev) =>
       prev.map((m) =>
         m.id === botMsgId
-          ? { ...m, awaitingConfirm: false, text: "❌ Operazione annullata." }
+          ? { ...m, awaitingConfirm: false, awaitingAccountPick: undefined, awaitingCategoryPick: false, awaitingAmount: false, text: "❌ Operazione annullata." }
           : m
       )
     );
+    if (activeSequentialIdRef.current === botMsgId) {
+      activeSequentialIdRef.current = null;
+      activeSequentialKindRef.current = null;
+      presentNextSequential();
+    }
+  }, [presentNextSequential]);
+
+  // ── Cambio conto (single/from/to) ─────────────────────────────────────────
+
+  const handleAccountPick = useCallback((botMsgId: string, parsed: ParsedData, mode: AccountPickMode, account: Account) => {
+    if (mode === "single") {
+      saveTransaction(botMsgId, parsed, { account_id: account.id });
+      return;
+    }
+    if (mode === "from") {
+      // Passa allo step "conto destinazione", escludendo quello appena scelto.
+      setMessages((prev) =>
+        prev.map((m) =>
+          m.id === botMsgId
+            ? {
+                ...m,
+                parsed: { ...parsed, resolved_from_account_id: account.id, resolved_from_account_name: account.name },
+                awaitingAccountPick: "to",
+              }
+            : m
+        )
+      );
+      return;
+    }
+    // mode === "to"
+    saveTransaction(botMsgId, { ...parsed, resolved_to_account_id: account.id, resolved_to_account_name: account.name }, {
+      from_account_id: parsed.resolved_from_account_id ?? undefined,
+      to_account_id: account.id,
+    });
+  }, [saveTransaction]);
+
+  // ── Cambio categoria rapido (solo spese) ──────────────────────────────────
+
+  const handleCategoryEditOpen = useCallback((botMsgId: string) => {
+    setMessages((prev) =>
+      prev.map((m) => (m.id === botMsgId ? { ...m, awaitingConfirm: false, awaitingCategoryPick: true } : m))
+    );
   }, []);
+
+  const handleCategoryEditBack = useCallback((botMsgId: string) => {
+    setMessages((prev) =>
+      prev.map((m) => (m.id === botMsgId ? { ...m, awaitingCategoryPick: false, awaitingConfirm: true } : m))
+    );
+  }, []);
+
+  const handleCategoryPick = useCallback((botMsgId: string, category: string) => {
+    setMessages((prev) =>
+      prev.map((m) => {
+        if (m.id !== botMsgId || !m.parsed) return m;
+        const parsed = { ...m.parsed, category };
+        return { ...m, parsed, awaitingCategoryPick: false, awaitingConfirm: true, text: buildConfirmText(parsed) };
+      })
+    );
+  }, []);
+
+  // ── Risposta a "quanto vuoi trasferire/spendere?" (importo mancante) ─────
+
+  const answerPendingAmount = useCallback((botMsgId: string, text: string) => {
+    const amount = parseAmountFallback(text);
+    const userMsg: Message = { id: `user-${Date.now()}`, role: "user", text, timestamp: new Date(), status: "sent" };
+    setInputText("");
+
+    if (amount === null) {
+      setMessages((prev) => [
+        ...prev,
+        userMsg,
+        {
+          id: `err-amount-${Date.now()}`,
+          role: "bot",
+          text: "📝 Non ho capito l'importo. Prova a ridirmelo, scrivendo solo il numero (es. 20 o 20,50).",
+          timestamp: new Date(),
+          status: "sent",
+        },
+      ]);
+      return;
+    }
+
+    let terminal = false;
+    setMessages((prev) => [
+      ...prev.map((m) => {
+        if (m.id !== botMsgId || !m.parsed) return m;
+        const parsed = { ...m.parsed, amount };
+        const step = nextStepAfterAmount(parsed);
+        terminal = !step.awaitingConfirm && !step.awaitingAccountPick;
+        return {
+          ...m,
+          parsed,
+          awaitingAmount: false,
+          awaitingConfirm: step.awaitingConfirm,
+          awaitingAccountPick: step.awaitingAccountPick,
+          text: step.text,
+        };
+      }),
+      userMsg,
+    ]);
+
+    if (terminal) {
+      // Blocco terminale (es. servono almeno 2 conti per il trasferimento): nessuna
+      // ulteriore interazione possibile, libera lo slot e passa alla prossima in coda.
+      activeSequentialIdRef.current = null;
+      activeSequentialKindRef.current = null;
+      presentNextSequential();
+    } else {
+      activeSequentialKindRef.current = "account"; // il prossimo step si conferma coi bottoni, non più a testo
+    }
+  }, [presentNextSequential]);
 
   // ── Send text message ─────────────────────────────────────────────────────
 
   const sendMessage = useCallback(async (text: string) => {
     const trimmed = text.trim();
     if (!trimmed || isLoading) return;
+
+    // Una transazione in coda sta aspettando l'importo mancante: il testo libero
+    // viene interpretato come importo invece di rilanciare un nuovo parsing NLP
+    // (mirror di waiting_for_amount in bot.py:1659-1694).
+    if (activeSequentialIdRef.current && activeSequentialKindRef.current === "amount") {
+      answerPendingAmount(activeSequentialIdRef.current, trimmed);
+      return;
+    }
 
     const userMsg: Message = {
       id: `user-${Date.now()}`,
@@ -346,7 +636,7 @@ export default function ChatPage() {
       setIsLoading(false);
       inputRef.current?.focus();
     }
-  }, [isLoading, handleParseResponse]);
+  }, [isLoading, handleParseResponse, answerPendingAmount]);
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key === "Enter" && !e.shiftKey) {
@@ -598,18 +888,77 @@ export default function ChatPage() {
                       </div>
                     )}
 
-                    {/* Confirm buttons */}
+                    {/* Confirm buttons (+ cambio categoria rapido per le spese) */}
                     {msg.awaitingConfirm && msg.parsed && (
-                      <div className={styles.confirmRow}>
-                        <button
-                          className={`${styles.confirmBtn} ${styles.confirmBtnYes}`}
-                          onClick={() => !isTourChatStep && handleConfirm(msg.id, msg.parsed!)}
-                        >
-                          ✅ Conferma
-                        </button>
+                      <>
+                        {msg.parsed.type === "expense" && (
+                          <div className={styles.confirmRow}>
+                            <button
+                              className={`${styles.confirmBtn} ${styles.confirmBtnNo}`}
+                              onClick={() => !isTourChatStep && handleCategoryEditOpen(msg.id)}
+                            >
+                              ✏️ Cambia categoria
+                            </button>
+                          </div>
+                        )}
+                        <div className={styles.confirmRow}>
+                          <button
+                            className={`${styles.confirmBtn} ${styles.confirmBtnYes}`}
+                            onClick={() => !isTourChatStep && handleConfirm(msg.id, msg.parsed!)}
+                          >
+                            ✅ Conferma
+                          </button>
+                          <button
+                            className={`${styles.confirmBtn} ${styles.confirmBtnNo}`}
+                            onClick={() => !isTourChatStep && handleCancel(msg.id)}
+                          >
+                            ❌ Annulla
+                          </button>
+                        </div>
+                      </>
+                    )}
+
+                    {/* Picker categoria (cambio rapido) */}
+                    {msg.awaitingCategoryPick && msg.parsed?.categories && (
+                      <div className={styles.pickerCol}>
+                        {msg.parsed.categories.map((cat) => (
+                          <button
+                            key={cat}
+                            className={`${styles.confirmBtn} ${styles.pickerBtn}`}
+                            onClick={() => handleCategoryPick(msg.id, cat)}
+                          >
+                            📂 {cat}
+                          </button>
+                        ))}
                         <button
                           className={`${styles.confirmBtn} ${styles.confirmBtnNo}`}
-                          onClick={() => !isTourChatStep && handleCancel(msg.id)}
+                          onClick={() => handleCategoryEditBack(msg.id)}
+                        >
+                          ↩️ Indietro
+                        </button>
+                      </div>
+                    )}
+
+                    {/* Picker conto (single = spesa/entrata, from/to = trasferimento) */}
+                    {msg.awaitingAccountPick && msg.parsed?.accounts && (
+                      <div className={styles.pickerCol}>
+                        {msg.parsed.accounts
+                          .filter((acc) =>
+                            msg.awaitingAccountPick !== "to" || acc.id !== msg.parsed?.resolved_from_account_id
+                          )
+                          .map((acc) => (
+                            <button
+                              key={acc.id}
+                              className={`${styles.confirmBtn} ${styles.pickerBtn}`}
+                              onClick={() => handleAccountPick(msg.id, msg.parsed!, msg.awaitingAccountPick!, acc)}
+                            >
+                              🏦 {acc.name}
+                              {acc.current_balance != null ? ` (€${Number(acc.current_balance).toFixed(2)})` : ""}
+                            </button>
+                          ))}
+                        <button
+                          className={`${styles.confirmBtn} ${styles.confirmBtnNo}`}
+                          onClick={() => handleCancel(msg.id)}
                         >
                           ❌ Annulla
                         </button>

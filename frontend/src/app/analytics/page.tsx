@@ -12,6 +12,7 @@ import {
   ResponsiveContainer, Legend, Area, LineChart, Line,
   CartesianGrid, ComposedChart,
 } from "recharts";
+import { formatDateIt } from "@/lib/date";
 
 // ---------------------------------------------------------------------------
 // Tipi
@@ -507,7 +508,7 @@ function TransactionsTable({ data, isPro, initData }: { data: TransactionsData; 
               )}
               {txData.transactions.map((tx) => (
                 <TableRow key={tx.id} hover>
-                  <TableCell sx={{ fontSize: "0.75rem" }}>{tx.date}</TableCell>
+                  <TableCell sx={{ fontSize: "0.75rem" }}>{formatDateIt(tx.date)}</TableCell>
                   <TableCell sx={{ fontSize: "0.75rem" }}>{tx.name}</TableCell>
                   <TableCell align="right" sx={{ fontSize: "0.75rem", color: EXPENSE_COLOR, fontWeight: 600 }}>
                     -€{tx.amount.toFixed(2)}

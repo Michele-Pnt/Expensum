@@ -3,7 +3,7 @@
 import { useState, useEffect, useCallback } from "react";
 import { useRouter } from "next/navigation";
 import { getCsrfToken } from "@/lib/csrf";
-import { trackOnboardingStepCompleted, trackOnboardingCompleted } from "@/lib/analytics";
+import { trackOnboardingStepCompleted, trackOnboardingCompleted, trackReferralLinkGenerated } from "@/lib/analytics";
 import {
   Box,
   Typography,
@@ -319,6 +319,96 @@ function ConfirmStep({
   );
 }
 
+interface ReferralLinkData {
+  link: string;
+  referred_count: number;
+  lifetime_founder_guaranteed: boolean;
+}
+
+function InviteStep({ onContinue }: { onContinue: () => void }) {
+  const [data, setData] = useState<ReferralLinkData | null>(null);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    let cancelled = false;
+    buildHeaders()
+      .then((headers) => fetch("/api/referral/link", { headers, credentials: "same-origin" }))
+      .then((r) => (r.ok ? r.json() : null))
+      .then((json) => {
+        if (!cancelled && json) {
+          setData(json);
+          trackReferralLinkGenerated();
+        }
+      })
+      .catch(() => {})
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const shareText = data
+    ? `Sto usando Expensum per tenere sotto controllo le spese, provalo anche tu: ${data.link}`
+    : "";
+  const whatsappUrl = `https://wa.me/?text=${encodeURIComponent(shareText)}`;
+
+  return (
+    <Box sx={{ textAlign: "center", py: 2 }}>
+      <Typography variant="h5" fontWeight={700} sx={{ mb: 1 }}>
+        Fatto! 🎉
+      </Typography>
+      <Typography variant="body1" sx={{ mb: 3, color: "var(--color-text-2)" }}>
+        Invita 3 amici con il tuo link personale: ognuno di voi riceve 2 mesi di Pro
+        gratis, e tu sblocchi un posto garantito nell&apos;offerta Lifetime Founder.
+      </Typography>
+
+      {loading ? (
+        <CircularProgress size={24} sx={{ mb: 3 }} />
+      ) : data ? (
+        <>
+          <Box
+            sx={{
+              mb: 3, p: 1.5, borderRadius: 2, bgcolor: "var(--color-surface-2)",
+              wordBreak: "break-all", fontSize: 14, color: "var(--color-text-2)",
+            }}
+          >
+            {data.link}
+          </Box>
+          <Button
+            variant="contained"
+            size="large"
+            fullWidth
+            href={whatsappUrl}
+            target="_blank"
+            rel="noopener noreferrer"
+            sx={{ ...primaryBtnSx, bgcolor: "#25D366", mb: 1.5, "&:hover": { bgcolor: "#1ebe57" } }}
+          >
+            📲 Condividi su WhatsApp
+          </Button>
+          <Typography variant="caption" sx={{ display: "block", mb: 1, color: "var(--color-text-2)" }}>
+            {data.referred_count > 0
+              ? `Hai già invitato ${data.referred_count} ${data.referred_count === 1 ? "persona" : "persone"}.`
+              : "Nessun invito ancora — condividi il link per iniziare."}
+          </Typography>
+          <Typography variant="caption" sx={{ display: "block", mb: 3, color: "var(--color-text-2)" }}>
+            Ritrovi sempre il link nella tab &quot;Invita amici&quot;.
+          </Typography>
+        </>
+      ) : (
+        <Typography variant="body2" sx={{ mb: 3, color: "var(--color-text-2)" }}>
+          Il link personale sarà disponibile a breve nella tab &quot;Invita amici&quot;.
+        </Typography>
+      )}
+
+      <Button variant="text" onClick={onContinue} sx={{ textTransform: "none" }}>
+        Vai alla dashboard →
+      </Button>
+    </Box>
+  );
+}
+
 // ─── Shared sub-components ────────────────────────────────────────────────────
 
 function StepWrapper({
@@ -513,12 +603,20 @@ export default function OnboardingPage() {
         localStorage.setItem("expensum_tour_pending", "true");
         localStorage.setItem("expensum_demo_active", "true");
       } catch { /* ignore */ }
-      // Hard reload: TourProvider deve rimontarsi su /chat per leggere i flag
-      window.location.assign("/chat");
+      // Non reindirizza subito: mostra la schermata di condivisione referral
+      // (picco di entusiasmo appena finito il form, prima che si distragga).
+      setAnimDir("forward");
+      setStep(6);
+      setSubmitting(false);
     } catch {
       setSubmitting(false);
     }
   }, [state]);
+
+  const goToChat = useCallback(() => {
+    // Hard reload: TourProvider deve rimontarsi su /chat per leggere i flag
+    window.location.assign("/chat");
+  }, []);
 
   // Controlla se l'onboarding è già completato
   useEffect(() => {
@@ -641,6 +739,8 @@ export default function OnboardingPage() {
               loading={submitting}
             />
           )}
+
+          {step === 6 && <InviteStep onContinue={goToChat} />}
 
         </Box>
       </Box>

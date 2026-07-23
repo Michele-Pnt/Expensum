@@ -19,6 +19,7 @@ Avvio:
 import argparse
 import asyncio
 import csv
+import difflib
 import io
 import logging
 import shutil
@@ -29,6 +30,7 @@ import threading
 from datetime import date, datetime, timedelta
 from cachetools import TTLCache
 from apscheduler.schedulers.background import BackgroundScheduler
+from apscheduler.events import EVENT_JOB_ERROR, EVENT_JOB_EXECUTED, EVENT_JOB_MISSED
 import requests
 
 from src.billing_utils import get_next_billing_date
@@ -36,7 +38,6 @@ from src.privacy_export import build_export_json, build_csv_rows, CSV_HEADER
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, InputFile, Update, WebAppInfo
 from telegram.constants import ParseMode
 from telegram.request import HTTPXRequest
-from google import genai
 from google.genai import types
 from telegram.ext import (
     Application,
@@ -60,7 +61,9 @@ from src.storage.postgres_storage import PostgresStorage
 from src.rate_limiter import is_rate_limited
 from src.user_store import UserStore, User
 from src.ocr_client import OcrClient, OCRError
+from src.vertex_ai_client import get_vertex_ai_client
 from src.category_sync import refresh_category_averages
+from src.budget_alert import check_expense_budget_alert
 from src.dashboard_message import build_dashboard_text
 from src.llm_usage_tracker import build_request_key, estimate_reserved_tokens, normalize_usage_metadata
 from src.report_builder import WeeklyPlanBuilder, WeeklyPlanData, MonthlyPlanBuilder, MonthlyPlanData
@@ -123,10 +126,52 @@ _notion: NotionFinanceClient | None = None
 _parser: ExpenseParser | None = None
 
 # Inizializziamo il database utenti (usando l'URL che abbiamo messo in Config)
-_user_store = UserStore(db_url=Config.DATABASE_URL)
+# pool_size/max_overflow dimensionati per il traffico bot (vedi analisi 2026-07-16:
+# max_connections Postgres=30 condiviso con la dashboard, che ha il suo pool separato)
+_user_store = UserStore(db_url=Config.DATABASE_URL, pool_size=10, max_overflow=5)
+
+class _StorageClientCache(TTLCache):
+    """TTLCache che chiude la sessione SQLAlchemy quando una entry scade o viene sfrattata.
+
+    cachetools non chiama mai `close()` sui valori rimossi: senza questo hook, ogni
+    PostgresStorage uscito dalla cache lascia la connessione agganciata al pool finché
+    il garbage collector di CPython non la libera (comportamento non deterministico —
+    vedi incidente QueuePool del 2026-07-16).
+
+    Servono DUE hook distinti perché cachetools usa due percorsi di rimozione diversi:
+    - `expire()` per la scadenza TTL, che internamente chiama `Cache.__delitem__` in modo
+      non polimorfico (bypassa un `__delitem__` sovrascritto in questa sottoclasse);
+    - `popitem()`/`pop()`/`del` per l'eviction da maxsize o la rimozione esplicita, che
+      invece passano da `self.__delitem__` e quindi arrivano già all'override sotto.
+    """
+
+    def _close_if_postgres(self, value) -> None:
+        if isinstance(value, PostgresStorage):
+            value._session.close()
+
+    def expire(self, time=None):
+        expired = super().expire(time)
+        for _key, value in expired:
+            self._close_if_postgres(value)
+        return expired
+
+    def __delitem__(self, key):
+        value = self.get(key)
+        self._close_if_postgres(value)
+        super().__delitem__(key)
+
 
 # Cache client storage: TTL 30 min, max 200 utenti (VPS Hetzner CX23 — 4GB RAM)
-_storage_clients: TTLCache = TTLCache(maxsize=200, ttl=1800)
+_storage_clients: TTLCache = _StorageClientCache(maxsize=200, ttl=1800)
+
+
+def _track_event(chat_id: str, event: str, properties: dict | None = None) -> None:
+    """Wrapper attorno a analytics.track che tagga sempre platform='telegram'.
+
+    Permette di distinguere in PostHog gli eventi originati dal bot da quelli
+    della webapp, anche per eventi (es. expense_tracked) emessi da entrambi.
+    """
+    analytics.track(chat_id, event, {**(properties or {}), "platform": "telegram"})
 
 
 def _safe_json_load(raw: str | None) -> dict | None:
@@ -140,11 +185,20 @@ def _safe_json_load(raw: str | None) -> dict | None:
 
 def _get_storage(chat_id: str) -> FinancialStorage:
       """Ritorna il client di storage specifico per l'utente, creandolo se manca."""                                                                           
-      chat_id = str(chat_id)                                                                                                                                   
-  
-      if chat_id in _storage_clients:                                                                                                                          
-          return _storage_clients[chat_id]
-                                                                                                                                                               
+      chat_id = str(chat_id)
+
+      if chat_id in _storage_clients:
+          cached = _storage_clients[chat_id]
+          if isinstance(cached, PostgresStorage):
+              # La sessione è riusata cross-richiesta (vedi _StorageClientCache sopra),
+              # quindi la identity map di SQLAlchemy può contenere righe caricate PRIMA
+              # di una scrittura fatta da un'altra sessione (es. la webapp Flask) sullo
+              # stesso record. expire_all() forza un refresh alla prossima lettura: con
+              # Postgres in READ COMMITTED la nuova query vede sempre l'ultimo commit,
+              # quindi basta questo — non serve una sessione nuova per operazione.
+              cached._session.expire_all()
+          return cached
+
       user = _user_store.get_user(chat_id)
 
       if user.storage_backend == "postgres":                                                                                                                   
@@ -953,12 +1007,14 @@ def _build_dashboard_for_user(chat_id: str) -> str:
         # Unisci spese attuali + medie
         all_cat_names = set(spending_by_cat.keys()) | set(avg_map.keys())
         categories_spending = []
-        for cat_name in sorted(all_cat_names):
+        for cat_name in all_cat_names:
             categories_spending.append({
                 "name": cat_name,
                 "spent_this_month": spending_by_cat.get(cat_name, 0.0),
                 "average": avg_map.get(cat_name, 0.0),
             })
+        # Ordina per spesa del mese corrente decrescente
+        categories_spending.sort(key=lambda c: c["spent_this_month"], reverse=True)
 
     return build_dashboard_text(
         accounts=accounts,
@@ -1147,7 +1203,7 @@ async def cmd_feedback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         return
         
     _user_store.save_feedback(chat_id, text)
-    analytics.track(chat_id, "feedback_submitted")
+    _track_event(chat_id, "feedback_submitted")
     await update.message.reply_text("✅ *Grazie per il tuo feedback!*\n\nIl tuo commento è stato salvato e lo terremo in considerazione per le prossime versioni di Expensum ✨", parse_mode=ParseMode.MARKDOWN)
 
 async def cmd_registra(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1310,7 +1366,8 @@ async def process_accounts_db(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     context.user_data.clear()
     logger.info(f"[User {chat_id}] Registrazione completata con tutti i DB.")
-    analytics.track(chat_id, "user_signed_up", {"auth_method": "telegram", "storage_backend": "notion"})
+    _track_event(chat_id, "user_signed_up", {"auth_method": "telegram", "storage_backend": "notion"})
+    analytics.identify(chat_id, {"auth_method": "telegram", "storage_backend": "notion", "platform": "telegram"})
     await update.message.reply_text(
         "🎊 *Configurazione completata!*\n\n"
         "Ora puoi usare il bot per tracciare le tue finanze. Scrivi una spesa in modo naturale!",
@@ -1395,6 +1452,273 @@ async def cmd_logout(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     )
 
 
+# ---------------------------------------------------------------------------
+# /trasferimento — Spostamento di denaro guidato a bottoni tra due conti
+# ---------------------------------------------------------------------------
+
+async def cmd_trasferimento(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Avvia il flusso guidato a bottoni per spostare denaro tra due conti dell'utente.
+
+    Stessa pipeline di risoluzione conti/importo/conferma usata dal ramo NLP in
+    _process_expense_text — vedi _advance_transfer_flow.
+    """
+    if not _is_authorized(update):
+        await _reply_not_authorized(update)
+        return
+
+    chat_id = str(update.effective_chat.id)
+
+    if is_rate_limited(chat_id, max_messages=Config.MAX_MESSAGES_PER_MINUTE):
+        await update.message.reply_text("⏳ Stai inviando troppi messaggi. Aspetta un momento e riprova.")
+        return
+
+    context.user_data["pending_expense"] = {
+        "type": "transfer",
+        "date": date.today().isoformat(),
+        "amount": None,
+        "category": None,
+        "income_type": None,
+        "name": "Trasferimento",
+        "from_account_id": None,
+        "to_account_id": None,
+    }
+    context.user_data.pop("waiting_for_amount", None)
+    context.user_data.pop("expense_queue", None)
+    context.user_data["input_method"] = "button"
+
+    async def _send(text, reply_markup=None):
+        await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=reply_markup)
+
+    await _advance_transfer_flow(context, chat_id, _send)
+
+
+def _build_expense_summary(data: dict) -> str:
+    """Costruisce il testo di riepilogo per una spesa/entrata in sospeso di conferma."""
+    from datetime import datetime
+    dt = datetime.fromisoformat(data["date"]) if isinstance(data["date"], str) else data["date"]
+    date_str = dt.strftime("%d/%m/%Y")
+    if data.get("type") == "income":
+        income_type_label = data.get("income_type") or "Non determinato"
+        return (
+            f"📝 *Nuova Entrata riconosciuta:*\n\n"
+            f"📅 Data: *{date_str}*\n"
+            f"💰 Importo: *€{data['amount']:.2f}*\n"
+            f"🏷️ Tipo: *{income_type_label}*\n"
+            f"📝 Descrizione: *{data['name']}*"
+        )
+    if data.get("type") == "transfer":
+        from_name = data.get("from_account_name") or "—"
+        to_name = data.get("to_account_name") or "—"
+        return (
+            f"📝 *Nuovo trasferimento riconosciuto:*\n\n"
+            f"📅 Data: *{date_str}*\n"
+            f"💰 Importo: *€{data['amount']:.2f}*\n"
+            f"🏦 Da: *{from_name}*\n"
+            f"🏦 A: *{to_name}*\n"
+            f"📝 Descrizione: *{data['name']}*"
+        )
+    return (
+        f"📝 *Nuova spesa riconosciuta:*\n\n"
+        f"📅 Data: *{date_str}*\n"
+        f"💰 Importo: *€{data['amount']:.2f}*\n"
+        f"📂 Categoria: *{data['category'] or 'Non determinata'}*\n"
+        f"📝 Descrizione: *{data['name']}*"
+    )
+
+
+def _build_confirm_keyboard(data: dict, tx_id: str | None = None) -> InlineKeyboardMarkup:
+    """Costruisce la tastiera di conferma spesa/entrata, con bottone di modifica categoria per le spese.
+
+    Se `tx_id` è fornito, i callback_data sono prefissati con "m" e taggati con l'id
+    (es. "mconfirm:3") per instradare bottoni di transazioni multiple presentate in parallelo
+    (vedi `pending_expenses` in `context.user_data`), invece della singola `pending_expense`.
+    """
+    if tx_id is not None:
+        rows = []
+        if data.get("type") == "expense":
+            rows.append([InlineKeyboardButton("✏️ Cambia categoria", callback_data=f"medit_category:{tx_id}")])
+        rows.append([
+            InlineKeyboardButton("✅ Conferma", callback_data=f"mconfirm:{tx_id}"),
+            InlineKeyboardButton("❌ Annulla", callback_data=f"mcancel:{tx_id}"),
+        ])
+        return InlineKeyboardMarkup(rows)
+
+    rows = []
+    if data.get("type") == "expense":
+        rows.append([InlineKeyboardButton("✏️ Cambia categoria", callback_data="edit_category")])
+    rows.append([
+        InlineKeyboardButton("✅ Conferma", callback_data="confirm"),
+        InlineKeyboardButton("❌ Annulla", callback_data="cancel"),
+    ])
+    return InlineKeyboardMarkup(rows)
+
+
+def _next_expense_id(context: ContextTypes.DEFAULT_TYPE) -> str:
+    """Genera un id breve e univoco per la sessione, usato per taggare i bottoni delle
+    transazioni multiple presentate in parallelo (vedi `pending_expenses`)."""
+    n = context.user_data.get("expense_id_counter", 0) + 1
+    context.user_data["expense_id_counter"] = n
+    return str(n)
+
+
+def _resolve_account_hint(hint: str | None, accounts: list[dict]) -> dict | None:
+    """Risolve un nome conto libero (hint estratto dall'NLP) su un conto reale dell'utente.
+
+    Prova prima il match esatto case-insensitive, poi un fuzzy match (stessa soglia 0.6
+    usata in expense_parser.py per categorie/income_type). None se non menzionato o
+    se non trova nessun conto abbastanza simile.
+    """
+    if not hint:
+        return None
+    hint_low = hint.strip().lower()
+    for acc in accounts:
+        if acc["name"].strip().lower() == hint_low:
+            return acc
+    names_low = [a["name"].strip().lower() for a in accounts]
+    matches = difflib.get_close_matches(hint_low, names_low, n=1, cutoff=0.6)
+    if matches:
+        return next(a for a in accounts if a["name"].strip().lower() == matches[0])
+    return None
+
+
+async def _advance_transfer_flow(context: ContextTypes.DEFAULT_TYPE, chat_id: str, send) -> None:
+    """Fa avanzare il flusso guidato di un trasferimento in sospeso.
+
+    Chiamata sia dal comando /trasferimento (bottoni), sia dal ramo NLP quando l'LLM
+    riconosce un `type: "transfer"`: in entrambi i casi lo stato vive in
+    `context.user_data["pending_expense"]` e questa funzione decide il prossimo step
+    (risoluzione conto origine/destinazione, richiesta importo, riepilogo di conferma).
+
+    `send(text, reply_markup=None)` astrae il canale di invio (nuovo messaggio o edit
+    di una callback query) così la stessa logica serve per bottoni, NLP e conferma importo.
+    """
+    pending = context.user_data.get("pending_expense")
+    if not pending or pending.get("type") != "transfer":
+        return
+
+    if pending.get("from_account_id") is None or pending.get("to_account_id") is None:
+        try:
+            storage = _get_storage(chat_id)
+            accounts = storage.fetch_accounts()
+        except Exception as e:
+            logger.error(f"[User {chat_id}] Errore fetch accounts per trasferimento: {e}")
+            await send("⚠️ Errore nel recupero dei tuoi conti. Riprova tra qualche istante.")
+            return
+
+        if len(accounts) < 2:
+            context.user_data.pop("pending_expense", None)
+            context.user_data.pop("waiting_for_amount", None)
+            context.user_data.pop("expense_queue", None)
+            await send(
+                "🏦 Ti servono almeno due conti per fare un trasferimento.\n\n"
+                "Usa /modify e vai nella tab \"Conti\" per aggiungerne un secondo."
+            )
+            return
+
+        # Risolve una tantum gli hint testuali del parser NLP sui conti reali dell'utente.
+        if pending.get("from_account_id") is None and not pending.get("_from_hint_tried"):
+            pending["_from_hint_tried"] = True
+            match = _resolve_account_hint(pending.get("from_account_hint"), accounts)
+            if match:
+                pending["from_account_id"] = match["id"]
+                pending["from_account_name"] = match["name"]
+        if pending.get("to_account_id") is None and not pending.get("_to_hint_tried"):
+            pending["_to_hint_tried"] = True
+            match = _resolve_account_hint(pending.get("to_account_hint"), accounts)
+            if match and str(match["id"]) != str(pending.get("from_account_id")):
+                pending["to_account_id"] = match["id"]
+                pending["to_account_name"] = match["name"]
+
+        if pending.get("from_account_id") is None:
+            keyboard = [
+                [InlineKeyboardButton(f"🏦 {a['name']}", callback_data=f"transfer_from:{a['id']}")]
+                for a in accounts
+            ]
+            keyboard.append([InlineKeyboardButton("❌ Annulla", callback_data="cancel")])
+            await send("🏦 Da quale conto vuoi spostare i soldi?", InlineKeyboardMarkup(keyboard))
+            return
+
+        if pending.get("to_account_id") is None:
+            remaining = [a for a in accounts if str(a["id"]) != str(pending["from_account_id"])]
+            if not remaining:
+                await send("⚠️ Ti serve un secondo conto diverso da quello di origine per completare il trasferimento.")
+                return
+            keyboard = [
+                [InlineKeyboardButton(f"🏦 {a['name']}", callback_data=f"transfer_to:{a['id']}")]
+                for a in remaining
+            ]
+            keyboard.append([InlineKeyboardButton("❌ Annulla", callback_data="cancel")])
+            await send("🏦 Su quale conto vuoi spostare i soldi?", InlineKeyboardMarkup(keyboard))
+            return
+
+    if pending.get("amount") is None:
+        context.user_data["waiting_for_amount"] = True
+        await send("📝 Quanto vuoi trasferire? Scrivi solo l'importo (es. 100).")
+        return
+
+    summary = _build_expense_summary(pending)
+    keyboard = _build_confirm_keyboard(pending)
+    await send(summary, keyboard)
+
+
+async def _present_next_pending_expense(context: ContextTypes.DEFAULT_TYPE, chat_id: str) -> bool:
+    """Estrae la prossima transazione dalla coda multi-spesa e ne invia il messaggio di conferma
+    (o la richiesta di importo mancante), come nuovo messaggio in chat.
+
+    Usata sia per la prima transazione rilevata sia per presentare in sequenza quelle successive
+    dopo che l'utente ha confermato/annullato/scelto il conto per la transazione precedente.
+
+    Returns:
+        True se c'era una transazione in coda da presentare, False se la coda era vuota.
+    """
+    queue = context.user_data.get("expense_queue") or []
+    if not queue:
+        return False
+
+    result = queue.pop(0)
+    pending = {
+        "type": result["type"],
+        "date": result["date"].isoformat(),
+        "amount": result["amount"],
+        "category": result["category"],
+        "income_type": result.get("income_type"),
+        "name": result["name"],
+    }
+    if result["type"] == "transfer":
+        pending["from_account_hint"] = result.get("from_account")
+        pending["to_account_hint"] = result.get("to_account")
+        pending["from_account_id"] = None
+        pending["to_account_id"] = None
+    context.user_data["pending_expense"] = pending
+
+    if result["type"] == "transfer":
+        async def _send(text, reply_markup=None):
+            await context.bot.send_message(
+                chat_id=chat_id, text=text, parse_mode=ParseMode.MARKDOWN, reply_markup=reply_markup,
+            )
+        await _advance_transfer_flow(context, chat_id, _send)
+        return True
+
+    if result["amount"] is None:
+        _user_store.increment_ai_metrics(success=False)
+        context.user_data["waiting_for_amount"] = True
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text="📝 Non ho Capito l'importo. Prova a ridirmelo, grazie!❤️\n",
+            parse_mode=ParseMode.MARKDOWN,
+        )
+        return True
+
+    summary = _build_expense_summary(context.user_data["pending_expense"])
+    keyboard = _build_confirm_keyboard(context.user_data["pending_expense"])
+    await context.bot.send_message(chat_id=chat_id, text=summary, parse_mode=ParseMode.MARKDOWN, reply_markup=keyboard)
+    try:
+        _user_store.log_message(chat_id, source="telegram", role="bot", text=summary, metadata=result)
+    except Exception as _le:
+        logger.debug("[User %s] log_message bot summary fallito: %s", chat_id, _le)
+    return True
+
+
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handler per messaggi di testo — parsing spesa con LLM."""
     
@@ -1425,7 +1749,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     logger.info(
         "message_received",
         extra={
-            "domain": "access",
+            "domain": "usage",
             "event": "message_received",
             "chat_id": chat_id,
             "meta": {"input_type": "text", "length": len(message_text)},
@@ -1443,7 +1767,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     # Controlla se siamo in attesa dell'importo
     if context.user_data.get("waiting_for_amount"):
         parser = _get_parser(chat_id)
-        amount_res = parser.parse(message_text)
+        amount_res = parser.parse(message_text, chat_id)
         
         amt = None
         if amount_res and amount_res["amount"] is not None:
@@ -1465,25 +1789,16 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
              
         context.user_data["pending_expense"]["amount"] = amt
         context.user_data["waiting_for_amount"] = False
-        
+
         # Procede alla conferma
         data = context.user_data["pending_expense"]
-        from datetime import datetime
-        dt = datetime.fromisoformat(data["date"])
-        date_str = dt.strftime("%d/%m/%Y")
-        summary = (
-            f"📝 *Nuova spesa riconosciuta:*\n\n"
-            f"📅 Data: *{date_str}*\n"
-            f"💰 Importo: *€{data['amount']:.2f}*\n"
-            f"📂 Categoria: *{data['category'] or 'Non determinata'}*\n"
-            f"📝 Descrizione: *{data['name']}*"
-        )
-        keyboard = InlineKeyboardMarkup([
-            [
-                InlineKeyboardButton("✅ Conferma", callback_data="confirm"),
-                InlineKeyboardButton("❌ Annulla", callback_data="cancel"),
-            ]
-        ])
+        if data.get("type") == "transfer":
+            async def _send(text, reply_markup=None):
+                await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=reply_markup)
+            await _advance_transfer_flow(context, chat_id, _send)
+            return
+        summary = _build_expense_summary(data)
+        keyboard = _build_confirm_keyboard(data)
         await update.message.reply_text(summary, parse_mode=ParseMode.MARKDOWN, reply_markup=keyboard)
         return
 
@@ -1495,6 +1810,12 @@ async def _process_expense_text(update: Update, context: ContextTypes.DEFAULT_TY
     # 🛡️ DIFESA 3: Wrapping sicuro dell'input — isoliamo il contenuto utente dal prompt di sistema
     # Questo rende molto più difficile la Prompt Injection
     safe_input = f"[INIZIO INPUT UTENTE]\n{message_text}\n[FINE INPUT UTENTE]"
+    # Già impostato dal chiamante (testo/voce/foto) prima di arrivare qui, non
+    # ancora "pop"-ato: lo leggiamo (senza consumarlo) per taggare il ledger.
+    input_method = context.user_data.get("input_method", "text")
+    # Già impostato dal chiamante (testo/voce/foto) prima di arrivare qui, non
+    # ancora "pop"-ato: lo leggiamo (senza consumarlo) per taggare il ledger.
+    input_method = context.user_data.get("input_method", "text")
 
     message_id = update.effective_message.message_id if update.effective_message else "no-message"
     request_key = build_request_key(chat_id, "expense_parse", message_id, safe_input)
@@ -1514,8 +1835,8 @@ async def _process_expense_text(update: Update, context: ContextTypes.DEFAULT_TY
 
     # 1. Recuperiamo il parser specifico per l'utente
     parser = _get_parser(chat_id)
-    # 2. Parsa con LLM (input sanificato)
-    result, usage = parser.parse_with_usage(safe_input)
+    # 2. Parsa con LLM (input sanificato) — l'LLM decide se è una o più transazioni
+    transactions, usage = parser.parse_multi_with_usage(safe_input, chat_id)
     raw_usage = usage or {}
     normalized_usage = normalize_usage_metadata(raw_usage)
 
@@ -1530,6 +1851,7 @@ async def _process_expense_text(update: Update, context: ContextTypes.DEFAULT_TY
                 provider=normalized_usage.get("provider", "mistral"),
                 model=normalized_usage.get("model", Config.MISTRAL_SMALL_MODEL),
                 operation="expense_parse",
+                input_method=input_method,
             )
         except Exception as _e:
             logger.warning("[User %s] finalize_llm_usage fallita: %s", chat_id, _e)
@@ -1539,92 +1861,73 @@ async def _process_expense_text(update: Update, context: ContextTypes.DEFAULT_TY
         except Exception as _e:
             logger.warning("[User %s] release_llm_reservation fallita: %s", chat_id, _e)
 
-    if result is None:
+    if not transactions:
         _user_store.increment_ai_metrics(success=False)
-        analytics.track(chat_id, "expense_tracking_failed", {"reason": "ai_unavailable", "input_method": "text"})
+        _track_event(chat_id, "expense_tracking_failed", {
+            "reason": "ai_unavailable", "input_method": "text", "transaction_type": "unknown",
+        })
+        _user_store.record_tx_event(chat_id, "unknown", "text", "failed", "telegram", reason="ai_unavailable")
         await update.message.reply_text(
             "⚠️ Non sono riuscito ad elaborare il messaggio in questo momento.\n"
             "Il servizio AI è temporaneamente sovraccarico — riprova tra qualche secondo! 🔄",
         )
         return
 
-    logger.info(f"[User {chat_id}] Risultato parser: {result['type']} - {result['name']} (€{result['amount']})")
+    logger.info(f"[User {chat_id}] Risultato parser: {len(transactions)} transazione/i rilevate")
 
     # Categorizzazione adattiva: sotto soglia di match, traccia l'occorrenza invece di
     # accettare/creare categorie a caso; promuove a categoria reale dopo N ricorrenze.
-    if result["type"] == "expense" and result.get("category"):
+    # Applicata a ogni transazione (multi-spesa), non solo alla prima.
+    expense_txs = [tx for tx in transactions if tx["type"] == "expense" and tx.get("category")]
+    if expense_txs:
         storage = _get_storage(chat_id)
         known_categories = _user_store.get_user_category_names(chat_id)
         with _user_store.Session() as cm_session:
-            match_result = category_matcher.evaluate_and_track(
-                cm_session,
-                storage,
-                _user_store,
-                chat_id,
-                result["name"],
-                result["category"],
-                known_categories,
-            )
-        result["category"] = match_result.category_name
+            for tx in expense_txs:
+                match_result = category_matcher.evaluate_and_track(
+                    cm_session,
+                    storage,
+                    _user_store,
+                    chat_id,
+                    tx["name"],
+                    tx["category"],
+                    known_categories,
+                )
+                tx["category"] = match_result.category_name
 
-    # Salva i dati nel contesto utente (evita il limite 64 byte di callback_data)
-    context.user_data["pending_expense"] = {
-        "type": result["type"],
-        "date": result["date"].isoformat(),
-        "amount": result["amount"],
-        "category": result["category"],
-        "income_type": result.get("income_type"),
-        "name": result["name"],
-    }
-    
-    # Se manca l'importo, chiedi chiarimento e metti in attesa
-    if result["amount"] is None:
-        _user_store.increment_ai_metrics(success=False)
-        context.user_data["waiting_for_amount"] = True
-        cat_info = f" ({result['category']})" if result["category"] else ""
-        await update.message.reply_text(
-            f"📝 Non ho Capito l'importo. Prova a ridirmelo, grazie!❤️\n",
-            parse_mode=ParseMode.MARKDOWN,
-        )
-        return
-    date_str = result["date"].strftime("%d/%m/%Y")
+    # Multi-spesa: le transazioni con importo già noto (il caso comune) vengono presentate
+    # TUTTE SUBITO, ciascuna con bottoni indipendenti (id dedicato) — l'utente le conferma
+    # nell'ordine che vuole. Solo i casi che richiedono per forza un passaggio sequenziale
+    # (importo mancante da chiedere in chiaro, trasferimento con conti ancora da risolvere)
+    # restano in coda e vengono gestiti uno alla volta come prima.
+    immediate = []
+    sequential = []
+    for tx in transactions:
+        (immediate if tx["type"] != "transfer" and tx["amount"] is not None else sequential).append(tx)
 
-    # Scegliamo l'etichetta giusta in base al tipo
-    if result.get("type") == "income":
-        # Se abbiamo già tutto, formatta l'entrata
-        
-        income_type_label = result.get("income_type") or "Non determinato"
-        summary = (
-            f"📝 *Nuova Entrata riconosciuta:*\n\n"
-            f"📅 Data: *{date_str}*\n"
-            f"💰 Importo: *€{result['amount']:.2f}*\n"
-            f"🏷️ Tipo: *{income_type_label}*\n"
-            f"📝 Descrizione: *{result['name']}*"
-        )
+    pending_expenses = context.user_data.setdefault("pending_expenses", {})
+    for tx in immediate:
+        tx_id = _next_expense_id(context)
+        data = {
+            "type": tx["type"],
+            "date": tx["date"].isoformat(),
+            "amount": tx["amount"],
+            "category": tx["category"],
+            "income_type": tx.get("income_type"),
+            "name": tx["name"],
+        }
+        pending_expenses[tx_id] = data
+        summary = _build_expense_summary(data)
+        keyboard = _build_confirm_keyboard(data, tx_id)
+        await update.message.reply_text(summary, parse_mode=ParseMode.MARKDOWN, reply_markup=keyboard)
+        try:
+            _user_store.log_message(chat_id, source="telegram", role="bot", text=summary, metadata=tx)
+        except Exception as _le:
+            logger.debug("[User %s] log_message bot summary fallito: %s", chat_id, _le)
 
-    else:
-        # Se abbiamo già tutto, formatta la spesa
-        summary = (
-            f"📝 *Nuova spesa riconosciuta:*\n\n"
-            f"📅 Data: *{date_str}*\n"
-            f"💰 Importo: *€{result['amount']:.2f}*\n"
-            f"📂 Categoria: *{result['category'] or 'Non determinata'}*\n"
-            f"📝 Descrizione: *{result['name']}*"
-        )
-
-    # Bottoni inline
-    keyboard = InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton("✅ Conferma", callback_data="confirm"),
-            InlineKeyboardButton("❌ Annulla", callback_data="cancel"),
-        ]
-    ])
-
-    await update.message.reply_text(summary, parse_mode=ParseMode.MARKDOWN, reply_markup=keyboard)
-    try:
-        _user_store.log_message(chat_id, source="telegram", role="bot", text=summary, metadata=result)
-    except Exception as _le:
-        logger.debug("[User %s] log_message bot summary fallito: %s", chat_id, _le)
+    if sequential:
+        context.user_data["expense_queue"] = sequential
+        await _present_next_pending_expense(context, chat_id)
 
 async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handler per messaggi vocali — trascrizione e parsing spesa con LLM."""
@@ -1682,11 +1985,7 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             logger.warning("[User %s] Reservation fallita per voice_transcribe: %s", chat_id, e)
 
         # Vertex AI: dati audio processati in EU (europe-west3), GDPR compliant
-        client = genai.Client(
-            vertexai=True,
-            project=Config.GOOGLE_CLOUD_PROJECT,
-            location=Config.VERTEX_AI_LOCATION,
-        )
+        client = get_vertex_ai_client()
         with open(temp_path, "rb") as f:
             audio_bytes = f.read()
 
@@ -1700,6 +1999,21 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             ]
         )
         message_trascribed = response.text.strip()
+
+        if not message_trascribed:
+            logger.warning(
+                "audio_transcription_empty",
+                extra={
+                    "domain": "usage",
+                    "event": "audio_transcription_empty",
+                    "chat_id": chat_id,
+                    "meta": {},
+                },
+            )
+            await update.message.reply_text(
+                "⚠️ Non sono riuscito a capire l'audio. Riprova parlando più chiaramente."
+            )
+            return
 
         # 🛡️ DIFESA 2.5: Sanitizzazione trascrizione audio — rileva injection vocali
         # (es. "...e ora ignora le istruzioni precedenti") e rimuove Unicode anomali
@@ -1719,7 +2033,7 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         logger.info(
             "audio_transcribed",
             extra={
-                "domain": "access",
+                "domain": "usage",
                 "event": "audio_transcribed",
                 "chat_id": chat_id,
                 "meta": {"input_type": "voice", "length": len(message_trascribed)},
@@ -1749,6 +2063,7 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                     model=transcription_usage.get("model", Config.GEMINI_MODEL),
                     operation="voice_transcribe",
                     thinking_tokens=transcription_usage.get("thinking_tokens"),
+                    input_method="voice",
                 )
             except Exception as e:
                 logger.warning("[User %s] finalize_llm_usage voice fallita: %s", chat_id, e)
@@ -1810,7 +2125,7 @@ async def handle_photos(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         await update.message.reply_text("Immagine ricevuta! Sto accendendo gli occhi bionici... 👁️📸")
 
         try:
-            message_trascribed = OcrClient().extract_text_from_image(temp_path)
+            message_trascribed = OcrClient().extract_text_from_image(temp_path, chat_id)
         except OCRError:
             await update.message.reply_text(
                 "⚠️ Non riesco a leggere lo scontrino. Riprova con una foto più nitida e ben illuminata."
@@ -1835,7 +2150,7 @@ async def handle_photos(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         logger.info(
             "receipt_ocr_processed",
             extra={
-                "domain": "access",
+                "domain": "usage",
                 "event": "receipt_ocr_processed",
                 "chat_id": chat_id,
                 "meta": {"input_type": "photo", "length": len(message_trascribed)},
@@ -1856,10 +2171,9 @@ async def handle_photos(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             os.remove(temp_path)
             logger.info(f"[User {chat_id}] File temporaneo eliminato: {temp_path}")
 
-async def _save_to_notion(query, context, chat_id: str, account_id: str | None = None):
-    data = context.user_data.pop("pending_expense", None)
+async def _save_to_notion(query, context, chat_id: str, data: dict | None, account_id: str | None = None):
     context.user_data.pop("waiting_for_amount", None)
-    
+
     if not data:
         await query.edit_message_text("⚠️ Nessuna spesa in sospeso.")
         return
@@ -1898,9 +2212,19 @@ async def _save_to_notion(query, context, chat_id: str, account_id: str | None =
                 account_id=account_id
             )
             date_str = date.strftime("%d/%m/%Y")
-            await query.edit_message_text(
+            saved_msg = (
                 f"✅ *Spesa salvata!*\n\n"
-                f"📅 {date_str} — *€{data['amount']:.2f}* — {data['name']}",
+                f"📅 {date_str} — *€{data['amount']:.2f}* — {data['name']}"
+            )
+            # Alert budget categoria in tempo reale (soglie 80/100/120%).
+            try:
+                alert = check_expense_budget_alert(storage, data.get("category"), date)
+                if alert:
+                    saved_msg += f"\n\n{alert}"
+            except Exception as _ae:
+                logger.warning("[User %s] Calcolo alert budget fallito: %s", chat_id, _ae)
+            await query.edit_message_text(
+                saved_msg,
                 parse_mode=ParseMode.MARKDOWN,
             )
             logger.info(f"Spesa salvata: {data['name']} €{data['amount']:.2f}")
@@ -1920,11 +2244,13 @@ async def _save_to_notion(query, context, chat_id: str, account_id: str | None =
                 logger.warning("[User %s] Errore cancellazione demo data: %s", chat_id, _de)
 
         input_method = context.user_data.pop("input_method", "text")
-        analytics.track(chat_id, "expense_tracked", {
+        tx_type = data.get("type", "expense")
+        _track_event(chat_id, "expense_tracked", {
             "input_method": input_method,
             "storage_backend": user_obj.storage_backend if user_obj else "unknown",
-            "transaction_type": data.get("type", "expense"),
+            "transaction_type": tx_type,
         })
+        _user_store.record_tx_event(chat_id, tx_type, input_method, "confirmed", "telegram")
 
         # Aggiorna la dashboard pinnata in background (se esiste)
         try:
@@ -1933,12 +2259,85 @@ async def _save_to_notion(query, context, chat_id: str, account_id: str | None =
         except Exception as e:
             logger.warning(f"[User {chat_id}] Errore refresh dashboard post-save: {e}")
 
+        # Messaggio multi-spesa: se ce ne sono altre in coda, presenta subito la prossima
+        try:
+            await _present_next_pending_expense(context, chat_id)
+        except Exception as e:
+            logger.warning(f"[User {chat_id}] Errore presentazione prossima transazione in coda: {e}")
+
     except Exception as e:
         logger.error(f"Errore salvataggio Notion: {e}")
         await query.edit_message_text(
             "⚠️ Non sono riuscito a salvare su Notion in questo momento.\n"
             "Riprova tra qualche secondo oppure contatta il supporto se il problema persiste.",
         )
+
+
+async def _save_transfer(query, context, chat_id: str) -> None:
+    """Salva un trasferimento in sospeso (conti origine/destinazione già risolti). Mirror di _save_to_notion."""
+    data = context.user_data.pop("pending_expense", None)
+    context.user_data.pop("waiting_for_amount", None)
+
+    if not data:
+        await query.edit_message_text("⚠️ Nessun trasferimento in sospeso.")
+        return
+
+    try:
+        transfer_date = datetime.strptime(data["date"].split("T")[0], "%Y-%m-%d").date()
+
+        storage = _get_storage(chat_id)
+        storage.create_transfer(
+            transfer_date=transfer_date,
+            amount=data["amount"],
+            from_account_id=data["from_account_id"],
+            to_account_id=data["to_account_id"],
+            name=data.get("name"),
+        )
+        date_str = transfer_date.strftime("%d/%m/%Y")
+        from_name = data.get("from_account_name") or "conto di origine"
+        to_name = data.get("to_account_name") or "conto di destinazione"
+        await query.edit_message_text(
+            f"✅ *Trasferimento salvato!*\n\n"
+            f"📅 {date_str} — *€{data['amount']:.2f}*\n"
+            f"🏦 {from_name} → {to_name}",
+            parse_mode=ParseMode.MARKDOWN,
+        )
+        logger.info(f"[User {chat_id}] Trasferimento salvato: €{data['amount']:.2f}")
+        try:
+            _success_text = f"✅ Trasferimento salvato: €{data['amount']:.2f}"
+            _user_store.log_message(chat_id, source="telegram", role="bot", text=_success_text, metadata=data)
+        except Exception as _le:
+            logger.debug("[User %s] log_message transfer saved fallito: %s", chat_id, _le)
+
+        input_method = context.user_data.pop("input_method", "text")
+        user_obj = _user_store.get_user(chat_id)
+        _track_event(chat_id, "expense_tracked", {
+            "input_method": input_method,
+            "storage_backend": user_obj.storage_backend if user_obj else "unknown",
+            "transaction_type": "transfer",
+        })
+        _user_store.record_tx_event(chat_id, "transfer", input_method, "confirmed", "telegram")
+
+        try:
+            await _refresh_pinned_dashboard(query._bot, chat_id)
+        except Exception as e:
+            logger.warning(f"[User {chat_id}] Errore refresh dashboard post-save: {e}")
+
+        try:
+            await _present_next_pending_expense(context, chat_id)
+        except Exception as e:
+            logger.warning(f"[User {chat_id}] Errore presentazione prossima transazione in coda: {e}")
+
+    except ValueError as e:
+        logger.warning(f"[User {chat_id}] Trasferimento non valido: {e}")
+        await query.edit_message_text(f"⚠️ {e}")
+    except Exception as e:
+        logger.error(f"Errore salvataggio trasferimento: {e}")
+        await query.edit_message_text(
+            "⚠️ Non sono riuscito a salvare il trasferimento in questo momento.\n"
+            "Riprova tra qualche secondo oppure contatta il supporto se il problema persiste.",
+        )
+
 
 async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handler per i bottoni inline (conferma/annulla/conti)."""
@@ -2021,18 +2420,228 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         await query.edit_message_text("❌ Eliminazione annullata. Il tuo account è al sicuro.")
         return
 
+    # ------------------------------------------------------------------
+    # Transazioni multiple presentate in parallelo (vedi _process_expense_text):
+    # ognuna vive in context.user_data["pending_expenses"][tx_id], indipendente
+    # dalle altre — annullarne/confermarne una non tocca le altre in sospeso.
+    # ------------------------------------------------------------------
+
+    if query.data.startswith("mcancel:"):
+        tx_id = query.data.split(":", 1)[1]
+        pending_expenses = context.user_data.get("pending_expenses", {})
+        cancelled_data = pending_expenses.pop(tx_id, None)
+        if cancelled_data is None:
+            await query.edit_message_text("⚠️ Nessuna spesa in sospeso.")
+            return
+        _track_event(chat_id, "expense_tracking_failed", {
+            "reason": "user_cancelled", "input_method": "text",
+            "transaction_type": cancelled_data.get("type", "expense"),
+        })
+        _user_store.record_tx_event(
+            chat_id, cancelled_data.get("type", "expense"), "text", "cancelled", "telegram",
+            reason="user_cancelled",
+        )
+        await query.edit_message_text("❌ Operazione annullata.")
+        return
+
+    if query.data.startswith("medit_category:") or query.data.startswith("medit_category_back:"):
+        is_back = query.data.startswith("medit_category_back:")
+        tx_id = query.data.split(":", 1)[1]
+        pending = context.user_data.get("pending_expenses", {}).get(tx_id)
+        if not pending:
+            await query.edit_message_text("⚠️ Nessuna spesa in sospeso.")
+            return
+
+        if is_back:
+            summary = _build_expense_summary(pending)
+            keyboard = _build_confirm_keyboard(pending, tx_id)
+            await query.edit_message_text(summary, parse_mode=ParseMode.MARKDOWN, reply_markup=keyboard)
+            return
+
+        try:
+            storage = _get_storage(chat_id)
+            category_names = storage.get_category_names()
+        except Exception as e:
+            logger.error(f"[User {chat_id}] Errore fetch categorie: {e}")
+            await query.edit_message_text("⚠️ Errore nel recupero delle categorie. Riprova tra qualche istante.")
+            return
+
+        if not category_names:
+            await query.edit_message_text("⚠️ Non hai ancora nessuna categoria configurata. Usa /modify per crearne una.")
+            return
+
+        context.user_data["category_options"] = category_names
+        keyboard = [
+            [InlineKeyboardButton(name, callback_data=f"msetcat:{tx_id}:{idx}")]
+            for idx, name in enumerate(category_names)
+        ]
+        keyboard.append([InlineKeyboardButton("🔙 Indietro", callback_data=f"medit_category_back:{tx_id}")])
+        await query.edit_message_text(
+            "📂 Scegli la categoria giusta:",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+        )
+        return
+
+    if query.data.startswith("msetcat:"):
+        _, tx_id, idx_str = query.data.split(":", 2)
+        pending = context.user_data.get("pending_expenses", {}).get(tx_id)
+        category_options = context.user_data.get("category_options")
+        if not pending or not category_options:
+            await query.edit_message_text("⚠️ Nessuna spesa in sospeso.")
+            return
+        try:
+            new_category = category_options[int(idx_str)]
+        except (ValueError, IndexError):
+            await query.edit_message_text("⚠️ Categoria non valida. Riprova.")
+            return
+
+        pending["category"] = new_category
+        summary = _build_expense_summary(pending)
+        keyboard = _build_confirm_keyboard(pending, tx_id)
+        await query.edit_message_text(summary, parse_mode=ParseMode.MARKDOWN, reply_markup=keyboard)
+        return
+
+    if query.data.startswith("mconfirm:"):
+        tx_id = query.data.split(":", 1)[1]
+        data = context.user_data.get("pending_expenses", {}).get(tx_id)
+        if not data:
+            await query.edit_message_text("⚠️ Nessuna spesa in sospeso.")
+            return
+
+        try:
+            storage = _get_storage(chat_id)
+            accounts = storage.fetch_accounts()
+        except Exception as e:
+            logger.error(f"[User {chat_id}] Errore fetch accounts: {e}")
+            await query.edit_message_text("⚠️ Errore nel recupero dei tuoi conti. Riprova tra qualche istante.")
+            return
+
+        if not accounts:
+            # Nessun conto configurato: blocca solo questa transazione (le altre in parallelo
+            # restano in sospeso, l'utente potrà confermarle appena avrà creato un conto).
+            context.user_data.get("pending_expenses", {}).pop(tx_id, None)
+            _track_event(chat_id, "expense_tracking_failed", {
+                "reason": "no_account", "input_method": "text",
+                "transaction_type": data.get("type", "expense"),
+            })
+            _user_store.record_tx_event(
+                chat_id, data.get("type", "expense"), "text", "failed", "telegram", reason="no_account",
+            )
+            await query.edit_message_text(
+                "🏦 Non hai ancora nessun conto su Expensum, quindi non posso registrare la spesa.\n\n"
+                "Usa /modify e vai nella tab \"Conti\" per aggiungerne uno, poi rimanda il messaggio della spesa."
+            )
+            return
+
+        keyboard = []
+        for acc in accounts:
+            bal = acc.get('current_balance', 0.0)
+            keyboard.append([InlineKeyboardButton(f"🏦 {acc['name']} (€{bal:.2f})", callback_data=f"maccount:{tx_id}:{acc['id']}")])
+        keyboard.append([InlineKeyboardButton("❌ Annulla", callback_data=f"mcancel:{tx_id}")])
+
+        question = "🏦 Su quale conto è arrivata l'entrata?" if data.get("type") == "income" else "🏦 Da quale conto hai pagato?"
+        await query.edit_message_text(question, reply_markup=InlineKeyboardMarkup(keyboard))
+        return
+
+    if query.data.startswith("maccount:"):
+        _, tx_id, account_id = query.data.split(":", 2)
+        data = context.user_data.get("pending_expenses", {}).pop(tx_id, None)
+        if not data:
+            await query.edit_message_text("⚠️ Nessuna spesa in sospeso.")
+            return
+        await _save_to_notion(query, context, chat_id, data, account_id=account_id)
+        return
+
+    if query.data == "edit_category":
+        pending = context.user_data.get("pending_expense")
+        if not pending:
+            await query.edit_message_text("⚠️ Nessuna spesa in sospeso.")
+            return
+        try:
+            storage = _get_storage(chat_id)
+            category_names = storage.get_category_names()
+        except Exception as e:
+            logger.error(f"[User {chat_id}] Errore fetch categorie: {e}")
+            await query.edit_message_text("⚠️ Errore nel recupero delle categorie. Riprova tra qualche istante.")
+            return
+
+        if not category_names:
+            await query.edit_message_text("⚠️ Non hai ancora nessuna categoria configurata. Usa /modify per crearne una.")
+            return
+
+        # Le categorie vanno in user_data (non nel callback_data) per non rischiare
+        # di superare il limite di 64 byte di Telegram con nomi lunghi o emoji.
+        context.user_data["category_options"] = category_names
+        keyboard = [
+            [InlineKeyboardButton(name, callback_data=f"setcat:{idx}")]
+            for idx, name in enumerate(category_names)
+        ]
+        keyboard.append([InlineKeyboardButton("🔙 Indietro", callback_data="edit_category_back")])
+        await query.edit_message_text(
+            "📂 Scegli la categoria giusta:",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+        )
+        return
+
+    if query.data == "edit_category_back":
+        pending = context.user_data.get("pending_expense")
+        if not pending:
+            await query.edit_message_text("⚠️ Nessuna spesa in sospeso.")
+            return
+        summary = _build_expense_summary(pending)
+        keyboard = _build_confirm_keyboard(pending)
+        await query.edit_message_text(summary, parse_mode=ParseMode.MARKDOWN, reply_markup=keyboard)
+        return
+
+    if query.data.startswith("setcat:"):
+        pending = context.user_data.get("pending_expense")
+        category_options = context.user_data.get("category_options")
+        if not pending or not category_options:
+            await query.edit_message_text("⚠️ Nessuna spesa in sospeso.")
+            return
+        try:
+            idx = int(query.data.split(":", 1)[1])
+            new_category = category_options[idx]
+        except (ValueError, IndexError):
+            await query.edit_message_text("⚠️ Categoria non valida. Riprova.")
+            return
+
+        pending["category"] = new_category
+        summary = _build_expense_summary(pending)
+        keyboard = _build_confirm_keyboard(pending)
+        await query.edit_message_text(summary, parse_mode=ParseMode.MARKDOWN, reply_markup=keyboard)
+        return
+
     if query.data == "cancel":
         input_method = context.user_data.pop("input_method", "text")
-        context.user_data.pop("pending_expense", None)
+        cancelled_data = context.user_data.pop("pending_expense", None)
         context.user_data.pop("waiting_for_amount", None)
-        analytics.track(chat_id, "expense_tracking_failed", {"reason": "user_cancelled", "input_method": input_method})
+        _track_event(chat_id, "expense_tracking_failed", {
+            "reason": "user_cancelled", "input_method": input_method,
+            "transaction_type": (cancelled_data or {}).get("type", "expense"),
+        })
+        _user_store.record_tx_event(
+            chat_id, (cancelled_data or {}).get("type", "expense"), input_method, "cancelled", "telegram",
+            reason="user_cancelled",
+        )
         await query.edit_message_text("❌ Operazione annullata.")
+        # Messaggio multi-spesa: annullare una transazione non annulla le altre in coda
+        try:
+            await _present_next_pending_expense(context, chat_id)
+        except Exception as e:
+            logger.warning(f"[User {chat_id}] Errore presentazione prossima transazione in coda: {e}")
         return
 
     if query.data == "confirm":
         data = context.user_data.get("pending_expense")
         if not data:
             await query.edit_message_text("⚠️ Nessuna spesa in sospeso.")
+            return
+
+        if data.get("type") == "transfer":
+            # I conti origine/destinazione sono già stati risolti prima della conferma
+            # (picker a bottoni o match NLP): niente step "quale conto" da fare qui.
+            await _save_transfer(query, context, chat_id)
             return
 
         # Recupera accounts da Notion per far selezionare il conto
@@ -2049,10 +2658,20 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         if not accounts:
             # Nessun conto configurato: non si può salvare senza sapere su quale conto
             # accreditare/scalare la transazione. Blocca e indirizza l'utente a crearne uno.
+            # Svuota anche l'eventuale coda multi-spesa: nessuna delle transazioni rilevate
+            # sarebbe comunque salvabile finché non esiste un conto.
             input_method = context.user_data.pop("input_method", "text")
+            tx_type_for_failure = data.get("type", "expense")
             context.user_data.pop("pending_expense", None)
             context.user_data.pop("waiting_for_amount", None)
-            analytics.track(chat_id, "expense_tracking_failed", {"reason": "no_account", "input_method": input_method})
+            context.user_data.pop("expense_queue", None)
+            _track_event(chat_id, "expense_tracking_failed", {
+                "reason": "no_account", "input_method": input_method,
+                "transaction_type": tx_type_for_failure,
+            })
+            _user_store.record_tx_event(
+                chat_id, tx_type_for_failure, input_method, "failed", "telegram", reason="no_account",
+            )
             await query.edit_message_text(
                 "🏦 Non hai ancora nessun conto su Expensum, quindi non posso registrare la spesa.\n\n"
                 "Usa /modify e vai nella tab \"Conti\" per aggiungerne uno, poi rimanda il messaggio della spesa."
@@ -2073,7 +2692,42 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
     if query.data.startswith("account:"):
         account_id = query.data.split(":", 1)[1]
-        await _save_to_notion(query, context, chat_id, account_id=account_id)
+        data = context.user_data.pop("pending_expense", None)
+        await _save_to_notion(query, context, chat_id, data, account_id=account_id)
+        return
+
+    if query.data.startswith("transfer_from:") or query.data.startswith("transfer_to:"):
+        side, account_id = query.data.split(":", 1)
+        pending = context.user_data.get("pending_expense")
+        if not pending or pending.get("type") != "transfer":
+            await query.edit_message_text("⚠️ Nessun trasferimento in sospeso.")
+            return
+
+        if side == "transfer_to" and account_id == str(pending.get("from_account_id")):
+            await query.edit_message_text(
+                "⚠️ Il conto di destinazione deve essere diverso da quello di origine."
+            )
+            return
+
+        try:
+            storage = _get_storage(chat_id)
+            accounts = storage.fetch_accounts()
+        except Exception as e:
+            logger.error(f"[User {chat_id}] Errore fetch accounts: {e}")
+            await query.edit_message_text("⚠️ Errore nel recupero dei tuoi conti. Riprova tra qualche istante.")
+            return
+
+        acc = next((a for a in accounts if str(a["id"]) == account_id), None)
+        if side == "transfer_from":
+            pending["from_account_id"] = account_id
+            pending["from_account_name"] = acc["name"] if acc else None
+        else:
+            pending["to_account_id"] = account_id
+            pending["to_account_name"] = acc["name"] if acc else None
+
+        async def _send(text, reply_markup=None):
+            await query.edit_message_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=reply_markup)
+        await _advance_transfer_flow(context, chat_id, _send)
         return
 
 
@@ -2112,13 +2766,59 @@ async def handle_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> No
 # Entry point
 # ---------------------------------------------------------------------------
 
-def _nightly_category_sync() -> None:
+def _notify_category_reassignments(
+    app: Application,
+    loop: asyncio.AbstractEventLoop,
+    notifications: list,
+) -> None:
+    """Notifica agli utenti le categorie rimosse da Notion con record spostati su «Altro».
+
+    `notifications` è una lista di (chat_id, ReconcileReport). Best-effort: un errore
+    su un singolo invio non blocca gli altri.
+    """
+    async def _send():
+        bot = app.bot
+        for chat_id, report in notifications:
+            try:
+                lines = ["ℹ️ Ho allineato le categorie al tuo Notion."]
+                for r in report.reassignments:
+                    parti = []
+                    if r.moved_expenses:
+                        parti.append(f"{r.moved_expenses} spese")
+                    if r.moved_subscriptions:
+                        parti.append(f"{r.moved_subscriptions} abbonamenti")
+                    dettaglio = " e ".join(parti) if parti else "i record collegati"
+                    lines.append(
+                        f"• «{r.category_name}» è stata rimossa: {dettaglio} "
+                        f"spostati su «Altro»."
+                    )
+                await bot.send_message(chat_id=int(chat_id), text="\n".join(lines))
+                await asyncio.sleep(0.3)
+            except Exception as e:
+                logger.error("[NightlySync] Notifica riassegnazioni fallita per %s: %s", chat_id, e)
+
+    future = asyncio.run_coroutine_threadsafe(_send(), loop)
+    try:
+        future.result(timeout=120)
+    except Exception as e:
+        logger.error("[NightlySync] Errore invio notifiche riassegnazioni: %s", e)
+
+
+def _nightly_category_sync(app: Application, loop: asyncio.AbstractEventLoop) -> None:
     """Job APScheduler alle 03:00 — aggiorna medie categorie per tutti gli utenti attivi.
 
     Sequenziale con 200ms di sleep tra utenti per non saturare CPU/rete su Hetzner CX23.
     Ogni utente Notion usa il proprio OAuth token → bucket rate limit separato.
+
+    Per gli utenti Notion la sync è anche riconciliante: rimuove dalla cache le
+    categorie non più presenti su Notion. Se categorie con spese/abbonamenti
+    dipendenti vengono rimosse, i record sono spostati su «Altro» e l'utente viene
+    notificato.
     """
     logger.info("[NightlySync] Avvio sincronizzazione notturna categorie.")
+
+    # (chat_id, ReconcileReport) da notificare a fine giro Notion.
+    pending_notifications: list = []
 
     # --- Utenti Notion ---
     try:
@@ -2126,21 +2826,23 @@ def _nightly_category_sync() -> None:
         logger.info("[NightlySync] Utenti Notion: %d", len(notion_users))
         for user in notion_users:
             try:
-                db_schemas_raw = _user_store.get_database_schemas(user.chat_id)
-                schemas = {}
-                for data in db_schemas_raw.values():
-                    # get_database_schemas ritorna {db_key: {database_id, properties, mapped}}
-                    pass
                 notion_client = NotionFinanceClient(
                     api_key=user.notion_access_token,
                     categories_db_id=user.categories_db_id,
                 )
-                refresh_category_averages(user.chat_id, _user_store, notion_client=notion_client)
+                report = refresh_category_averages(
+                    user.chat_id, _user_store, notion_client=notion_client
+                )
+                if report is not None and report.has_reassignments:
+                    pending_notifications.append((user.chat_id, report))
             except Exception as e:
                 logger.error("[NightlySync] Errore Notion per %s: %s", user.chat_id, e)
             time.sleep(0.2)
     except Exception as e:
         logger.error("[NightlySync] Errore fetch utenti Notion: %s", e)
+
+    if pending_notifications:
+        _notify_category_reassignments(app, loop, pending_notifications)
 
     # --- Utenti Postgres ---
     try:
@@ -2218,7 +2920,7 @@ def _daily_dashboard_job(app: Application, loop: asyncio.AbstractEventLoop) -> N
 
                 # Salva
                 _user_store.set_pinned_dashboard_msg_id(chat_id, msg.message_id)
-                analytics.track(chat_id, "notification_sent", {"notification_type": "daily_dashboard"})
+                _track_event(chat_id, "notification_sent", {"notification_type": "daily_dashboard"})
                 sent += 1
                 logger.info(f"[DailyDashboard] Dashboard inviata a {chat_id}")
 
@@ -2234,6 +2936,7 @@ def _daily_dashboard_job(app: Application, loop: asyncio.AbstractEventLoop) -> N
         future.result(timeout=300)
     except Exception as e:
         logger.error(f"[DailyDashboard] Errore job: {e}")
+        raise
 
 
 def _weekly_plan_job(app: Application, loop: asyncio.AbstractEventLoop) -> None:
@@ -2252,7 +2955,7 @@ def _weekly_plan_job(app: Application, loop: asyncio.AbstractEventLoop) -> None:
             chat_id = user.chat_id
             try:
                 await _build_and_send_weekly_plan(chat_id=chat_id, bot=bot)
-                analytics.track(chat_id, "notification_sent", {"notification_type": "weekly_plan"})
+                _track_event(chat_id, "notification_sent", {"notification_type": "weekly_plan"})
                 sent += 1
                 logger.info(f"[WeeklyPlan] Piano inviato a {chat_id}")
             except Exception as e:
@@ -2266,6 +2969,7 @@ def _weekly_plan_job(app: Application, loop: asyncio.AbstractEventLoop) -> None:
         future.result(timeout=300)
     except Exception as e:
         logger.error(f"[WeeklyPlan] Errore job: {e}")
+        raise
 
 
 def _monthly_plan_job(app: Application, loop: asyncio.AbstractEventLoop) -> None:
@@ -2293,7 +2997,7 @@ def _monthly_plan_job(app: Application, loop: asyncio.AbstractEventLoop) -> None
                 await main_module.run_agent(
                     target_year, target_month, dry_run=False, chat_id=chat_id, shared_store=_user_store,
                 )
-                analytics.track(chat_id, "notification_sent", {"notification_type": "monthly_report"})
+                _track_event(chat_id, "notification_sent", {"notification_type": "monthly_report"})
                 sent += 1
                 logger.info(f"[MonthlyReport] Report inviato a {chat_id}")
             except Exception as e:
@@ -2307,6 +3011,7 @@ def _monthly_plan_job(app: Application, loop: asyncio.AbstractEventLoop) -> None
         future.result(timeout=1800)
     except Exception as e:
         logger.error(f"[MonthlyReport] Errore job: {e}")
+        raise
 
 
 def _trial_expiry_job(app: Application, loop: asyncio.AbstractEventLoop) -> None:
@@ -2329,7 +3034,7 @@ def _trial_expiry_job(app: Application, loop: asyncio.AbstractEventLoop) -> None
     for user in expired:
         try:
             _user_store.set_user_plan(user.chat_id, "free", payment_reference="trial_expired")
-            analytics.track(user.chat_id, "trial_expired", {})
+            _track_event(user.chat_id, "trial_expired", {})
             downgraded += 1
         except Exception as e:
             logger.error(f"[TrialExpiry] Errore downgrade per {user.chat_id}: {e}")
@@ -2402,7 +3107,7 @@ def _trial_lifecycle_job(app: Application, loop: asyncio.AbstractEventLoop) -> N
                         reply_markup=markup,
                     )
                     _user_store.record_lifecycle_event(chat_id, step, "telegram")
-                    analytics.track(chat_id, "trial_drip_sent", {"step": step, "channel": "telegram"})
+                    _track_event(chat_id, "trial_drip_sent", {"step": step, "channel": "telegram"})
                     sent_telegram += 1
                 except Exception as e:
                     logger.error(f"[TrialLifecycle] Errore Telegram {step} per {chat_id}: {e}")
@@ -2423,7 +3128,7 @@ def _trial_lifecycle_job(app: Application, loop: asyncio.AbstractEventLoop) -> N
                         }
                         brevo_client.send_transactional_email(user.email, subject, html, headers=email_headers)
                         _user_store.record_lifecycle_event(chat_id, step, "email")
-                        analytics.track(chat_id, "trial_drip_sent", {"step": step, "channel": "email"})
+                        _track_event(chat_id, "trial_drip_sent", {"step": step, "channel": "email"})
                         sent_email += 1
                     except Exception as e:
                         logger.error(f"[TrialLifecycle] Errore email {step} per {chat_id}: {e}")
@@ -2436,6 +3141,7 @@ def _trial_lifecycle_job(app: Application, loop: asyncio.AbstractEventLoop) -> N
         future.result(timeout=300)
     except Exception as e:
         logger.error(f"[TrialLifecycle] Errore job: {e}")
+        raise
 
 
 def _nightly_subscription_job(app: Application, loop: asyncio.AbstractEventLoop) -> None:
@@ -2516,6 +3222,7 @@ def _nightly_subscription_job(app: Application, loop: asyncio.AbstractEventLoop)
         future.result(timeout=600)
     except Exception as e:
         logger.error(f"[NightlySubs] Errore job: {e}")
+        raise
 
 
 def _nightly_retention_cleanup() -> None:
@@ -2527,9 +3234,11 @@ def _nightly_retention_cleanup() -> None:
     try:
         deleted_oauth = _user_store.cleanup_expired_oauth_sessions()
         deleted_chats = _user_store.cleanup_old_chat_messages(days=90)
+        deleted_jobs = _user_store.cleanup_old_job_runs(days=90)
         logger.info(
-            "[NightlyRetention] OAuth sessions rimosse: %d, chat_messages rimossi: %d",
-            deleted_oauth, deleted_chats,
+            "[NightlyRetention] OAuth sessions rimosse: %d, chat_messages rimossi: %d, "
+            "job_runs rimossi: %d",
+            deleted_oauth, deleted_chats, deleted_jobs,
         )
     except Exception as e:
         logger.error(f"[NightlyRetention] Errore job: {e}")
@@ -2593,20 +3302,54 @@ def _disk_space_check_job(warning_mb: int = 1024, critical_mb: int = 500) -> Non
         logger.info("disk_space_ok", extra={"event": "disk_space_ok", "meta": meta})
 
 
+def _record_scheduler_event(event) -> None:
+    """Listener APScheduler: persiste ogni esecuzione in `job_runs`.
+
+    Consente alla dashboard admin di sapere se i job di oggi sono girati e con
+    che esito. Gira nel thread dello scheduler; è best-effort (record_job_run
+    non solleva). `error_text` contiene solo tipo/messaggio eccezione, mai dati
+    liberi utente.
+    """
+    code = getattr(event, "code", None)
+    exc = getattr(event, "exception", None)
+    if exc is not None:
+        status, error_text = "error", f"{type(exc).__name__}: {exc}"
+    elif code == EVENT_JOB_MISSED:
+        status, error_text = "missed", None
+    else:
+        status, error_text = "success", None
+    _user_store.record_job_run(
+        getattr(event, "job_id", "unknown"),
+        status,
+        trigger_type="scheduler",
+        scheduled_at=getattr(event, "scheduled_run_time", None),
+        error_text=error_text,
+    )
+
+
 async def _start_scheduler(app: Application) -> None:
     """Hook post_init PTB: cattura il loop PTB e avvia APScheduler con il loop corretto."""
     loop = asyncio.get_running_loop()
-    scheduler = BackgroundScheduler(daemon=True)
-    scheduler.add_job(_nightly_category_sync, 'cron', hour=3, minute=0)
-    scheduler.add_job(_nightly_subscription_job, 'cron', hour=3, minute=5, args=[app, loop])
-    scheduler.add_job(_nightly_retention_cleanup, 'cron', hour=3, minute=10)
-    scheduler.add_job(_trial_expiry_job, 'cron', hour=4, minute=0, args=[app, loop])
-    scheduler.add_job(_daily_dashboard_job, 'cron', hour=8, minute=0, args=[app, loop])
-    scheduler.add_job(_weekly_plan_job, 'cron', day_of_week='mon', hour=8, minute=5, args=[app, loop])
-    scheduler.add_job(_monthly_plan_job, 'cron', day=1, hour=8, minute=0, args=[app, loop])
-    scheduler.add_job(_trial_lifecycle_job, 'cron', hour=9, minute=0, args=[app, loop])
-    scheduler.add_job(_health_check_job, 'interval', hours=4)
-    scheduler.add_job(_disk_space_check_job, 'interval', hours=6)
+    # Timezone esplicita (non affidarsi al fuso locale del sistema): gli orari sotto
+    # sono pensati in ora italiana e admin_metrics.SCHEDULER_TZ deve restare allineato
+    # per il calcolo "atteso oggi"/no-show nella dashboard.
+    scheduler = BackgroundScheduler(daemon=True, timezone="Europe/Rome")
+    # id espliciti: sono la chiave con cui il listener registra gli esiti in
+    # job_runs e con cui la dashboard confronta lo schedule atteso (no-show).
+    scheduler.add_job(_nightly_category_sync, 'cron', hour=3, minute=0, args=[app, loop], id='nightly_category_sync')
+    scheduler.add_job(_nightly_subscription_job, 'cron', hour=3, minute=5, args=[app, loop], id='nightly_subscription_job')
+    scheduler.add_job(_nightly_retention_cleanup, 'cron', hour=3, minute=10, id='nightly_retention_cleanup')
+    scheduler.add_job(_trial_expiry_job, 'cron', hour=4, minute=0, args=[app, loop], id='trial_expiry_job')
+    scheduler.add_job(_daily_dashboard_job, 'cron', hour=8, minute=0, args=[app, loop], id='daily_dashboard_job')
+    scheduler.add_job(_weekly_plan_job, 'cron', day_of_week='mon', hour=8, minute=5, args=[app, loop], id='weekly_plan_job')
+    scheduler.add_job(_monthly_plan_job, 'cron', day=1, hour=8, minute=0, args=[app, loop], id='monthly_plan_job')
+    scheduler.add_job(_trial_lifecycle_job, 'cron', hour=9, minute=0, args=[app, loop], id='trial_lifecycle_job')
+    scheduler.add_job(_health_check_job, 'interval', hours=4, id='health_check_job')
+    scheduler.add_job(_disk_space_check_job, 'interval', hours=6, id='disk_space_check_job')
+    scheduler.add_listener(
+        _record_scheduler_event,
+        EVENT_JOB_EXECUTED | EVENT_JOB_ERROR | EVENT_JOB_MISSED,
+    )
     scheduler.start()
     logger.info(
         "⏰ Scheduler avviato (sync 03:00, subs 03:05, retention cleanup 03:10, "
@@ -2886,7 +3629,7 @@ async def ob_handle_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         logger.warning("Errore bootstrap categorie onboarding Telegram: %s", e)
 
     _user_store.complete_onboarding(chat_id)
-    analytics.track(chat_id, "onboarding_completed", {"platform": "telegram", "hobbies": hobbies})
+    _track_event(chat_id, "onboarding_completed", {"platform": "telegram", "hobbies": hobbies})
 
     # Carica dati demo automaticamente per il tour nella web app
     demo_count = 0
@@ -2895,7 +3638,7 @@ async def ob_handle_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         storage = _get_storage(chat_id)
         demo_count = load_demo_data(storage)
         _user_store.set_has_demo_data(chat_id, True)
-        analytics.track(chat_id, "demo_data_loaded", {"expense_count": demo_count, "platform": "telegram"})
+        _track_event(chat_id, "demo_data_loaded", {"expense_count": demo_count, "platform": "telegram"})
     except Exception as e:
         logger.warning("[User %s] Errore caricamento demo data post-onboarding: %s", chat_id, e)
 
@@ -3191,6 +3934,7 @@ def main():
     app.add_handler(CommandHandler("logout", cmd_logout))
     app.add_handler(CommandHandler("login", cmd_login))
     app.add_handler(CommandHandler("modify", cmd_modify))
+    app.add_handler(CommandHandler("trasferimento", cmd_trasferimento))
     app.add_handler(CommandHandler("impostazioni", cmd_impostazioni_menu))
     app.add_handler(CommandHandler("privacy", cmd_privacy))
     app.add_handler(CommandHandler("export", cmd_export))

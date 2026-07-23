@@ -73,6 +73,9 @@ class Config:
     # Vertex AI — trascrizione voce GDPR compliant (dati in EU)
     GOOGLE_CLOUD_PROJECT: str = os.getenv("GOOGLE_CLOUD_PROJECT", "")
     VERTEX_AI_LOCATION: str = os.getenv("VERTEX_AI_LOCATION", "europe-west3")
+    # Service account key (JSON minificato) incollata direttamente in .env, alternativa
+    # alle Application Default Credentials basate su file quando non disponibili (es. VPS)
+    GOOGLE_APPLICATION_CREDENTIALS_JSON: str = os.getenv("GOOGLE_APPLICATION_CREDENTIALS_JSON", "")
 
     # --- TELEGRAM ---
     TELEGRAM_BOT_TOKEN: str = os.getenv("TELEGRAM_BOT_TOKEN", "")
@@ -107,9 +110,17 @@ class Config:
     FLASK_SECRET_KEY: str = os.getenv("FLASK_SECRET_KEY", "")
 
     # --- DATABASE ---
-    # Default: SQLite locale (sqlite:///users.db). 
-    # Per PostgreSQL: "postgresql://utente:password@localhost:5432/financebot"
+    # Default: SQLite locale (sqlite:///users.db).
+    # Per PostgreSQL usa il driver psycopg3 (postgresql+psycopg://):
+    #   "postgresql+psycopg://utente:password@localhost:5432/expensum"
+    # In produzione questo è il ruolo runtime DML-only (expensum_app), soggetto a RLS.
     DATABASE_URL: str = os.getenv("DATABASE_URL", "sqlite:///users.db")
+    # URL con privilegi DDL (ruolo OWNER) usato SOLO dalle migration Alembic; il
+    # runtime dell'app non deve mai usarlo. Fallback su DATABASE_URL se assente.
+    MIGRATION_DATABASE_URL: str = os.getenv("MIGRATION_DATABASE_URL", "")
+    # DDL a runtime (create_all/_ensure_schema all'avvio). In produzione DEVE essere
+    # false: lo schema lo gestisce solo Alembic e il ruolo runtime non ha privilegi DDL.
+    RUN_RUNTIME_MIGRATIONS: bool = os.getenv("RUN_RUNTIME_MIGRATIONS", "false").lower() == "true"
 
     # --- SICUREZZA e CLOUD ---
     # Email di supporto mostrata agli utenti bannati per comportamento malevolo
@@ -267,8 +278,10 @@ def setup_logging() -> logging.Logger:
     """Configura il sistema di logging multi-file JSON Lines, separato per dominio.
 
     File prodotti in logs/: app.jsonl (flusso generale), error.jsonl (solo
-    ERROR+ cross-dominio), security.jsonl (eventi di sicurezza), access.jsonl
-    (azioni utente senza contenuto), debug.jsonl (solo se LOG_LEVEL=DEBUG).
+    ERROR+ cross-dominio), security.jsonl (eventi di sicurezza), usage.jsonl
+    (azioni utente ed esiti — spese/OCR/audio/parsing, senza contenuto libero,
+    include gli errori "attesi" gestiti come WARNING/ERROR di dominio usage),
+    debug.jsonl (solo se LOG_LEVEL=DEBUG).
     """
     Config.LOG_DIR.mkdir(exist_ok=True)
 
@@ -284,7 +297,7 @@ def setup_logging() -> logging.Logger:
         ("app.jsonl", logging.INFO, 14, None),
         ("error.jsonl", logging.ERROR, 30, None),
         ("security.jsonl", logging.WARNING, 180, {"security"}),
-        ("access.jsonl", logging.INFO, 30, {"access"}),
+        ("usage.jsonl", logging.INFO, 30, {"usage"}),
     ]
     if Config.LOG_LEVEL <= logging.DEBUG:
         handlers_spec.append(("debug.jsonl", logging.DEBUG, 3, None))

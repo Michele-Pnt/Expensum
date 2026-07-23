@@ -23,10 +23,42 @@ const HOW_ICONS = [
   <BellRing key="bell" size={18} strokeWidth={1.5} />,
 ];
 
+const TALLY_BASE_SRC = "https://tally.so/embed/44pAAr?alignLeft=1&hideTitle=1&transparentBackground=1&dynamicHeight=1";
+
 export default function LandingPage() {
   const t = useTranslations("Landing");
   const [scrolled, setScrolled] = useState(false);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+  const [expensesTracked, setExpensesTracked] = useState<number | null>(null);
+  const [tallySrc, setTallySrc] = useState(TALLY_BASE_SRC);
+
+  useEffect(() => {
+    let cancelled = false;
+    fetch("/api/public/stats")
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data) => {
+        if (!cancelled && data && typeof data.total_expenses_tracked === "number") {
+          setExpensesTracked(data.total_expenses_tracked);
+        }
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // Passthrough del codice referral (?ref=CODICE) verso il form Tally: nessun
+  // errore visibile se assente o invalido, il form funziona comunque.
+  useEffect(() => {
+    const ref = new URLSearchParams(window.location.search).get("ref");
+    if (ref) {
+      setTallySrc(`${TALLY_BASE_SRC}&ref=${encodeURIComponent(ref)}`);
+    }
+  }, []);
+
+  const scrollToWaitlist = () => {
+    document.getElementById("hero-waitlist-form")?.scrollIntoView({ behavior: "smooth", block: "center" });
+  };
 
   useEffect(() => {
     const onScroll = () => setScrolled(window.scrollY > 20);
@@ -72,8 +104,8 @@ export default function LandingPage() {
       <nav className={`${styles.nav} ${scrolled ? styles.navScrolled : ""}`}>
         <div className={styles.navInner}>
           <div className={styles.navLogo}>
-            <img src="/logo-expensum-icon.png" alt="Expensum" className={styles.navLogoIcon} />
-            <img src="/scritta_expensum.png" alt="Expensum" className={styles.navLogoText} />
+            <Image src="/logo-expensum-icon.png" alt="Expensum" className={styles.navLogoIcon} width={34} height={34} />
+            <Image src="/scritta_expensum.png" alt="Expensum" className={styles.navLogoText} width={116} height={20} />
           </div>
           <div className={styles.navLinks}>
             <button className={styles.navLink} onClick={() => scrollToSection("come-funziona")}>
@@ -84,13 +116,13 @@ export default function LandingPage() {
             </button>
           </div>
           <div className={styles.navActions}>
-            {/* /login e /register sono route Flask (proxate via next.config.ts rewrites),
-                non pagine Next.js localizzate: <a> semplice, niente Link con prefisso locale. */}
-            <a href="/login" className={styles.btnGhost}>
+            {/* /login è una route Flask (proxata via next.config.ts rewrites),
+                non una pagina Next.js localizzata: <a> semplice, niente Link con prefisso locale.
+                "Registrati" è nascosto finché il prodotto è in beta privata a lista d'attesa:
+                l'unico ingresso pubblico è il form waitlist nell'hero, per non contraddire
+                il posizionamento "accesso esclusivo". */}
+            <a href="/login" className={styles.btnPrimary}>
               {t("nav.accedi")}
-            </a>
-            <a href="/register" className={styles.btnPrimary}>
-              {t("nav.registrati")}
             </a>
             <LanguageSwitcher />
             {/* Hamburger — solo mobile */}
@@ -136,10 +168,16 @@ export default function LandingPage() {
                 {t("hero.subLine1")}<br />
                 {t("hero.subLine2")}
               </p>
+              {expensesTracked !== null && expensesTracked > 0 && (
+                <div className={styles.heroStatBadge}>
+                  <TrendingUp size={16} strokeWidth={2} />
+                  <span>{t("hero.socialProof", { count: expensesTracked })}</span>
+                </div>
+              )}
               <div className={styles.heroActions}>
-                <div style={{ width: "100%", maxWidth: "450px", marginTop: "0.5rem" }}>
+                <div id="hero-waitlist-form" style={{ width: "100%", maxWidth: "450px", marginTop: "0.5rem" }}>
                   <iframe
-                    data-tally-src="https://tally.so/embed/44pAAr?alignLeft=1&hideTitle=1&transparentBackground=1&dynamicHeight=1"
+                    data-tally-src={tallySrc}
                     width="100%"
                     height="200"
                     title="Expensum Early Access"
@@ -352,8 +390,8 @@ export default function LandingPage() {
               <div className={styles.pricingCard} data-reveal>
                 <p className={styles.pricingLabel}>{t("pricing.premium.label")}</p>
                 <div className={styles.pricingPrice}>
-                  <span className={`${styles.pricingAmount} ${styles.pricingAmountBlurred}`} aria-hidden="true">€4.99</span>
-                  <span className={`${styles.pricingPeriod} ${styles.pricingAmountBlurred}`} aria-hidden="true">{t("pricing.perMonth")}</span>
+                  <span className={`${styles.pricingAmount} ${styles.pricingAmountBlurred}`}>€4.99</span>
+                  <span className={`${styles.pricingPeriod} ${styles.pricingAmountBlurred}`}>{t("pricing.perMonth")}</span>
                   <span className={styles.pricingComingSoon}>{t("pricing.premium.comingSoon")}</span>
                 </div>
                 <ul className={styles.featureList}>
@@ -377,10 +415,7 @@ export default function LandingPage() {
                   <span className={styles.pricingAmount}>€89</span>
                   <span className={styles.pricingPeriod}>{t("pricing.oneTime")}</span>
                 </div>
-                <button
-                  onClick={() => window.scrollTo({ top: 0, behavior: 'smooth' })}
-                  className={styles.btnPrimary}
-                >
+                <button onClick={scrollToWaitlist} className={styles.btnPrimary}>
                   {t("pricing.lifetime.cta")}
                 </button>
                 <ul className={styles.featureList}>
@@ -403,9 +438,9 @@ export default function LandingPage() {
 
             <div className={styles.pricingCta} data-reveal>
               <p>{t("pricing.ctaQuestion")}</p>
-              <a href="mailto:expensum.finance@gmail.com" className={styles.ctaLink}>
+              <Link href="/contatti" className={styles.ctaLink}>
                 {t("pricing.ctaContact")}
-              </a>
+              </Link>
             </div>
           </div>
         </section>
@@ -416,8 +451,8 @@ export default function LandingPage() {
         {/* Top bar: logo + social */}
         <div className={styles.footerTopBar}>
           <div className={styles.footerLogoCombo}>
-            <img src="/logo-expensum-icon.png" alt="" className={styles.footerLogoIcon} />
-            <img src="/scritta_expensum.png" alt="Expensum" className={styles.footerLogoText} />
+            <Image src="/logo-expensum-icon.png" alt="" className={styles.footerLogoIcon} width={28} height={28} />
+            <Image src="/scritta_expensum.png" alt="Expensum" className={styles.footerLogoText} width={93} height={16} />
           </div>
           <div className={styles.footerSocials}>
             <a href="https://instagram.com/expensum.finance" target="_blank" rel="noopener noreferrer" className={styles.footerSocialIcon} aria-label="Instagram">

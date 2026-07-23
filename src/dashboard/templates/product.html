@@ -1,0 +1,180 @@
+{% extends "base.html" %}
+{% import "_macros.html" as ui %}
+{% block content %}
+<h1 class="page-title">Metriche di Prodotto {{ ui.info("Pagina dedicata alla salute del prodotto: quanto gli utenti restano (retention), quanto ci mettono ad attivarsi (timing spese), dove si bloccano nell'onboarding e quanto usano l'app (engagement). Serve a capire se Expensum crea davvero abitudine.") }}</h1>
+<p class="page-desc">Retention, tempi di attivazione, funnel di onboarding ed engagement.</p>
+
+<!-- RETENTION -->
+<h3 style="margin-top: 1rem; margin-bottom: 1rem; color: var(--text-main);">Retention {{ ui.info("Misura quanti utenti continuano a usare Expensum nel tempo. Attività = evento LLM o messaggio in chat. Distinguiamo la stickiness attuale (attivi ora) dalla retention per coorte (trattenuti dopo N giorni dalla registrazione).") }}</h3>
+<div class="stats-grid">
+    {% for n in [7, 14, 60] %}
+    <div class="stat-card glass-panel" style="border-left: 4px solid var(--accent-info)">
+        <div class="stat-label">Attivi negli ultimi {{ n }}gg {{ ui.info("% di utenti con almeno un'attività (evento LLM o messaggio) negli ultimi " ~ n ~ " giorni, sul totale utenti. Stickiness: 'usano ancora l'app adesso'.") }}</div>
+        <div class="stat-value" style="color: var(--accent-info)">{{ retention.rolling_active[n].pct }}%</div>
+        <span class="stat-label" style="text-transform:none; margin-top:5px">
+            {{ retention.rolling_active[n].count }} / {{ retention.total_users }} utenti
+        </span>
+    </div>
+    {% endfor %}
+    <div class="stat-card glass-panel" style="border-left: 4px solid var(--accent-primary)">
+        <div class="stat-label">Utenti totali {{ ui.info("Numero totale di utenti registrati (tabella users). È il denominatore delle percentuali di retention rolling.") }}</div>
+        <div class="stat-value">{{ retention.total_users }}</div>
+    </div>
+</div>
+<div class="glass-panel data-table-wrapper" style="margin-top: 1rem;">
+    <table class="glass-table">
+        <thead><tr><th>Cohort retention {{ ui.info("Retention per coorte: per ogni riga (giorno 7/14/60), tra gli utenti il cui account ha almeno quel numero di giorni di vita (idonei), quanti sono rimasti attivi fino ad almeno quel numero di giorni dopo la registrazione. È la retention 'vera' che dice se l'app trattiene nel tempo, non solo se ha molti iscritti recenti.") }}</th><th>Idonei {{ ui.info("Utenti il cui account ha almeno l'anzianità indicata dalla riga (es. per 'Giorno 14', account registrati da almeno 14 giorni). Sono l'unica base su cui ha senso misurare quella riga: un account più giovane non ha ancora avuto il tempo di rientrare nella statistica.") }}</th><th>Rimasti attivi</th><th>%</th></tr></thead>
+        <tbody>
+            {% for n in [7, 14, 60] %}
+            <tr>
+                <td>Giorno {{ n }}</td>
+                <td>{{ retention.cohort_retention[n].eligible }}</td>
+                <td>{{ retention.cohort_retention[n].retained }}</td>
+                <td><strong>{{ retention.cohort_retention[n].pct }}%</strong></td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+
+<!-- TIMING SPESE -->
+<h3 style="margin-top: 2rem; margin-bottom: 1rem; color: var(--text-main);">Tempi di registrazione spese {{ ui.info("Misura la velocità di attivazione e la frequenza d'uso. Le transazioni confermate sono contate in modo cross-backend da chat_messages (una riga per spesa/entrata/trasferimento salvato dopo il click Conferma), quindi valgono sia per gli utenti Notion sia per quelli PostgreSQL.") }}</h3>
+<div class="stats-grid">
+    <div class="stat-card glass-panel" style="border-left: 4px solid var(--success)">
+        <div class="stat-label">Tempo alla prima spesa (mediana) {{ ui.info("Mediana del tempo tra la registrazione dell'utente e la sua prima spesa confermata. È il tempo di attivazione: più è breve, più l'onboarding porta l'utente a usare davvero il prodotto. Usa il toggle gg/h per cambiare unità.") }}</div>
+        <div class="stat-value time-value" data-days="{{ timing.time_to_first_expense.median_days }}" data-hours="{{ timing.time_to_first_expense.median_hours }}" style="color: var(--success)">
+            <span class="time-value-num">{{ timing.time_to_first_expense.median_days }}</span><span class="time-value-unit" style="font-size:1rem"> gg</span>
+            <span class="unit-toggle"><button type="button" class="active" data-unit="days">gg</button><button type="button" data-unit="hours">h</button></span>
+        </div>
+        <span class="stat-label time-sub" data-avg-days="{{ timing.time_to_first_expense.avg_days }}" data-avg-hours="{{ timing.time_to_first_expense.avg_hours }}" data-suffix="{{ timing.time_to_first_expense.count }} utenti" style="text-transform:none; margin-top:5px">media {{ timing.time_to_first_expense.avg_days }} gg · {{ timing.time_to_first_expense.count }} utenti</span>
+    </div>
+    <div class="stat-card glass-panel" style="border-left: 4px solid var(--accent-info)">
+        <div class="stat-label">Intervallo tra spese (mediana) {{ ui.info("Mediana del tempo tra due spese confermate consecutive dello stesso utente. Misura la frequenza d'uso: intervalli brevi indicano un'abitudine consolidata di tracciare le spese. Usa il toggle gg/h per cambiare unità.") }}</div>
+        <div class="stat-value time-value" data-days="{{ timing.interval_between_expenses.median_days }}" data-hours="{{ timing.interval_between_expenses.median_hours }}" style="color: var(--accent-info)">
+            <span class="time-value-num">{{ timing.interval_between_expenses.median_hours }}</span><span class="time-value-unit" style="font-size:1rem"> h</span>
+            <span class="unit-toggle"><button type="button" data-unit="days">gg</button><button type="button" class="active" data-unit="hours">h</button></span>
+        </div>
+        <span class="stat-label time-sub" data-avg-days="{{ timing.interval_between_expenses.avg_days }}" data-avg-hours="{{ timing.interval_between_expenses.avg_hours }}" data-suffix="{{ timing.interval_between_expenses.count }} intervalli" style="text-transform:none; margin-top:5px">media {{ timing.interval_between_expenses.avg_hours }} h · {{ timing.interval_between_expenses.count }} intervalli</span>
+    </div>
+    <div class="stat-card glass-panel">
+        <div class="stat-label">Utenti con almeno 1 spesa {{ ui.info("Numero di utenti che hanno registrato almeno una transazione confermata. Sotto: quanti non ne hanno mai registrata nessuna — utenti registrati ma mai attivati, il primo punto di abbandono da recuperare.") }}</div>
+        <div class="stat-value">{{ timing.users_with_tx }}</div>
+        <span class="stat-label" style="text-transform:none; margin-top:5px">{{ timing.users_without_tx }} senza nessuna spesa</span>
+    </div>
+</div>
+
+<!-- ONBOARDING -->
+<h3 style="margin-top: 2rem; margin-bottom: 1rem; color: var(--text-main);">Funnel onboarding {{ ui.info("Stato del wizard preferenze iniziale (lingua, stile di vita, notifiche...) basato su users.onboarding_step e onboarding_completed_at. Mostra quanti completano, quanti saltano e dove si bloccano.") }}</h3>
+<div class="stats-grid">
+    <div class="stat-card glass-panel" style="border-left: 4px solid var(--success)">
+        <div class="stat-label">Wizard completato {{ ui.info("% di utenti con onboarding_completed_at valorizzato: hanno terminato il wizard preferenze. Un valore alto indica un onboarding chiaro e non frustrante.") }}</div>
+        <div class="stat-value" style="color: var(--success)">{{ onboarding.completed_pct }}%</div>
+        <span class="stat-label" style="text-transform:none; margin-top:5px">{{ onboarding.completed }} / {{ onboarding.total }}</span>
+    </div>
+    <div class="stat-card glass-panel" style="border-left: 4px solid var(--warning)">
+        <div class="stat-label">Wizard saltato (mai iniziato) {{ ui.info("% di utenti con onboarding_step ancora 'pending': non hanno mai avviato il wizard preferenze. Se alto, il prompt di onboarding non è abbastanza invitante o è saltabile troppo facilmente.") }}</div>
+        <div class="stat-value" style="color: var(--warning)">{{ onboarding.skipped_pct }}%</div>
+        <span class="stat-label" style="text-transform:none; margin-top:5px">{{ onboarding.skipped_pending }} utenti</span>
+    </div>
+    <div class="stat-card glass-panel">
+        <div class="stat-label">In corso (fermi a metà) {{ ui.info("Utenti che hanno iniziato il wizard ma non l'hanno completato (onboarding_step nominato ma senza onboarding_completed_at). Sono fermi a uno step intermedio: la tabella sotto dice quale.") }}</div>
+        <div class="stat-value">{{ onboarding.in_progress }}</div>
+    </div>
+</div>
+<div class="glass-panel data-table-wrapper" style="margin-top: 1rem;">
+    <table class="glass-table">
+        <thead><tr><th>Step wizard preferenze {{ ui.info("Distribuzione degli utenti per lo step del wizard in cui si trovano (valore di onboarding_step). Individua lo step che perde più persone, dove intervenire.") }}</th><th>Utenti</th></tr></thead>
+        <tbody>
+            {% for step, cnt in onboarding.by_step.items() %}
+            <tr><td><code>{{ step }}</code></td><td>{{ cnt }}</td></tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+
+<!-- TOUR GUIDATO WEBAPP -->
+<h3 style="margin-top: 2rem; margin-bottom: 1rem; color: var(--text-main);">Tour guidato webapp {{ ui.info("Il tour è la sequenza di 10 step demo che mostra le funzioni della webapp a un nuovo utente. Diverso dal wizard preferenze qui sopra: quello raccoglie dati, questo insegna a usare il prodotto. Fonte: users.tour_status/tour_step, popolati da /api/track quando l'utente è autenticato.") }}</h3>
+<div class="stats-grid">
+    <div class="stat-card glass-panel" style="border-left: 4px solid var(--success)">
+        <div class="stat-label">Tour completato {{ ui.info("% di utenti che hanno avviato il tour e sono arrivati fino all'ultimo step (tour_status='completed') sul totale di chi l'ha avviato.") }}</div>
+        <div class="stat-value" style="color: var(--success)">{{ tour.completed_pct }}%</div>
+        <span class="stat-label" style="text-transform:none; margin-top:5px">{{ tour.completed }} / {{ tour.total_started }} avviati</span>
+    </div>
+    <div class="stat-card glass-panel" style="border-left: 4px solid var(--warning)">
+        <div class="stat-label">Tour saltato {{ ui.info("% di utenti che hanno cliccato 'salta' durante il tour (tour_status='skipped'), sul totale di chi l'ha avviato. La tabella sotto mostra a quale step lo hanno interrotto.") }}</div>
+        <div class="stat-value" style="color: var(--warning)">{{ tour.skipped_pct }}%</div>
+        <span class="stat-label" style="text-transform:none; margin-top:5px">{{ tour.skipped }} utenti</span>
+    </div>
+    <div class="stat-card glass-panel">
+        <div class="stat-label">In corso {{ ui.info("Utenti che hanno avviato il tour ma non risultano né completato né saltato: probabilmente hanno chiuso il browser a metà. La tabella sotto mostra dove si sono fermati.") }}</div>
+        <div class="stat-value">{{ tour.in_progress }}</div>
+    </div>
+</div>
+<div class="glass-panel data-table-wrapper" style="margin-top: 1rem;">
+    <table class="glass-table">
+        <thead><tr><th>Step di abbandono {{ ui.info("Ultimo step visto dagli utenti che hanno saltato il tour o sono rimasti a metà (non chi lo ha completato). Individua lo step del tour che perde più persone.") }}</th><th>Utenti</th></tr></thead>
+        <tbody>
+            {% for step, cnt in tour.abandon_by_step.items() %}
+            <tr><td><code>{{ step }}</code></td><td>{{ cnt }}</td></tr>
+            {% else %}
+            <tr><td colspan="2" style="text-align:center; color: var(--text-secondary);">Nessun dato ancora (tracking appena introdotto).</td></tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+
+<!-- ENGAGEMENT -->
+<h3 style="margin-top: 2rem; margin-bottom: 1rem; color: var(--text-main);">Engagement & acquisizione {{ ui.info("Quanto l'app viene usata (utenti attivi) e come cresce la base utenti (nuove registrazioni, waitlist, backend scelto). Fonte: llm_usage_events, users e tally_leads.") }}</h3>
+<div class="stats-grid">
+    <div class="stat-card glass-panel" style="border-left: 4px solid var(--accent-primary)">
+        <div class="stat-label">DAU / WAU / MAU {{ ui.info("Utenti distinti con almeno un'attività LLM negli ultimi 1 / 7 / 30 giorni (Daily/Weekly/Monthly Active Users). Metriche standard di uso attivo: il rapporto DAU/MAU indica quanto l'uso è quotidiano.") }}</div>
+        <div class="stat-value">{{ engagement.dau }} · {{ engagement.wau }} · {{ engagement.mau }}</div>
+        <span class="stat-label" style="text-transform:none; margin-top:5px">attivi 1g / 7g / 30g</span>
+    </div>
+    <div class="stat-card glass-panel" style="border-left: 4px solid var(--success)">
+        <div class="stat-label">Nuove registrazioni (30gg) {{ ui.info("Numero di nuovi utenti registrati negli ultimi 30 giorni (users.created_at). È il ritmo di acquisizione: da leggere insieme alla retention per capire se la crescita è sana.") }}</div>
+        <div class="stat-value" style="color: var(--success)">{{ engagement.signups_total_period }}</div>
+    </div>
+    <div class="stat-card glass-panel" style="border-left: 4px solid var(--accent-info)">
+        <div class="stat-label">Waitlist → beta {{ ui.info("% di lead della waitlist (form Tally, tabella tally_leads) a cui è stato concesso l'accesso beta. Conversione del funnel di attesa in utenti reali.") }}</div>
+        <div class="stat-value" style="color: var(--accent-info)">{{ engagement.waitlist.conversion_pct }}%</div>
+        <span class="stat-label" style="text-transform:none; margin-top:5px">{{ engagement.waitlist.beta_granted }} / {{ engagement.waitlist.total }} lead</span>
+    </div>
+    <div class="stat-card glass-panel">
+        <div class="stat-label">Storage backend {{ ui.info("Ripartizione degli utenti tra backend Notion e PostgreSQL (users.storage_backend). Rilevante per seguire la migrazione storage verso PostgreSQL.") }}</div>
+        <div class="stat-value" style="font-size: 1.4rem;">
+            {% for backend, cnt in engagement.storage_backend.items() %}{{ backend }}: {{ cnt }}{% if not loop.last %} · {% endif %}{% endfor %}
+        </div>
+    </div>
+</div>
+
+<!-- SUCCESSI PARSING PER TIPO x MODALITÀ -->
+<h3 style="margin-top: 2rem; margin-bottom: 1rem; color: var(--text-main);">Successi parsing per tipo x modalità (ultimi {{ tx_success.days }}gg) {{ ui.info("Per ogni combinazione di tipo transazione (spesa/entrata/trasferimento) e modalità di input (testo/voce/foto/bottone): quante conferme, annullamenti e fallimenti. Successo = l'utente ha cliccato Conferma e la transazione è stata salvata. Fonte: tx_events, rispecchiata da bot.py/webapp accanto a PostHog. Individua dove il parsing AI è meno affidabile (es. foto vs testo).") }}</h3>
+<div class="stats-grid">
+    <div class="stat-card glass-panel" style="border-left: 4px solid var(--success)">
+        <div class="stat-label">Success rate complessivo {{ ui.info("% di tentativi conclusi con conferma sul totale (confermati + annullati + falliti) negli ultimi " ~ tx_success.days ~ " giorni.") }}</div>
+        <div class="stat-value" style="color: var(--success)">{{ tx_success.overall_success_rate_pct }}%</div>
+        <span class="stat-label" style="text-transform:none; margin-top:5px">{{ tx_success.overall_total }} tentativi totali</span>
+    </div>
+</div>
+<div class="glass-panel data-table-wrapper" style="margin-top: 1rem;">
+    <table class="glass-table">
+        <thead><tr><th>Tipo</th><th>Modalità</th><th>Confermate</th><th>Annullate</th><th>Fallite</th><th>Totale</th><th>Success rate</th></tr></thead>
+        <tbody>
+            {% for r in tx_success.rows %}
+            <tr>
+                <td><code>{{ r.tx_type }}</code></td>
+                <td><code>{{ r.input_method }}</code></td>
+                <td>{{ r.confirmed }}</td>
+                <td>{{ r.cancelled }}</td>
+                <td>{{ r.failed }}</td>
+                <td>{{ r.total }}</td>
+                <td><strong style="color: {% if r.success_rate_pct >= 80 %}var(--success){% elif r.success_rate_pct >= 50 %}var(--warning){% else %}var(--danger){% endif %}">{{ r.success_rate_pct }}%</strong></td>
+            </tr>
+            {% else %}
+            <tr><td colspan="7" style="text-align:center; color: var(--text-secondary);">Nessun dato ancora (tabella tx_events appena introdotta).</td></tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+{% endblock %}

@@ -3,7 +3,7 @@ from datetime import date, datetime, timedelta
 from src.user_store import (
     User, DailyMetrics, Feedback, OAuthSession, PlanChange, UserPlan, ChatMessage,
     LlmUsageEvent, LlmTokenReservation, DatabaseSchema, AuditLog, DataBreach,
-    TrialLifecycleEvent,
+    TrialLifecycleEvent, TallyLead, ReferralReward,
 )
 from src.storage.models import (
     Expense, Income, Account, UserCategory, UserCategoryNotionLink,
@@ -47,6 +47,41 @@ def test_increment_usage(mock_db_session):
     store.increment_usage(chat_id, "text")
     from sqlalchemy import inspect
     assert not inspect(store.engine).has_table("daily_usage")
+
+def test_new_user_has_zero_token_version(mock_db_session):
+    store = mock_db_session
+    store.add_user(chat_id="tv_user")
+    assert store.get_token_version("tv_user") == 0
+
+
+def test_get_token_version_missing_user_returns_none(mock_db_session):
+    store = mock_db_session
+    assert store.get_token_version("does_not_exist") is None
+
+
+def test_bump_token_version_increments_and_returns_new_value(mock_db_session):
+    store = mock_db_session
+    store.add_user(chat_id="tv_bump")
+    assert store.bump_token_version("tv_bump") == 1
+    assert store.bump_token_version("tv_bump") == 2
+    assert store.get_token_version("tv_bump") == 2
+
+
+def test_bump_token_version_missing_user_returns_none(mock_db_session):
+    store = mock_db_session
+    assert store.bump_token_version("nope") is None
+
+
+def test_update_password_bumps_token_version(mock_db_session):
+    """Cambiare password deve invalidare tutte le sessioni (bump della versione)."""
+    store = mock_db_session
+    store.add_user(chat_id="tv_pwd")
+    store.set_credentials("tv_pwd", "tv-pwd@example.com", "OldPassword1")
+    assert store.get_token_version("tv_pwd") == 0
+
+    assert store.update_password("tv_pwd", "NewPassword1") is True
+    assert store.get_token_version("tv_pwd") == 1
+
 
 def test_save_feedback(mock_db_session):
     store = mock_db_session
@@ -723,3 +758,207 @@ def test_lifecycle_sent_steps_and_record_dedup(mock_db_session):
             chat_id="lc1", step="d7", channel="telegram"
         ).count()
         assert count == 1
+
+
+# --- Referral ---
+
+def test_extend_trial_days_from_free_plan(mock_db_session):
+    store = mock_db_session
+    store.add_user(chat_id="ref_free")
+
+    store.extend_trial_days("ref_free", days=60)
+
+    plan = store.get_user_plan("ref_free")
+    assert plan["plan_type"] == "pro"
+    assert plan["is_trial"] is True
+    assert (plan["trial_ends_at"] - datetime.utcnow()).days in (59, 60)
+
+    with store.Session() as s:
+        change = s.query(PlanChange).filter_by(chat_id="ref_free", change_type="referral_reward").first()
+        assert change is not None
+
+
+def test_extend_trial_days_is_additive_on_active_trial(mock_db_session):
+    store = mock_db_session
+    store.add_user(chat_id="ref_trial")
+    store.start_trial("ref_trial", days=30)
+
+    plan_before = store.get_user_plan("ref_trial")
+    store.extend_trial_days("ref_trial", days=60)
+    plan_after = store.get_user_plan("ref_trial")
+
+    assert plan_after["trial_ends_at"] > plan_before["trial_ends_at"]
+    delta = (plan_after["trial_ends_at"] - plan_before["trial_ends_at"]).days
+    assert delta in (59, 60)
+
+
+def test_extend_trial_days_on_permanent_beta_pro(mock_db_session):
+    """Applicato anche a un Pro permanente beta_default: scelta esplicita del reward
+    referral, lo trasforma in Pro con scadenza (vedi extend_trial_days docstring).
+    """
+    store = mock_db_session
+    store.add_user(chat_id="ref_beta")
+    store.set_user_plan("ref_beta", "pro", payment_reference="beta_default")
+
+    plan_before = store.get_user_plan("ref_beta")
+    assert plan_before["is_trial"] is False
+    assert plan_before["trial_ends_at"] is None
+
+    store.extend_trial_days("ref_beta", days=60)
+
+    plan_after = store.get_user_plan("ref_beta")
+    assert plan_after["is_trial"] is True
+    assert plan_after["trial_ends_at"] is not None
+
+
+def _make_lead(store, submission_id, email, referral_code=None, referred_by_code=None):
+    lead, _ = store.save_tally_lead(
+        tally_submission_id=submission_id,
+        email=email,
+        raw_payload="{}",
+        referral_code=referral_code,
+        referred_by_code=referred_by_code,
+    )
+    return lead
+
+
+def test_create_referral_rewards_first_referral(mock_db_session):
+    store = mock_db_session
+    referrer = _make_lead(store, "sub_referrer", "referrer@example.com", referral_code="REFCODE1")
+    referred = _make_lead(store, "sub_referred1", "friend1@example.com", referred_by_code="REFCODE1")
+
+    result = store.create_referral_rewards(referred, referrer)
+
+    assert result["referrer_first_reward"] is True
+    assert result["lifetime_founder_unlocked"] is False
+
+    with store.Session() as s:
+        rewards = s.query(ReferralReward).all()
+        roles = sorted((r.role, r.beneficiary_email) for r in rewards)
+        assert roles == [
+            ("referred", "friend1@example.com"),
+            ("referrer", "referrer@example.com"),
+        ]
+        assert all(r.days_granted == 60 and r.status == "pending" for r in rewards)
+
+
+def test_create_referral_rewards_caps_referrer_at_one_reward(mock_db_session):
+    """Il tetto è fisso a 60gg totali: il referrer non riceve un secondo reward
+    anche se porta più persone (spec: 1, 2 o 3 inviti danno sempre 60gg, mai di più)."""
+    store = mock_db_session
+    referrer = _make_lead(store, "sub_referrer2", "referrer2@example.com", referral_code="REFCODE2")
+    referred1 = _make_lead(store, "sub_r2_1", "friend_a@example.com", referred_by_code="REFCODE2")
+    referred2 = _make_lead(store, "sub_r2_2", "friend_b@example.com", referred_by_code="REFCODE2")
+
+    result1 = store.create_referral_rewards(referred1, referrer)
+    result2 = store.create_referral_rewards(referred2, referrer)
+
+    assert result1["referrer_first_reward"] is True
+    assert result2["referrer_first_reward"] is False
+
+    with store.Session() as s:
+        referrer_rewards = s.query(ReferralReward).filter_by(
+            role="referrer", beneficiary_email="referrer2@example.com"
+        ).count()
+        assert referrer_rewards == 1
+        referred_rewards = s.query(ReferralReward).filter_by(role="referred").count()
+        assert referred_rewards == 2
+
+
+def test_create_referral_rewards_unlocks_lifetime_founder_on_third(mock_db_session):
+    store = mock_db_session
+    referrer = _make_lead(store, "sub_referrer3", "referrer3@example.com", referral_code="REFCODE3")
+
+    for i in range(1, 4):
+        referred = _make_lead(store, f"sub_r3_{i}", f"friend{i}@example.com", referred_by_code="REFCODE3")
+        result = store.create_referral_rewards(referred, referrer)
+
+    assert result["lifetime_founder_unlocked"] is True
+
+    with store.Session() as s:
+        lead = s.query(TallyLead).filter_by(referral_code="REFCODE3").first()
+        assert lead.lifetime_founder_guaranteed is True
+        assert lead.lifetime_founder_guaranteed_at is not None
+
+    # Un 4° referral non ri-attiva né duplica lo sblocco: il link smette di
+    # generare reward dopo il 3°, sia per il referrer sia per il nuovo invitato.
+    referred4 = _make_lead(store, "sub_r3_4", "friend4@example.com", referred_by_code="REFCODE3")
+    result4 = store.create_referral_rewards(referred4, referrer)
+    assert result4["lifetime_founder_unlocked"] is False
+    assert result4["reward_cap_reached"] is True
+
+    with store.Session() as s:
+        reward_for_friend4 = s.query(ReferralReward).filter_by(beneficiary_email="friend4@example.com").first()
+        assert reward_for_friend4 is None
+
+
+def test_apply_pending_referral_rewards(mock_db_session):
+    store = mock_db_session
+    store.add_user(chat_id="applied1")
+    store.set_credentials("applied1", "reward@example.com", "password123")
+
+    referrer = _make_lead(store, "sub_apply_referrer", "referrer_apply@example.com", referral_code="REFAPPLY")
+    referred = _make_lead(store, "sub_apply_referred", "reward@example.com", referred_by_code="REFAPPLY")
+    store.create_referral_rewards(referred, referrer)
+
+    applied = store.apply_pending_referral_rewards("reward@example.com")
+    assert len(applied) == 1
+    assert applied[0].role == "referred"
+    assert applied[0].status == "applied"
+    assert applied[0].beneficiary_chat_id == "applied1"
+
+    plan = store.get_user_plan("applied1")
+    assert plan["plan_type"] == "pro"
+    assert plan["is_trial"] is True
+
+    # Idempotente: una seconda chiamata non trova più nulla di pending.
+    applied_again = store.apply_pending_referral_rewards("reward@example.com")
+    assert applied_again == []
+
+
+def test_apply_pending_referral_rewards_no_account_stays_pending(mock_db_session):
+    store = mock_db_session
+    referrer = _make_lead(store, "sub_np_referrer", "np_referrer@example.com", referral_code="REFNOACC")
+    referred = _make_lead(store, "sub_np_referred", "np_friend@example.com", referred_by_code="REFNOACC")
+    store.create_referral_rewards(referred, referrer)
+
+    applied = store.apply_pending_referral_rewards("np_friend@example.com")
+    assert applied == []
+
+    with store.Session() as s:
+        reward = s.query(ReferralReward).filter_by(beneficiary_email="np_friend@example.com").first()
+        assert reward.status == "pending"
+
+
+def test_get_or_create_referral_code_reuses_existing_lead(mock_db_session):
+    store = mock_db_session
+    _make_lead(store, "sub_code1", "coded@example.com", referral_code="EXISTINGCODE")
+
+    code = store.get_or_create_referral_code("coded@example.com")
+    assert code == "EXISTINGCODE"
+
+
+def test_get_or_create_referral_code_synthesizes_lead_for_manual_account(mock_db_session):
+    store = mock_db_session
+    store.add_user(chat_id="manual1")
+    store.set_credentials("manual1", "manual@example.com", "password123")
+
+    code = store.get_or_create_referral_code("manual@example.com")
+    assert code
+
+    with store.Session() as s:
+        lead = s.query(TallyLead).filter_by(referral_code=code).first()
+        assert lead is not None
+        assert lead.email == "manual@example.com"
+
+
+def test_get_referral_status(mock_db_session):
+    store = mock_db_session
+    referrer = _make_lead(store, "sub_status_referrer", "status_referrer@example.com", referral_code="REFSTATUS")
+    _make_lead(store, "sub_status_1", "status1@example.com", referred_by_code="REFSTATUS")
+    _make_lead(store, "sub_status_2", "status2@example.com", referred_by_code="REFSTATUS")
+
+    status = store.get_referral_status("status_referrer@example.com")
+    assert status["referral_code"] == "REFSTATUS"
+    assert status["referred_count"] == 2
+    assert status["lifetime_founder_guaranteed"] is False

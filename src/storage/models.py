@@ -77,13 +77,23 @@ class Account(Base):
     )
 
 
-class SystemCategory(Base):
-    """Categorie predefinite condivise fra tutti gli utenti. Immutabile a runtime."""
+class Transfer(Base):
+    """Tabella dei trasferimenti tra conti per utenti con backend PostgreSQL/SQLite."""
 
-    __tablename__ = "system_categories"
+    __tablename__ = "transfers"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
-    name = Column(String, nullable=False, unique=True)
+    user_id = Column(String, ForeignKey("users.chat_id"), nullable=False)
+    from_account_id = Column(Integer, ForeignKey("accounts.id"), nullable=False)
+    to_account_id = Column(Integer, ForeignKey("accounts.id"), nullable=False)
+    amount = Column(Numeric(12, 2), nullable=False)
+    transfer_date = Column(Date, nullable=False)
+    name = Column(String, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    __table_args__ = (
+        Index("ix_transfers_user_id", "user_id"),
+    )
 
 
 class UserCategory(Base):

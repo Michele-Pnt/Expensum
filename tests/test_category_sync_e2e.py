@@ -1,13 +1,12 @@
 """
-tests/test_category_sync_e2e.py — Test end-to-end per il sistema user_categories / system_categories.
+tests/test_category_sync_e2e.py — Test end-to-end per il sistema user_categories.
 
 Copre:
-  1. system_categories — tabella seeded con le 32 categorie di default
-  2. Postgres path — compute_category_averages: spese → medie → user_categories
-  3. Notion path   — sync_categories_to_local: mock API → user_categories
-  4. Router        — refresh_category_averages instrada correttamente per backend
-  5. Upsert idempotenza — upsert_user_categories aggiorna senza duplicati
-  6. Lookup helpers — get_notion_page_id_for_category, get_category_by_notion_page_id
+  1. Postgres path — compute_category_averages: spese → medie → user_categories
+  2. Notion path   — sync_categories_to_local: mock API → user_categories
+  3. Router        — refresh_category_averages instrada correttamente per backend
+  4. Upsert idempotenza — upsert_user_categories aggiorna senza duplicati
+  5. Lookup helpers — get_notion_page_id_for_category, get_category_by_notion_page_id
 
 Usa SQLite in-memory: nessuna dipendenza da DB reale o servizi esterni.
 """
@@ -20,36 +19,18 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from src.user_store import Base, User, UserStore
-from src.storage.models import Expense, SystemCategory, UserCategory, UserCategoryNotionLink
+from src.storage.models import Expense, UserCategory, UserCategoryNotionLink
 from src.category_sync import (
     compute_category_averages,
     sync_categories_to_local,
     refresh_category_averages,
 )
 
-SYSTEM_CATEGORIES_COUNT = 32  # categorie definite nella migration b2c3d4e5f6a7
-
 pytestmark = pytest.mark.integration
 
 # ---------------------------------------------------------------------------
 # Fixture condivise
 # ---------------------------------------------------------------------------
-
-def _seed_system_categories(eng):
-    names = [
-        "Alimentari", "Ristoranti", "Bar/Caffè", "Trasporti", "Benzina",
-        "Taxi", "Parcheggio", "Salute", "Farmacia", "Casa", "Bollette",
-        "Affitto", "Intrattenimento", "Cinema", "Gaming", "Streaming",
-        "Musica", "Sport", "Palestra", "Abbigliamento", "Cosmesi",
-        "Tecnologia", "Viaggi", "Regali", "Istruzione", "Libri",
-        "Animali", "Lavanderia", "Tabacchi", "Banca/Finanza",
-        "Assicurazione", "Altro",
-    ]
-    Session = sessionmaker(bind=eng)
-    with Session() as s:
-        s.add_all([SystemCategory(name=n) for n in names])
-        s.commit()
-
 
 @pytest.fixture(scope="module")
 def engine():
@@ -70,10 +51,9 @@ def store(engine):
 
 @pytest.fixture
 def db_session(engine):
-    """Schema azzerato, system categories e utenti di test reinseriti a ogni test."""
+    """Schema azzerato e utenti di test reinseriti a ogni test."""
     Base.metadata.drop_all(engine)
     Base.metadata.create_all(engine)
-    _seed_system_categories(engine)
 
     Session = sessionmaker(bind=engine)
     session = Session()
@@ -87,27 +67,45 @@ def db_session(engine):
 
 
 # ---------------------------------------------------------------------------
-# 1. system_categories — seed corretto
+# 1. Postgres path — compute_category_averages
 # ---------------------------------------------------------------------------
 
-class TestSystemCategoriesSeeded:
-    def test_count(self, db_session):
-        cats = db_session.query(SystemCategory).all()
-        assert len(cats) == SYSTEM_CATEGORIES_COUNT
+class _PostgresOnlySession:
+    """Wrappa una Session SQLite reale ma intercetta la query raw di
+    compute_category_averages (sintassi Postgres-only: TO_CHAR/DATE_TRUNC,
+    non eseguibile su SQLite) e la sostituisce con l'equivalente calcolato
+    via ORM, cosi' il test verifica la logica (raggruppamento/aggregazione)
+    senza richiedere un Postgres reale in CI/locale.
+    """
 
-    def test_contains_expected_names(self, db_session):
-        names = {c.name for c in db_session.query(SystemCategory).all()}
-        for expected in ("Alimentari", "Trasporti", "Salute", "Altro"):
-            assert expected in names, f"'{expected}' mancante da system_categories"
+    def __init__(self, session):
+        self._session = session
 
-    def test_names_are_unique(self, db_session):
-        names = [c.name for c in db_session.query(SystemCategory).all()]
-        assert len(names) == len(set(names)), "system_categories contiene duplicati"
+    def execute(self, stmt, params=None):
+        sql = str(stmt)
+        if "FROM expenses" in sql:
+            return self._fake_category_totals(params or {})
+        return self._session.execute(stmt, params or {})
 
+    def _fake_category_totals(self, params):
+        query = self._session.query(Expense).filter_by(user_id=params["uid"])
+        if "cat" in params:
+            query = query.filter_by(category_name=params["cat"])
 
-# ---------------------------------------------------------------------------
-# 2. Postgres path — compute_category_averages
-# ---------------------------------------------------------------------------
+        by_cat: dict[str, dict] = {}
+        for exp in query.all():
+            entry = by_cat.setdefault(exp.category_name, {"total": 0.0, "months": set()})
+            entry["total"] += float(exp.amount)
+            entry["months"].add((exp.expense_date.year, exp.expense_date.month))
+
+        rows = [(name, d["total"], len(d["months"])) for name, d in by_cat.items()]
+        result = Mock()
+        result.fetchall.return_value = rows
+        return result
+
+    def __getattr__(self, name):
+        return getattr(self._session, name)
+
 
 class TestComputeCategoryAverages:
     def _add_expenses(self, session, user_id, rows):
@@ -146,7 +144,7 @@ class TestComputeCategoryAverages:
             {"date": date(2026, 4, 12), "amount": 70.0, "category": "Alimentari"},
         ])
 
-        compute_category_averages("user_pg", db_session, store)
+        compute_category_averages("user_pg", _PostgresOnlySession(db_session), store)
 
         # 1 mese unico → media = totale / 1
         row = db_session.query(UserCategory).filter_by(user_id="user_pg", name="Alimentari").first()
@@ -161,7 +159,7 @@ class TestComputeCategoryAverages:
             {"date": date(2026, 3, 20), "amount": 90.0, "category": "Trasporti"},
         ])
 
-        compute_category_averages("user_pg", db_session, store)
+        compute_category_averages("user_pg", _PostgresOnlySession(db_session), store)
 
         row = db_session.query(UserCategory).filter_by(user_id="user_pg", name="Trasporti").first()
         assert row is not None
@@ -174,7 +172,7 @@ class TestComputeCategoryAverages:
             {"date": date(2026, 4, 1), "amount": 50.0,  "category": "Cinema"},
         ])
 
-        compute_category_averages("user_pg", db_session, store)
+        compute_category_averages("user_pg", _PostgresOnlySession(db_session), store)
 
         assert self._get_average(db_session, "user_pg", "Alimentari") == pytest.approx(200.0)
         assert self._get_average(db_session, "user_pg", "Cinema") == pytest.approx(50.0)
@@ -185,13 +183,15 @@ class TestComputeCategoryAverages:
             {"date": date(2026, 4, 1), "amount": 100.0, "category": "Salute"},
             {"date": date(2026, 4, 2), "amount": 80.0,  "category": "Farmacia"},
         ])
-        compute_category_averages("user_pg", db_session, store)
+        compute_category_averages("user_pg", _PostgresOnlySession(db_session), store)
 
         # Aggiunge nuova spesa solo su Salute
         self._add_expenses(db_session, "user_pg", [
             {"date": date(2026, 4, 10), "amount": 100.0, "category": "Salute"},
         ])
-        compute_category_averages("user_pg", db_session, store, category_filter="Salute")
+        compute_category_averages(
+            "user_pg", _PostgresOnlySession(db_session), store, category_filter="Salute"
+        )
 
         db_session.expire_all()
         assert self._get_average(db_session, "user_pg", "Salute") == pytest.approx(200.0)    # 100+100 / 1 mese
@@ -205,10 +205,30 @@ class TestComputeCategoryAverages:
         ))
         db_session.commit()
 
-        compute_category_averages("user_pg", db_session, store)
+        compute_category_averages("user_pg", _PostgresOnlySession(db_session), store)
 
         other_cats = db_session.query(UserCategory).filter_by(user_id="user_other").all()
         assert len(other_cats) == 0
+
+    def test_query_uses_postgres_month_syntax(self, db_session, store):
+        """La query non deve più contenere strftime (SQLite): solo TO_CHAR/DATE_TRUNC (Postgres)."""
+        self._seed_user_categories(db_session, "user_pg", ["Alimentari"])
+        self._add_expenses(db_session, "user_pg", [
+            {"date": date(2026, 4, 5), "amount": 30.0, "category": "Alimentari"},
+        ])
+
+        captured = {}
+        real_execute = _PostgresOnlySession.execute
+
+        def spy_execute(self, stmt, params=None):
+            captured["sql"] = str(stmt)
+            return real_execute(self, stmt, params)
+
+        with patch.object(_PostgresOnlySession, "execute", spy_execute):
+            compute_category_averages("user_pg", _PostgresOnlySession(db_session), store)
+
+        assert "strftime" not in captured["sql"]
+        assert "TO_CHAR" in captured["sql"] and "DATE_TRUNC" in captured["sql"]
 
 
 # ---------------------------------------------------------------------------
@@ -245,9 +265,9 @@ class TestSyncCategoriesToLocal:
         ]
         client = _notion_client_mock(pages)
 
-        n = sync_categories_to_local(client, "user_nt", store)
+        report = sync_categories_to_local(client, "user_nt", store)
 
-        assert n == 2
+        assert report.synced_count == 2
         names = store.get_user_category_names("user_nt")
         assert set(names) == {"Alimentari", "Trasporti"}
 
@@ -302,26 +322,26 @@ class TestSyncCategoriesToLocal:
         }
         client = _notion_client_mock([page])
 
-        n = sync_categories_to_local(client, "user_nt", store)
+        report = sync_categories_to_local(client, "user_nt", store)
 
-        assert n == 0
+        assert report.synced_count == 0
 
     def test_no_categories_db_id_returns_zero(self, db_session, store):
         client = Mock()
         client.categories_db_id = None
 
-        n = sync_categories_to_local(client, "user_nt", store)
+        report = sync_categories_to_local(client, "user_nt", store)
 
-        assert n == 0
+        assert report.synced_count == 0
 
     def test_api_error_returns_zero(self, db_session, store):
         client = Mock()
         client.categories_db_id = "db_test"
         client._get_data_source_id.side_effect = RuntimeError("timeout")
 
-        n = sync_categories_to_local(client, "user_nt", store)
+        report = sync_categories_to_local(client, "user_nt", store)
 
-        assert n == 0
+        assert report.synced_count == 0
 
     def test_pagination_fetches_all_pages(self, db_session, store):
         """Verifica che has_more=True faccia iterare sulla seconda pagina."""
@@ -336,9 +356,9 @@ class TestSyncCategoriesToLocal:
             {"results": [page_2], "has_more": False, "next_cursor": None},
         ]
 
-        n = sync_categories_to_local(client, "user_nt", store)
+        report = sync_categories_to_local(client, "user_nt", store)
 
-        assert n == 2
+        assert report.synced_count == 2
         assert set(store.get_user_category_names("user_nt")) == {"Alimentari", "Sport"}
 
 
@@ -359,11 +379,14 @@ class TestRefreshCategoryAverages:
     def test_postgres_user_routes_to_compute(self, store):
         user = Mock(storage_backend="postgres")
         store.get_user = Mock(return_value=user)
-        session = Mock()
+        # info={} così bind_user (RLS) può registrare lo user_id sulla sessione.
+        session = Mock(info={})
 
         with patch("src.category_sync.compute_category_averages") as mock_compute:
             refresh_category_averages("user_pg", store, session=session)
             mock_compute.assert_called_once_with("user_pg", session, store)
+        # La sessione dev'essere bindata all'utente per la RLS.
+        assert session.info["app_user_id"] == "user_pg"
 
     def test_notion_user_without_client_logs_warning(self, store, caplog):
         import logging
@@ -393,6 +416,130 @@ class TestRefreshCategoryAverages:
             refresh_category_averages("ghost_user", store)
 
         assert any("ghost_user" in r.message for r in caplog.records)
+
+
+# ---------------------------------------------------------------------------
+# 5. Riconciliazione — la cache diventa uno specchio esatto di Notion
+# ---------------------------------------------------------------------------
+
+class TestReconcileUserCategories:
+    def test_deleted_in_notion_is_removed_from_cache(self, db_session, store):
+        """Una categoria sparita da Notion viene rimossa dalla cache (non più fantasma)."""
+        sync_categories_to_local(
+            _notion_client_mock([
+                _make_notion_page("A", "Alimentari", 10.0),
+                _make_notion_page("B", "Sport", 20.0),
+            ]),
+            "user_nt", store,
+        )
+        assert set(store.get_user_category_names("user_nt")) == {"Alimentari", "Sport"}
+
+        # Notion ora contiene solo "Alimentari"
+        report = sync_categories_to_local(
+            _notion_client_mock([_make_notion_page("A", "Alimentari", 10.0)]),
+            "user_nt", store,
+        )
+
+        assert set(store.get_user_category_names("user_nt")) == {"Alimentari"}
+        assert "Sport" in report.deleted_categories
+
+    def test_rename_in_notion_updates_in_place(self, db_session, store):
+        """Un rinomina su Notion (page_id stabile) aggiorna la riga, senza duplicati."""
+        sync_categories_to_local(
+            _notion_client_mock([_make_notion_page("P", "Benzina", 5.0)]),
+            "user_nt", store,
+        )
+        report = sync_categories_to_local(
+            _notion_client_mock([_make_notion_page("P", "Carburante", 5.0)]),
+            "user_nt", store,
+        )
+
+        names = store.get_user_category_names("user_nt")
+        assert names == ["Carburante"]
+        assert "Benzina" not in names
+        assert report.deleted_categories == []  # page P ancora valido → nessuna cancellazione
+
+    def test_reconcile_skipped_on_fetch_error(self, db_session, store):
+        """Un errore Notion NON deve azzerare la cache (guardia fetch_ok)."""
+        sync_categories_to_local(
+            _notion_client_mock([_make_notion_page("A", "Alimentari", 10.0)]),
+            "user_nt", store,
+        )
+
+        bad = Mock()
+        bad.categories_db_id = "db_test"
+        bad._get_data_source_id.return_value = "ds_test"
+        bad._query_with_retry.side_effect = RuntimeError("boom")
+
+        report = sync_categories_to_local(bad, "user_nt", store)
+
+        assert report.synced_count == 0
+        # cache invariata: nessun wipe
+        assert set(store.get_user_category_names("user_nt")) == {"Alimentari"}
+
+    def test_reassigns_dependents_to_altro(self, db_session, store):
+        """Una categoria con spese dipendenti viene rimossa spostando i record su «Altro»."""
+        sync_categories_to_local(
+            _notion_client_mock([_make_notion_page("V", "Vecchia", 0.0)]),
+            "user_nt", store,
+        )
+        cat = db_session.query(UserCategory).filter_by(user_id="user_nt", name="Vecchia").first()
+        db_session.add(Expense(
+            user_id="user_nt",
+            expense_date=date(2026, 5, 1),
+            amount=9.0,
+            name="Spesa collegata",
+            category_id=cat.id,
+            account_id=1,
+        ))
+        db_session.commit()
+
+        # Notion non ha più "Vecchia": ritorna un'altra categoria
+        report = sync_categories_to_local(
+            _notion_client_mock([_make_notion_page("N", "Nuova", 0.0)]),
+            "user_nt", store,
+        )
+
+        names = set(store.get_user_category_names("user_nt"))
+        assert "Vecchia" not in names
+        assert "Altro" in names     # fallback creato
+        assert "Nuova" in names
+        assert any(
+            r.category_name == "Vecchia" and r.moved_expenses == 1
+            for r in report.reassignments
+        )
+
+        # la spesa è stata spostata su «Altro»
+        db_session.expire_all()
+        altro = db_session.query(UserCategory).filter_by(user_id="user_nt", name="Altro").first()
+        moved = db_session.query(Expense).filter_by(user_id="user_nt", name="Spesa collegata").first()
+        assert moved.category_id == altro.id
+
+    def test_fallback_with_dependents_not_deleted(self, db_session, store):
+        """«Altro» con dipendenti fuori da Notion non viene cancellata (rete di sicurezza)."""
+        sync_categories_to_local(
+            _notion_client_mock([_make_notion_page("ALT", "Altro", 0.0)]),
+            "user_nt", store,
+        )
+        altro = db_session.query(UserCategory).filter_by(user_id="user_nt", name="Altro").first()
+        db_session.add(Expense(
+            user_id="user_nt",
+            expense_date=date(2026, 5, 2),
+            amount=3.0,
+            name="Residuo",
+            category_id=altro.id,
+            account_id=1,
+        ))
+        db_session.commit()
+
+        # Notion non ha più "Altro"
+        report = sync_categories_to_local(
+            _notion_client_mock([_make_notion_page("N", "Nuova", 0.0)]),
+            "user_nt", store,
+        )
+
+        assert "Altro" in set(store.get_user_category_names("user_nt"))
+        assert "Altro" not in report.deleted_categories
 
 
 # ---------------------------------------------------------------------------
@@ -472,3 +619,71 @@ class TestLookupHelpers:
         result = store.get_category_by_notion_page_id("user_nt", "page_inesistente")
         assert result["name"] == "Sconosciuta"
         assert result["average"] == 0.0
+
+
+# ---------------------------------------------------------------------------
+# 7. Regressione — il budget delle categorie sopravvive al ciclo sync+reconcile
+#    (la sync Notion invia solo name+average, mai monthly_budget: il budget
+#    locale, impostato dall'utente, non deve mai essere azzerato o alterato).
+# ---------------------------------------------------------------------------
+
+class TestBudgetSurvivesSync:
+    def _seed_with_budget(self, store, user_id, name, page_id, budget):
+        """Categoria con budget impostato dall'utente + link Notion (setup iniziale)."""
+        from datetime import datetime
+        with store.Session() as s:
+            cat = UserCategory(user_id=user_id, name=name, monthly_budget=budget)
+            s.add(cat)
+            s.flush()
+            s.add(UserCategoryNotionLink(
+                category_id=cat.id, notion_page_id=page_id, average=0.0,
+                synced_at=datetime.utcnow()))
+            s.commit()
+
+    def _budgets(self, store, user_id):
+        return {
+            r["name"]: r["monthly_budget"]
+            for r in store.get_user_categories_with_budget(user_id)
+        }
+
+    def test_budget_preserved_through_normal_sync(self, db_session, store):
+        self._seed_with_budget(store, "user_nt", "Alimentari", "p1", 400.0)
+        self._seed_with_budget(store, "user_nt", "Trasporti", "p2", 150.0)
+        # Notion rimanda le stesse categorie con average aggiornata, senza budget.
+        sync_categories_to_local(
+            _notion_client_mock([
+                _make_notion_page("p1", "Alimentari", 320.0),
+                _make_notion_page("p2", "Trasporti", 90.0),
+            ]), "user_nt", store)
+        b = self._budgets(store, "user_nt")
+        assert float(b["Alimentari"]) == 400.0
+        assert float(b["Trasporti"]) == 150.0
+
+    def test_budget_follows_rename(self, db_session, store):
+        self._seed_with_budget(store, "user_nt", "Bar", "p1", 60.0)
+        sync_categories_to_local(
+            _notion_client_mock([_make_notion_page("p1", "Bar/Caffè", 0.0)]),
+            "user_nt", store)
+        b = self._budgets(store, "user_nt")
+        assert "Bar" not in b
+        assert float(b["Bar/Caffè"]) == 60.0
+
+    def test_budget_intact_when_other_category_reconciled(self, db_session, store):
+        self._seed_with_budget(store, "user_nt", "Alimentari", "p1", 400.0)
+        self._seed_with_budget(store, "user_nt", "Streaming", "p2", 30.0)
+        # Notion ora ha solo Alimentari: Streaming va rimossa, Alimentari resta.
+        sync_categories_to_local(
+            _notion_client_mock([_make_notion_page("p1", "Alimentari", 0.0)]),
+            "user_nt", store)
+        b = self._budgets(store, "user_nt")
+        assert "Streaming" not in b
+        assert float(b["Alimentari"]) == 400.0
+
+    def test_budget_intact_on_fetch_error(self, db_session, store):
+        self._seed_with_budget(store, "user_nt", "Alimentari", "p1", 400.0)
+        client = _notion_client_mock([])
+        client._query_with_retry.side_effect = RuntimeError("Notion 500")
+        report = sync_categories_to_local(client, "user_nt", store)
+        b = self._budgets(store, "user_nt")
+        assert float(b["Alimentari"]) == 400.0
+        assert not report.changed

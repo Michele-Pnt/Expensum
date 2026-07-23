@@ -29,34 +29,58 @@ _INCOME_TYPES = [
     "Dividendi", "Affitto", "Interessi", "Mance", "Ripetizioni", "Paghetta",
 ]
 
-_SYSTEM_PROMPT = """Sei un assistente finanziario. Il tuo compito è estrarre informazioni finanziarie da messaggi scritti in modo informale in italiano. Devi capire dal contesto se si tratta di un'uscita (spesa) o di un'entrata (stipendio, regalo, rimborso, bonifico ricevuto).
+_SYSTEM_PROMPT = """Sei un assistente finanziario. Il tuo compito è estrarre informazioni finanziarie da messaggi scritti in modo informale in italiano. Devi capire dal contesto se si tratta di un'uscita (spesa), di un'entrata (stipendio, regalo, rimborso, bonifico ricevuto) o di uno spostamento di denaro tra due conti dello stesso utente (trasferimento/giroconto).
 
 REGOLE TASSATIVE:
 1. Rispondi SOLO con un oggetto JSON valido, senza altro testo.
-2. Il JSON deve avere esattamente questi 6 campi:
-   - "type": stringa. Deve essere ASSOLUTAMENTE "expense" (se è una spesa/uscita) oppure "income" (se è un introito/entrata).
+2. Ogni transazione è un oggetto con esattamente questi 8 campi:
+   - "type": stringa. Deve essere ASSOLUTAMENTE "expense" (se è una spesa/uscita), "income" (se è un introito/entrata) oppure "transfer" (se l'utente sposta soldi da un SUO conto a un ALTRO SUO conto — es. "sposta", "trasferisci", "giroconto", "bonifico interno").
    - "amount": numero (float). DEVI interpretare anche i numeri a parole. Esempi: "150 mila euro" -> 150000.0, "cento euro" -> 100.0, "15" -> 15.0. Se non specificato, metti null.
-   - "category": stringa. RIGOROSAMENTE UNA SOLA voce dalla lista fornita di Categorie. Se `type` è "income", metti null.
-   - "income_type": stringa. SOLO se `type` è "income": scegli OBBLIGATORIAMENTE una voce tra [Stipendio, Bonus, Rimborso, Regalo, Cashback, Dividendi, Affitto, Interessi, Mance, Ripetizioni, Paghetta]. Se `type` è "expense", metti null.
-   - "name": stringa, breve descrizione (es. "Pizza amici", "Stipendio", "Busta Nonna"). Max 3 parole.
-   - "date": stringa in formato "YYYY-MM-DD". Se non specificata, usa la data di oggi fornita.
+   - "category": stringa. RIGOROSAMENTE UNA SOLA voce dalla lista fornita di Categorie. Se `type` è "income" o "transfer", metti null.
+   - "income_type": stringa. SOLO se `type` è "income": scegli OBBLIGATORIAMENTE una voce tra [Stipendio, Bonus, Rimborso, Regalo, Cashback, Dividendi, Affitto, Interessi, Mance, Ripetizioni, Paghetta]. Se `type` è "expense" o "transfer", metti null.
+   - "name": stringa, breve descrizione (es. "Pizza amici", "Stipendio", "Busta Nonna", "Trasferimento"). Max 3 parole.
+   - "date": stringa in formato "YYYY-MM-DD". Ragiona SEMPRE a partire dalla "Data di oggi" fornita nel prompt utente, che è il tuo unico ancoraggio temporale (non conosci la data reale). Interpreta QUALSIASI riferimento temporale relativo, a qualunque distanza: "ieri" (oggi-1), "ieri l'altro"/"altro ieri"/"avantieri" (oggi-2), "N giorni fa", "N settimane fa", "N mesi fa", nomi di giorni della settimana con "scorso" (es. "lunedì scorso" → il lunedì più recente nel passato, mai oggi stesso), "il mese scorso", date esplicite senza anno (es. "il 12 marzo" → stesso anno della data di oggi, o l'anno precedente se quel giorno è ancora futuro rispetto a oggi). Se non specificata alcuna data, usa la data di oggi fornita.
+   - "from_account": stringa. SOLO se `type` è "transfer": il nome del conto di ORIGINE così come scritto/menzionato dall'utente (es. "conto corrente", "Revolut"). Se non menzionato o `type` non è "transfer", metti null. NON inventare un nome se l'utente non lo scrive.
+   - "to_account": stringa. SOLO se `type` è "transfer": il nome del conto di DESTINAZIONE così come scritto/menzionato dall'utente. Se non menzionato o `type` non è "transfer", metti null. NON inventare un nome se l'utente non lo scrive.
 3. Se il messaggio NON sembra una transazione finanziaria, rispondi con: {"error": "not_expense"}
-4. NON inventare importi.
+4. NON inventare importi né nomi di conto.
+5. MULTI-TRANSAZIONE — decidi tu se il messaggio ne descrive una sola o più di una:
+   - Se il messaggio descrive UNA SOLA transazione, rispondi con l'oggetto singolo come negli esempi sotto (nessun wrapper).
+   - Se il messaggio descrive PIÙ transazioni distinte (es. più importi/voci separati, anche con date diverse tra loro), rispondi con un oggetto wrapper: {"transactions": [ {oggetto transazione 1}, {oggetto transazione 2}, ... ]}, un elemento per ogni transazione rilevata, ciascuno con tutti e 8 i campi sopra. Ogni transazione può avere una propria "date" indipendente (tutte ancorate alla stessa "Data di oggi").
+   - Non usare MAI il wrapper "transactions" per una singola transazione.
 
-ESEMPI SPESE:
-- "ieri pizza 25€" → {"type": "expense", "amount": 25.0, "category": "Ristoranti", "income_type": null, "name": "Pizza", "date": "2026-03-20"}
-- "netflix" → {"type": "expense", "amount": null, "category": "Abbonamenti", "income_type": null, "name": "Netflix", "date": "2026-03-21"}
-- "ho speso 67 euro al supermercato" → {"type": "expense", "amount": 67.0, "category": "Supermercato", "income_type": null, "name": "Spesa supermercato", "date": "2026-03-21"}
+ESEMPI SPESE (transazione singola):
+- "ieri pizza 25€" → {"type": "expense", "amount": 25.0, "category": "Ristoranti", "income_type": null, "name": "Pizza", "date": "2026-03-20", "from_account": null, "to_account": null}
+- "netflix" → {"type": "expense", "amount": null, "category": "Abbonamenti", "income_type": null, "name": "Netflix", "date": "2026-03-21", "from_account": null, "to_account": null}
+- "ho speso 67 euro al supermercato" → {"type": "expense", "amount": 67.0, "category": "Supermercato", "income_type": null, "name": "Spesa supermercato", "date": "2026-03-21", "from_account": null, "to_account": null}
+- "3 settimane fa ho pagato 80 euro di dentista" (oggi=2026-04-10) → {"type": "expense", "amount": 80.0, "category": "Salute", "income_type": null, "name": "Dentista", "date": "2026-03-20", "from_account": null, "to_account": null}
 
-ESEMPI ENTRATE:
-- "ho ricevuto lo stipendio 1500" → {"type": "income", "amount": 1500.0, "category": null, "income_type": "Stipendio", "name": "Stipendio", "date": "2026-03-22"}
-- "busta paga marzo 1800 euro" → {"type": "income", "amount": 1800.0, "category": null, "income_type": "Stipendio", "name": "Busta paga marzo", "date": "2026-03-22"}
-- "rimborso spese 120€" → {"type": "income", "amount": 120.0, "category": null, "income_type": "Rimborso", "name": "Rimborso spese", "date": "2026-03-22"}
-- "mi hanno pagato 500" → {"type": "income", "amount": 500.0, "category": null, "income_type": "Stipendio", "name": "Pagamento ricevuto", "date": "2026-03-22"}
-- "bonifico ricevuto 300 euro" → {"type": "income", "amount": 300.0, "category": null, "income_type": "Stipendio", "name": "Bonifico ricevuto", "date": "2026-03-22"}
-- "regalo compleanno 50 euro" → {"type": "income", "amount": 50.0, "category": null, "income_type": "Regalo", "name": "Regalo compleanno", "date": "2026-03-22"}
-- "cashback paypal 12 euro" → {"type": "income", "amount": 12.0, "category": null, "income_type": "Cashback", "name": "Cashback PayPal", "date": "2026-03-22"}
-- "dividendi azionari 200 euro" → {"type": "income", "amount": 200.0, "category": null, "income_type": "Dividendi", "name": "Dividendi azionari", "date": "2026-03-22"}
+ESEMPI ENTRATE (transazione singola):
+- "ho ricevuto lo stipendio 1500" → {"type": "income", "amount": 1500.0, "category": null, "income_type": "Stipendio", "name": "Stipendio", "date": "2026-03-22", "from_account": null, "to_account": null}
+- "busta paga marzo 1800 euro" → {"type": "income", "amount": 1800.0, "category": null, "income_type": "Stipendio", "name": "Busta paga marzo", "date": "2026-03-22", "from_account": null, "to_account": null}
+- "rimborso spese 120€" → {"type": "income", "amount": 120.0, "category": null, "income_type": "Rimborso", "name": "Rimborso spese", "date": "2026-03-22", "from_account": null, "to_account": null}
+- "mi hanno pagato 500" → {"type": "income", "amount": 500.0, "category": null, "income_type": "Stipendio", "name": "Pagamento ricevuto", "date": "2026-03-22", "from_account": null, "to_account": null}
+- "bonifico ricevuto 300 euro" → {"type": "income", "amount": 300.0, "category": null, "income_type": "Stipendio", "name": "Bonifico ricevuto", "date": "2026-03-22", "from_account": null, "to_account": null}
+- "regalo compleanno 50 euro" → {"type": "income", "amount": 50.0, "category": null, "income_type": "Regalo", "name": "Regalo compleanno", "date": "2026-03-22", "from_account": null, "to_account": null}
+- "cashback paypal 12 euro" → {"type": "income", "amount": 12.0, "category": null, "income_type": "Cashback", "name": "Cashback PayPal", "date": "2026-03-22", "from_account": null, "to_account": null}
+- "dividendi azionari 200 euro" → {"type": "income", "amount": 200.0, "category": null, "income_type": "Dividendi", "name": "Dividendi azionari", "date": "2026-03-22", "from_account": null, "to_account": null}
+
+ESEMPI TRASFERIMENTI (transazione singola):
+- "sposta 100 euro dal conto corrente al conto risparmio" → {"type": "transfer", "amount": 100.0, "category": null, "income_type": null, "name": "Trasferimento", "date": "2026-03-22", "from_account": "conto corrente", "to_account": "conto risparmio"}
+- "giroconto di 50€ da Revolut a Fineco" → {"type": "transfer", "amount": 50.0, "category": null, "income_type": null, "name": "Giroconto", "date": "2026-03-22", "from_account": "Revolut", "to_account": "Fineco"}
+- "bonifico interno 300 euro verso il conto risparmio" → {"type": "transfer", "amount": 300.0, "category": null, "income_type": null, "name": "Bonifico interno", "date": "2026-03-22", "from_account": null, "to_account": "conto risparmio"}
+- "trasferisci 200 euro sul conto di risparmio" → {"type": "transfer", "amount": 200.0, "category": null, "income_type": null, "name": "Trasferimento", "date": "2026-03-22", "from_account": null, "to_account": "conto di risparmio"}
+
+ESEMPI MULTI-TRANSAZIONE:
+- "ho speso 10 euro per il pranzo, 20 di benzina e 5 di caffè ieri" (oggi=2026-04-10) → {"transactions": [
+  {"type": "expense", "amount": 10.0, "category": "Ristoranti", "income_type": null, "name": "Pranzo", "date": "2026-04-09", "from_account": null, "to_account": null},
+  {"type": "expense", "amount": 20.0, "category": "Trasporti", "income_type": null, "name": "Benzina", "date": "2026-04-09", "from_account": null, "to_account": null},
+  {"type": "expense", "amount": 5.0, "category": "Bar", "income_type": null, "name": "Caffè", "date": "2026-04-09", "from_account": null, "to_account": null}
+]}
+- "oggi 15 euro di spesa e ieri ho ricevuto un rimborso di 50 euro" (oggi=2026-04-10) → {"transactions": [
+  {"type": "expense", "amount": 15.0, "category": "Supermercato", "income_type": null, "name": "Spesa", "date": "2026-04-10", "from_account": null, "to_account": null},
+  {"type": "income", "amount": 50.0, "category": null, "income_type": "Rimborso", "name": "Rimborso", "date": "2026-04-09", "from_account": null, "to_account": null}
+]}
 """
 
 
@@ -144,29 +168,38 @@ class ExpenseParser:
             f"{len(self._categories)} categorie"
         )
 
-    def parse(self, message: str) -> dict | None:
+    def parse(self, message: str, chat_id: str = "unknown") -> dict | None:
         """Parsa un messaggio e restituisce solo il risultato strutturato."""
-        result, _usage = self.parse_with_usage(message)
+        result, _usage = self.parse_with_usage(message, chat_id)
         return result
 
-    def parse_with_usage(self, message: str) -> tuple[dict | None, dict]:
+    def parse_with_usage(self, message: str, chat_id: str = "unknown") -> tuple[dict | None, dict]:
         """
         Parsa un messaggio di testo libero e restituisce i dati della spesa.
 
         Returns:
-            dict con {type, date, amount, category, name, income_type, usage_metadata} oppure None.
+            dict con {type, date, amount, category, name, income_type, from_account, to_account,
+            usage_metadata} oppure None.
             `usage_metadata` contiene {prompt_tokens, completion_tokens, total_tokens,
             provider, model} per il ledger token reale.
         """
         today = date.today()
         user_prompt = _build_user_prompt(message, self._categories, today)
 
-        logger.info("parsing_expense", extra={"meta": {"length": len(message)}})
+        logger.info(
+            "parsing_expense",
+            extra={"domain": "usage", "event": "parsing_expense", "chat_id": chat_id,
+                   "meta": {"length": len(message)}},
+        )
 
         try:
             raw_response, usage = self._call_mistral(user_prompt)
         except Exception as e:
-            logger.error(f"Errore LLM durante il parsing: {e}")
+            logger.error(
+                "expense_parsing_llm_failed",
+                extra={"domain": "usage", "event": "expense_parsing_llm_failed", "chat_id": chat_id,
+                       "meta": {"error_type": type(e).__name__}},
+            )
             return None, {}
 
         logger.debug(f"Risposta LLM grezza: {raw_response[:200]}")
@@ -175,20 +208,93 @@ class ExpenseParser:
         if parsed is None:
             logger.warning(
                 "json_extraction_failed",
-                extra={"meta": {"response_length": len(raw_response)}},
+                extra={"domain": "usage", "event": "json_extraction_failed", "chat_id": chat_id,
+                       "meta": {"response_length": len(raw_response)}},
             )
             return None, usage
 
         # Se il LLM dice che non è una spesa
         if "error" in parsed:
-            logger.info(f"Messaggio non riconosciuto come spesa: {parsed.get('error')}")
+            logger.info(
+                "expense_not_recognized",
+                extra={"domain": "usage", "event": "expense_not_recognized", "chat_id": chat_id,
+                       "meta": {"reason": parsed.get("error")}},
+            )
             return None, usage
 
         # Validazione e normalizzazione
         result = self._normalize(parsed, today)
         result["usage_metadata"] = usage
-        logger.info(f"Parsing completato: {result}")
+        logger.info(
+            "parsing_expense_completed",
+            extra={"domain": "usage", "event": "parsing_expense_completed", "chat_id": chat_id,
+                   "meta": {"type": result.get("type")}},
+        )
         return result, usage
+
+    def parse_multi_with_usage(self, message: str, chat_id: str = "unknown") -> tuple[list[dict] | None, dict]:
+        """
+        Parsa un messaggio di testo libero e restituisce UNA O PIÙ transazioni.
+
+        L'LLM decide autonomamente se il messaggio descrive una singola transazione
+        (oggetto JSON semplice) o più transazioni distinte (wrapper {"transactions": [...]});
+        qui normalizziamo sempre il risultato in una lista, con un elemento per transazione.
+
+        Returns:
+            (lista di dict con {type, date, amount, category, income_type, name, from_account, to_account}, usage_metadata)
+            oppure (None, usage_metadata) se il messaggio non è riconosciuto come transazione
+            finanziaria o il parsing fallisce.
+        """
+        today = date.today()
+        user_prompt = _build_user_prompt(message, self._categories, today)
+
+        logger.info(
+            "parsing_expense_multi",
+            extra={"domain": "usage", "event": "parsing_expense_multi", "chat_id": chat_id,
+                   "meta": {"length": len(message)}},
+        )
+
+        try:
+            raw_response, usage = self._call_mistral(user_prompt)
+        except Exception as e:
+            logger.error(
+                "expense_parsing_multi_llm_failed",
+                extra={"domain": "usage", "event": "expense_parsing_multi_llm_failed", "chat_id": chat_id,
+                       "meta": {"error_type": type(e).__name__}},
+            )
+            return None, {}
+
+        logger.debug(f"Risposta LLM grezza (multi): {raw_response[:200]}")
+
+        parsed = _extract_json(raw_response)
+        if parsed is None:
+            logger.warning(
+                "json_extraction_failed_multi",
+                extra={"domain": "usage", "event": "json_extraction_failed_multi", "chat_id": chat_id,
+                       "meta": {"response_length": len(raw_response)}},
+            )
+            return None, usage
+
+        if "error" in parsed:
+            logger.info(
+                "expense_not_recognized",
+                extra={"domain": "usage", "event": "expense_not_recognized", "chat_id": chat_id,
+                       "meta": {"reason": parsed.get("error")}},
+            )
+            return None, usage
+
+        raw_transactions = parsed["transactions"] if isinstance(parsed.get("transactions"), list) else [parsed]
+
+        results = [self._normalize(item, today) for item in raw_transactions if isinstance(item, dict)]
+        if not results:
+            return None, usage
+
+        logger.info(
+            "parsing_expense_multi_completed",
+            extra={"domain": "usage", "event": "parsing_expense_multi_completed", "chat_id": chat_id,
+                   "meta": {"count": len(results)}},
+        )
+        return results, usage
 
     def _call_mistral(self, user_prompt: str) -> tuple[str, dict]:
         """Chiama Mistral con exponential backoff + jitter e fallback su Large.
@@ -278,7 +384,11 @@ class ExpenseParser:
 
         # Name
         _type = parsed.get("type", "expense")
-        name = parsed.get("name") or ("Entrata" if _type == "income" else "Spesa")
+        if not parsed.get("name"):
+            default_names = {"income": "Entrata", "transfer": "Trasferimento"}
+            name = default_names.get(_type, "Spesa")
+        else:
+            name = parsed["name"]
 
         # Income type — valido solo per entrate, validato contro la lista ufficiale
         income_type: str | None = None
@@ -296,11 +406,25 @@ class ExpenseParser:
                     if matches:
                         income_type = next(t for t in _INCOME_TYPES if t.lower() == matches[0])
 
+        # Conti di origine/destinazione — solo per trasferimenti. Sono nomi grezzi
+        # così come scritti dall'utente: la risoluzione sui conti reali dell'utente
+        # (match esatto/fuzzy) avviene a valle, in bot.py, dove sono disponibili
+        # i conti effettivi (fetch_accounts) senza doverli passare all'LLM ad ogni messaggio.
+        from_account: str | None = None
+        to_account: str | None = None
+        if _type == "transfer":
+            raw_from = parsed.get("from_account")
+            raw_to = parsed.get("to_account")
+            from_account = raw_from.strip() if isinstance(raw_from, str) and raw_from.strip() else None
+            to_account = raw_to.strip() if isinstance(raw_to, str) and raw_to.strip() else None
+
         return {
-            "type": _type,  # per identificare spesa o entrata
+            "type": _type,  # per identificare spesa, entrata o trasferimento
             "date": expense_date,
             "amount": amount,
             "category": category,
             "income_type": income_type,
             "name": name.strip(),
+            "from_account": from_account,
+            "to_account": to_account,
         }

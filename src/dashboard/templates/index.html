@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% import "_macros.html" as ui %}
 {% block content %}
 <!-- Tab Navigation -->
 <div style="display: flex; gap: 1rem; margin-bottom: 2rem; border-bottom: 2px solid rgba(255,255,255,0.1); padding-bottom: 1rem;">
@@ -8,89 +9,151 @@
 
 <!-- Tab 1: Dashboard -->
 <div id="tab-dashboard-content">
-<h1 class="page-title">Panoramica Sistema</h1>
+<h1 class="page-title">Panoramica Sistema {{ ui.info("Pagina di overview: salute del server, dimensione della base utenti, qualità dell'AI e costi LLM. È il primo colpo d'occhio quotidiano sullo stato di Expensum. Le metriche token partono dal 2026-05-01 (soglia storica del ledger).") }}</h1>
 <p class="page-desc">Benvenuto Admin. Questa è la salute attuale del tuo agente.</p>
 
 <div class="stats-grid">
     <!-- RAM -->
     <div class="stat-card glass-panel">
-        <div class="stat-label">Uso Memoria Server</div>
-        <div class="stat-value"
+        <div class="stat-label">Uso Memoria Server {{ ui.info("Percentuale di RAM usata sul server, letta con psutil. Il VPS Netcup ha 4 GB: sopra l'80% (rosso) il rischio è che bot e PostgreSQL rallentino o vadano in errore per memoria esaurita.") }}</div>
+        <div class="stat-value" id="kpi-ram-value"
             style="color: {% if sys.ram_percent > 80 %}var(--danger){% else %}var(--accent-primary){% endif %}">
             {{ sys.ram_percent }}%
         </div>
-        <span class="stat-label" style="text-transform:none; margin-top:5px">{{ sys.ram_used_gb }} GB usati</span>
+        <span class="stat-label" id="kpi-ram-sub" style="text-transform:none; margin-top:5px">{{ sys.ram_used_gb }} GB usati</span>
     </div>
     <!-- CPU -->
     <div class="stat-card glass-panel">
-        <div class="stat-label">Carico CPU</div>
-        <div class="stat-value"
+        <div class="stat-label">Carico CPU {{ ui.info("Carico CPU istantaneo del server (psutil.cpu_percent). Picchi prolungati sopra l'80% rallentano le risposte del bot e l'elaborazione di foto/voce.") }}</div>
+        <div class="stat-value" id="kpi-cpu-value"
             style="color: {% if sys.cpu_percent > 80 %}var(--danger){% else %}var(--accent-primary){% endif %}">
             {{ sys.cpu_percent }}%
         </div>
     </div>
     <!-- DB Users -->
     <div class="stat-card glass-panel">
-        <div class="stat-label">Database Users</div>
-        <div class="stat-value">{{ users_count }}</div>
-        <span class="stat-label" style="text-transform:none; margin-top:5px">{{ active_users }} Utenti Attivi</span>
+        <div class="stat-label">Database Users {{ ui.info("Numero totale di utenti registrati (tabella users). Sotto: gli utenti attivi (is_active=true, non sospesi). È la base installata di Expensum, il denominatore di quasi tutte le altre metriche.") }}</div>
+        <div class="stat-value" id="kpi-users-value">{{ users_count }}</div>
+        <span class="stat-label" id="kpi-users-sub" style="text-transform:none; margin-top:5px">{{ active_users }} Utenti Attivi</span>
     </div>
     <!-- Feedback -->
     <div class="stat-card glass-panel">
-        <div class="stat-label">Feedback da leggere</div>
-        <div class="stat-value"
+        <div class="stat-label">Feedback da leggere {{ ui.info("Feedback inviati dagli utenti e non ancora gestiti (feedbacks con status='unread'). Da tenere a zero: sono segnalazioni e richieste dirette dai beta tester.") }}</div>
+        <div class="stat-value" id="kpi-feedback-value"
             style="color: {% if unread_feedback > 0 %}var(--warning){% else %}var(--success){% endif %}">
             {{ unread_feedback }}
         </div>
     </div>
 </div>
 
-<h3 style="margin-top: 2rem; margin-bottom: 1.5rem; color: var(--text-main);">Metrica AI & Engagement</h3>
+<h3 style="margin-top: 2rem; margin-bottom: 1.5rem; color: var(--text-main);">Metrica AI & Engagement
+    <span id="kpi-refresh-indicator" style="font-size:0.75rem; font-weight:400; color: var(--text-secondary); margin-left:0.75rem;"></span>
+</h3>
 <div class="stats-grid">
     <!-- Goal Completion -->
     <div class="stat-card glass-panel" style="border-left: 4px solid var(--success)">
-        <div class="stat-label">Goal Completion (GCR)</div>
-        <div class="stat-value" style="color: var(--success)">
+        <div class="stat-label">Goal Completion (GCR) {{ ui.info("goal_completions / (goal_completions + fallbacks) sugli ultimi 10 giorni (tabella daily_metrics). Un parsing spesa confermato dall'utente conta come 'goal'. Misura quanto l'AI risolve le richieste da sola: più alto è, meglio funziona il prodotto.") }}</div>
+        <div class="stat-value" id="kpi-gcr-value" style="color: var(--success)">
             {% if goal_completion_rate is not none %}{{ goal_completion_rate }}%{% else %}<span
                 style="font-size:1rem;color:#aaa">N/D</span>{% endif %}
         </div>
-        <span class="stat-label" style="text-transform:none; margin-top:5px">{% if goal_completion_rate is not none
+        <span class="stat-label" id="kpi-gcr-sub" style="text-transform:none; margin-top:5px">{% if goal_completion_rate is not none
             %}Risoluzione automatica{% else %}Dati in raccolta...{% endif %}</span>
     </div>
     <!-- Fallback Rate -->
     <div class="stat-card glass-panel" style="border-left: 4px solid var(--warning)">
-        <div class="stat-label">Fallback Rate</div>
-        <div class="stat-value"
+        <div class="stat-label">Fallback Rate {{ ui.info("fallbacks / (goal_completions + fallbacks) sugli ultimi 10 giorni (daily_metrics). È la quota di messaggi che l'AI non ha capito. Sopra ~5% (rosso) segnala un problema di comprensione da investigare.") }}</div>
+        <div class="stat-value" id="kpi-fallback-value"
             style="color: {% if fallback_rate is not none and fallback_rate > 5 %}var(--danger){% elif fallback_rate is not none %}var(--warning){% else %}#aaa{% endif %}">
             {% if fallback_rate is not none %}{{ fallback_rate }}%{% else %}<span
                 style="font-size:1rem;color:#aaa">N/D</span>{% endif %}
         </div>
-        <span class="stat-label" style="text-transform:none; margin-top:5px">{% if fallback_rate is not none %}Mancata
+        <span class="stat-label" id="kpi-fallback-sub" style="text-transform:none; margin-top:5px">{% if fallback_rate is not none %}Mancata
             comprensione intenti{% else %}Dati in raccolta...{% endif %}</span>
     </div>
     <!-- Engagement -->
     <div class="stat-card glass-panel" style="border-left: 4px solid var(--accent-info)">
-        <div class="stat-label">Messaggi / Utente Attivo</div>
-        <div class="stat-value" style="color: var(--accent-info)">
+        <div class="stat-label">Messaggi / Utente Attivo {{ ui.info("Proxy di engagement: somma degli eventi LLM degli ultimi 10 giorni divisa per gli utenti attivi. Non conta i messaggi esatti ma le interazioni con l'AI: più alto = utenti più coinvolti.") }}</div>
+        <div class="stat-value" id="kpi-msgperuser-value" style="color: var(--accent-info)">
             {{ avg_msg_per_user }}
         </div>
         <span class="stat-label" style="text-transform:none; margin-top:5px">Media negli ultimi 10 giorni</span>
     </div>
     <!-- Cost -->
     <div class="stat-card glass-panel" style="border-left: 4px solid var(--danger)">
-        <div class="stat-label">Stima Costi LLM (30 gg)</div>
-        <div class="stat-value" style="color: var(--danger)">
+        <div class="stat-label">Stima Costi LLM (30 gg) {{ ui.info("Somma di estimated_cost_amount dal ledger llm_usage_events negli ultimi 30 giorni (in USD). Sotto: il costo totale storico dal 2026-05-01. È la spesa AI reale, da confrontare con i ricavi per la sostenibilità economica.") }}</div>
+        <div class="stat-value" id="kpi-costmonth-value" style="color: var(--danger)">
             ${{ cost_month }}
         </div>
-        <span class="stat-label" style="text-transform:none; margin-top:5px">Costo totale: ${{ cost_total }}</span>
+        <span class="stat-label" id="kpi-costtotal-sub" style="text-transform:none; margin-top:5px">Costo totale: ${{ cost_total }}</span>
     </div>
 </div>
 
 <div class="chart-container glass-panel">
-    <h3 style="margin-bottom: 1.5rem; color: var(--text-main);">Consumo Token LLM (10 Giorni)</h3>
+    <div style="display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:0.75rem; margin-bottom: 1.5rem;">
+        <h3 style="margin:0; color: var(--text-main);">Consumo Token LLM (<span id="usageChartPeriodLabel">10 Giorni</span>) {{ ui.info("Token prompt, completion e totali consumati per giorno nel periodo selezionato (llm_usage_events). Mostra il trend di consumo e aiuta a intercettare picchi anomali o utenti che consumano troppo. Si aggiorna da solo ogni 5 minuti mentre la pagina resta aperta.") }}</h3>
+        <div style="display:flex; align-items:center; gap:0.4rem; flex-wrap:wrap;">
+            <button type="button" class="period-btn" data-days="10" onclick="setUsageChartPeriod(10)">10gg</button>
+            <button type="button" class="period-btn" data-days="30" onclick="setUsageChartPeriod(30)">1 mese</button>
+            <button type="button" class="period-btn" data-days="60" onclick="setUsageChartPeriod(60)">2 mesi</button>
+            <input type="number" id="usageChartCustomDays" min="1" max="180" placeholder="gg" style="width:60px; padding:0.3rem; background:transparent; border:1px solid rgba(255,255,255,0.15); border-radius:4px; color:var(--text-main);">
+            <button type="button" class="period-btn" onclick="setUsageChartPeriodCustom()">Vai</button>
+        </div>
+    </div>
     <div style="position: relative; height: 350px; width: 100%;">
         <canvas id="usageChart"></canvas>
     </div>
+</div>
+
+<!-- Split Telegram vs Webapp (90gg) -->
+<div class="stats-grid" style="margin-top: 1.5rem;">
+    <div class="stat-card glass-panel">
+        <div class="stat-label">Richieste da Telegram (90gg) {{ ui.info("Richieste LLM originate da chat_id numerici (bot Telegram), ultimi 90 giorni. Il canale si distingue dal prefisso del chat_id: gli account webapp iniziano sempre con 'web_'.") }}</div>
+        <div class="stat-value" id="src-telegram-requests" style="font-size:1.6rem;">{{ source_breakdown.telegram.requests }}</div>
+        <span class="stat-label" id="src-telegram-tokens" style="text-transform:none; margin-top:5px">{{ source_breakdown.telegram.total_tokens }} token · ${{ source_breakdown.telegram.cost_usd }}</span>
+    </div>
+    <div class="stat-card glass-panel">
+        <div class="stat-label">Richieste da Webapp (90gg) {{ ui.info("Richieste LLM originate da chat_id con prefisso 'web_' (utenti webapp, sia registrati direttamente sia collegati a Telegram), ultimi 90 giorni.") }}</div>
+        <div class="stat-value" id="src-webapp-requests" style="font-size:1.6rem;">{{ source_breakdown.webapp.requests }}</div>
+        <span class="stat-label" id="src-webapp-tokens" style="text-transform:none; margin-top:5px">{{ source_breakdown.webapp.total_tokens }} token · ${{ source_breakdown.webapp.cost_usd }}</span>
+    </div>
+</div>
+
+<!-- Split per modalità di input (90gg) -->
+<h3 style="margin-top: 1.5rem; margin-bottom: 1rem; color: var(--text-main);">Richieste per modalità di input (90gg) {{ ui.info("Numero di richieste LLM e token consumati per modalità (testo/voce/foto), ultimi 90 giorni. 'n/d' raggruppa le righe storiche precedenti all'introduzione di questo campo (14 luglio 2026, non retroattivo) e le operazioni per cui la modalità non si applica (es. i report weekly/monthly_plan, generati su comando).") }}</h3>
+<div class="glass-panel data-table-wrapper" id="inputMethodTableWrapper">
+    <table class="glass-table">
+        <thead><tr><th>Modalità</th><th>Richieste</th><th>Token totali</th></tr></thead>
+        <tbody id="inputMethodTableBody">
+            {% for method, data in input_method_breakdown.items() %}
+            <tr><td><code>{{ method }}</code></td><td>{{ data.requests }}</td><td>{{ data.total_tokens }}</td></tr>
+            {% else %}
+            <tr><td colspan="3" style="text-align:center; color: var(--text-secondary);">Nessun dato</td></tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+
+<!-- Costo per provider AI (90gg) -->
+<h3 style="margin-top: 1.5rem; margin-bottom: 1rem; color: var(--text-main);">Costo per provider AI (90gg) {{ ui.info("Costo stimato e token consumati per ciascun provider (Mistral per il parsing testo, Gemini/Vertex AI per la trascrizione vocale), ultimi 90 giorni, con quota % sul costo totale. Le foto NON generano un costo provider proprio: l'OCR scontrini è Tesseract locale (gratuito, gira sul VPS) — il testo estratto passa poi dallo stesso parser Mistral del testo digitato, quindi il suo costo è già incluso lì dentro.") }}</h3>
+<div class="glass-panel data-table-wrapper" id="providerCostTableWrapper">
+    <table class="glass-table">
+        <thead><tr><th>Provider</th><th>Modello</th><th>Richieste</th><th>Token totali</th><th>Costo stimato</th><th>Quota</th></tr></thead>
+        <tbody id="providerCostTableBody">
+            {% for row in provider_cost_breakdown.rows %}
+            <tr>
+                <td><code>{{ row.provider }}</code></td>
+                <td style="font-size:0.8rem; color: var(--text-secondary);">{{ row.model }}</td>
+                <td>{{ row.requests }}</td>
+                <td>{{ row.total_tokens }}</td>
+                <td>${{ row.cost_usd }}</td>
+                <td>{{ row.cost_share_pct }}%</td>
+            </tr>
+            {% else %}
+            <tr><td colspan="6" style="text-align:center; color: var(--text-secondary);">Nessun dato</td></tr>
+            {% endfor %}
+        </tbody>
+    </table>
 </div>
 
 <script>
@@ -105,7 +168,7 @@
     gradientPrimary.addColorStop(0, 'rgba(16, 185, 129, 0.4)');
     gradientPrimary.addColorStop(1, 'rgba(16, 185, 129, 0.0)');
 
-    const usageChart = new Chart(ctx, {
+    window.usageChart = new Chart(ctx, {
         type: 'line',
         data: {
             labels: {{ chart_labels | tojson }},
@@ -163,31 +226,31 @@
 
 <!-- Tab 2: Token Analytics (90 giorni) -->
 <div id="tab-analytics-content" style="display: none;">
-<h2 style="color: var(--text-main); margin-bottom: 1.5rem;">📊 Analisi Consumo Token (Ultimi 90 Giorni)</h2>
+<h2 style="color: var(--text-main); margin-bottom: 1.5rem;">📊 Analisi Consumo Token (Ultimi 90 Giorni) {{ ui.info("Analisi del consumo LLM sugli ultimi 90 giorni, disaggregata per operazione (expense_parse, voice_transcribe, weekly/monthly_plan) e per piano (free/pro). Fonte: ledger llm_usage_events + tabella user_plans. Serve a capire quali funzioni costano di più e come si comportano free e pro.") }}</h2>
 
 <!-- Analytics Stat Cards -->
 <div class="stats-grid">
     <div class="stat-card glass-panel">
-        <div class="stat-label">Totale Richieste</div>
+        <div class="stat-label">Totale Richieste {{ ui.info("Numero totale di chiamate LLM registrate negli ultimi 90 giorni (righe di llm_usage_events). Calcolato lato browser dai dati del grafico 1.") }}</div>
         <div class="stat-value" id="analytics-total-requests" style="color: var(--accent-primary);">—</div>
     </div>
     <div class="stat-card glass-panel">
-        <div class="stat-label">Avg Token/Richiesta</div>
+        <div class="stat-label">Avg Token/Richiesta {{ ui.info("Media dei token totali per chiamata LLM sui 90 giorni. Indicatore chiave per stimare costi e dimensionare le quote mensili (free 150k, pro 3M).") }}</div>
         <div class="stat-value" id="analytics-avg-tokens" style="color: var(--accent-info);">—</div>
     </div>
     <div class="stat-card glass-panel">
-        <div class="stat-label">Conversion Rate Overall</div>
+        <div class="stat-label">Conversion Rate Overall {{ ui.info("Quota di chiamate LLM 'riuscite' (total_tokens > 0) sul totale. Una chiamata con 0 token indica un parsing fallito o vuoto: valori bassi segnalano problemi di affidabilità dell'AI.") }}</div>
         <div class="stat-value" id="analytics-conversion-overall" style="color: var(--success);">—</div>
     </div>
     <div class="stat-card glass-panel">
-        <div class="stat-label">Operazioni Tracciabili</div>
+        <div class="stat-label">Operazioni Tracciabili {{ ui.info("Numero di tipi di operazione LLM distinti presenti nei dati (es. expense_parse, voice_transcribe, weekly_plan...). Indica quante funzioni AI sono state usate nel periodo.") }}</div>
         <div class="stat-value" id="analytics-operation-count" style="color: var(--warning);">—</div>
     </div>
 </div>
 
 <!-- Grafico 1: Richieste per Tipo (Free vs Pro) -->
 <div class="chart-container glass-panel" style="margin-top: 2rem;">
-    <h3 style="margin-bottom: 1.5rem; color: var(--text-main);">Grafico 1: Numero Richieste per Tipo (Free vs Pro)</h3>
+    <h3 style="margin-bottom: 1.5rem; color: var(--text-main);">Grafico 1: Numero Richieste per Tipo (Free vs Pro) {{ ui.info("Numero di richieste LLM per tipo di operazione, separando utenti free e pro. Mostra quali funzioni pesano di più sul carico e chi le usa davvero.") }}</h3>
     <div style="position: relative; height: 350px; width: 100%;">
         <canvas id="requestsChart"></canvas>
     </div>
@@ -195,7 +258,7 @@
 
 <!-- Grafico 2: Token Medio per Tipo -->
 <div class="chart-container glass-panel" style="margin-top: 2rem;">
-    <h3 style="margin-bottom: 1.5rem; color: var(--text-main);">Grafico 2: Token Medio Consumato per Tipo (Free vs Pro)</h3>
+    <h3 style="margin-bottom: 1.5rem; color: var(--text-main);">Grafico 2: Token Medio Consumato per Tipo (Free vs Pro) {{ ui.info("Token medi consumati per richiesta, per operazione e piano. Serve a capire quali operazioni sono più costose in token (es. i piani mensili vs un semplice parse spesa).") }}</h3>
     <div style="position: relative; height: 350px; width: 100%;">
         <canvas id="tokenStatsChart"></canvas>
     </div>
@@ -203,7 +266,7 @@
 
 <!-- Grafico 3: Conversion Rate per Tipo -->
 <div class="chart-container glass-panel" style="margin-top: 2rem;">
-    <h3 style="margin-bottom: 1.5rem; color: var(--text-main);">Grafico 3: Conversion Rate per Tipo (%)</h3>
+    <h3 style="margin-bottom: 1.5rem; color: var(--text-main);">Grafico 3: Conversion Rate per Tipo (%) {{ ui.info("Percentuale di richieste riuscite (total_tokens > 0) per operazione e piano. Un valore basso su una specifica operazione indica parsing che falliscono lì: dove intervenire per migliorare l'affidabilità.") }}</h3>
     <div style="position: relative; height: 350px; width: 100%;">
         <canvas id="conversionChart"></canvas>
     </div>
@@ -211,7 +274,7 @@
 
 <!-- Tabella Dettagli -->
 <div class="chart-container glass-panel" style="margin-top: 2rem;">
-    <h3 style="margin-bottom: 1.5rem; color: var(--text-main);">Dettagli Operazioni</h3>
+    <h3 style="margin-bottom: 1.5rem; color: var(--text-main);">Dettagli Operazioni {{ ui.info("Dettaglio numerico per ogni operazione LLM: numero richieste, token medi e conversion rate, separati free vs pro. È la vista tabellare dei tre grafici qui sopra.") }}</h3>
     <div id="analyticsTableContainer" style="overflow-x: auto;">
         <table style="width: 100%; border-collapse: collapse; color: #8b949e; font-family: Outfit;">
             <thead>
@@ -254,8 +317,8 @@
 </div><!-- End tab-analytics-content -->
 
 <script>
-// Parse analytics data from backend
-const analyticsData = {{ analytics_data | tojson }};
+// Parse analytics data from backend (let, non const: viene riassegnata a ogni auto-refresh)
+let analyticsData = {{ analytics_data | tojson }};
 
 function showTab(tabName) {
     // Hide all tabs
@@ -287,7 +350,7 @@ function showTab(tabName) {
 function loadUserTokenTable() {
     const tbody = document.getElementById('userTokenTableBody');
     if (!tbody || tbody.dataset.loaded) return;
-    fetch('/api/users/token-usage')
+    fetch('/admin/api/users/token-usage')
         .then(r => r.json())
         .then(rows => {
             if (!rows.length) {
@@ -455,38 +518,220 @@ function populateAnalyticsTable() {
 }
 
 function updateAnalyticsStats() {
-    const operations = Object.keys(analyticsData.token_stats);
-    
-    // Total requests
-    let totalRequests = 0;
-    let totalTokens = 0;
-    let totalSuccesses = 0;
-    
-    for (const op of operations) {
-        for (const date in analyticsData.requests_by_operation[op] || {}) {
-            totalRequests += analyticsData.requests_by_operation[op][date].total || 0;
-        }
-        totalTokens += (analyticsData.token_stats[op]?.total || 0) * totalRequests;
-    }
-    
-    // Recalculate for correct total
-    totalTokens = 0;
-    totalRequests = 0;
-    for (const op of operations) {
-        for (const date in analyticsData.requests_by_operation[op] || {}) {
-            const requestsThisOp = analyticsData.requests_by_operation[op][date].total || 0;
-            totalRequests += requestsThisOp;
-            totalTokens += (analyticsData.token_stats[op]?.total || 0) * (requestsThisOp > 0 ? 1 : 0);
-        }
-    }
-    
-    const avgTokens = totalRequests > 0 ? Math.round(totalTokens / totalRequests) : 0;
-    const conversionOverall = totalRequests > 0 ? (totalSuccesses / totalRequests * 100).toFixed(1) : 0;
-    
-    document.getElementById('analytics-total-requests').textContent = totalRequests;
-    document.getElementById('analytics-avg-tokens').textContent = avgTokens;
-    document.getElementById('analytics-conversion-overall').textContent = conversionOverall + '%';
-    document.getElementById('analytics-operation-count').textContent = operations.length;
+    // Totali calcolati lato server (admin_metrics.get_token_analytics_90d) sulle
+    // righe grezze, non ricostruiti qui: il vecchio codice sommava strutture
+    // annidate per operazione/data ma non incrementava mai i successi, quindi la
+    // conversion rate risultava sempre 0% indipendentemente dai dati reali.
+    const overall = analyticsData.overall || { total_requests: 0, avg_tokens: 0, conversion_rate_pct: 0, operation_count: 0 };
+
+    document.getElementById('analytics-total-requests').textContent = overall.total_requests;
+    document.getElementById('analytics-avg-tokens').textContent = overall.avg_tokens;
+    document.getElementById('analytics-conversion-overall').textContent = overall.conversion_rate_pct + '%';
+    document.getElementById('analytics-operation-count').textContent = overall.operation_count;
 }
+
+// ---------------------------------------------------------------------------
+// Auto-refresh: ogni 5 minuti rilegge /admin/api/overview e ridisegna i grafici
+// senza ricaricare la pagina. Gira interamente nel browser di chi la guarda
+// (Chart.js, canvas 2D) — nessun impatto su CPU/GPU del VPS oltre alla singola
+// query leggera ogni 5 minuti.
+// ---------------------------------------------------------------------------
+const REFRESH_INTERVAL_MS = 5 * 60 * 1000;
+
+function applyKpis(kpis, sys) {
+    const setText = (id, val) => { const el = document.getElementById(id); if (el) el.textContent = val; };
+    const setColor = (id, color) => { const el = document.getElementById(id); if (el) el.style.color = color; };
+
+    setText('kpi-ram-value', sys.ram_percent + '%');
+    setColor('kpi-ram-value', sys.ram_percent > 80 ? 'var(--danger)' : 'var(--accent-primary)');
+    setText('kpi-ram-sub', sys.ram_used_gb + ' GB usati');
+
+    setText('kpi-cpu-value', sys.cpu_percent + '%');
+    setColor('kpi-cpu-value', sys.cpu_percent > 80 ? 'var(--danger)' : 'var(--accent-primary)');
+
+    setText('kpi-users-value', kpis.users_count);
+    setText('kpi-users-sub', kpis.active_users + ' Utenti Attivi');
+
+    setText('kpi-feedback-value', kpis.unread_feedback);
+    setColor('kpi-feedback-value', kpis.unread_feedback > 0 ? 'var(--warning)' : 'var(--success)');
+
+    const gcr = kpis.goal_completion_rate;
+    setText('kpi-gcr-value', gcr !== null ? gcr + '%' : 'N/D');
+    setText('kpi-gcr-sub', gcr !== null ? 'Risoluzione automatica' : 'Dati in raccolta...');
+
+    const fb = kpis.fallback_rate;
+    setText('kpi-fallback-value', fb !== null ? fb + '%' : 'N/D');
+    setColor('kpi-fallback-value', fb !== null && fb > 5 ? 'var(--danger)' : (fb !== null ? 'var(--warning)' : '#aaa'));
+    setText('kpi-fallback-sub', fb !== null ? 'Mancata comprensione intenti' : 'Dati in raccolta...');
+
+    setText('kpi-msgperuser-value', kpis.avg_msg_per_user);
+    setText('kpi-costmonth-value', '$' + kpis.cost_month);
+    setText('kpi-costtotal-sub', 'Costo totale: $' + kpis.cost_total);
+}
+
+function updateUsageChart(kpis) {
+    if (!window.usageChart) return;
+    window.usageChart.data.labels = kpis.chart_labels;
+    window.usageChart.data.datasets[0].data = kpis.chart_prompt;
+    window.usageChart.data.datasets[1].data = kpis.chart_completion;
+    window.usageChart.data.datasets[2].data = kpis.chart_total;
+    window.usageChart.update();
+}
+
+function updateAnalyticsChartsIfInitialized() {
+    // I tre grafici del tab "Token Analytics" sono creati pigramente alla prima
+    // apertura del tab (initializeAnalyticsCharts): se l'admin non l'ha ancora
+    // aperto in questa sessione, le istanze non esistono e non c'è nulla da
+    // aggiornare finché non lo apre (a quel punto si inizializzano con i dati già freschi).
+    const operations = Object.keys(analyticsData.token_stats);
+
+    if (window.requestsChartInstance) {
+        const requestsData = {};
+        for (const op of operations) {
+            requestsData[op] = { free: 0, pro: 0 };
+            for (const date in analyticsData.requests_by_operation[op] || {}) {
+                requestsData[op].free += analyticsData.requests_by_operation[op][date].free || 0;
+                requestsData[op].pro += analyticsData.requests_by_operation[op][date].pro || 0;
+            }
+        }
+        window.requestsChartInstance.data.labels = operations;
+        window.requestsChartInstance.data.datasets[0].data = operations.map(op => requestsData[op].free);
+        window.requestsChartInstance.data.datasets[1].data = operations.map(op => requestsData[op].pro);
+        window.requestsChartInstance.update();
+    }
+    if (window.tokenStatsChartInstance) {
+        window.tokenStatsChartInstance.data.labels = operations;
+        window.tokenStatsChartInstance.data.datasets[0].data = operations.map(op => analyticsData.token_stats[op]?.free || 0);
+        window.tokenStatsChartInstance.data.datasets[1].data = operations.map(op => analyticsData.token_stats[op]?.pro || 0);
+        window.tokenStatsChartInstance.update();
+    }
+    if (window.conversionChartInstance) {
+        window.conversionChartInstance.data.labels = operations;
+        window.conversionChartInstance.data.datasets[0].data = operations.map(op => analyticsData.conversion_rates[op]?.free || 0);
+        window.conversionChartInstance.data.datasets[1].data = operations.map(op => analyticsData.conversion_rates[op]?.pro || 0);
+        window.conversionChartInstance.update();
+    }
+}
+
+function updateSourceBreakdown(sourceBreakdown) {
+    if (!sourceBreakdown) return;
+    const setText = (id, val) => { const el = document.getElementById(id); if (el) el.textContent = val; };
+    setText('src-telegram-requests', sourceBreakdown.telegram.requests);
+    setText('src-telegram-tokens', sourceBreakdown.telegram.total_tokens + ' token · $' + sourceBreakdown.telegram.cost_usd);
+    setText('src-webapp-requests', sourceBreakdown.webapp.requests);
+    setText('src-webapp-tokens', sourceBreakdown.webapp.total_tokens + ' token · $' + sourceBreakdown.webapp.cost_usd);
+}
+
+function updateInputMethodTable(inputMethodBreakdown) {
+    const tbody = document.getElementById('inputMethodTableBody');
+    if (!tbody || !inputMethodBreakdown) return;
+    const methods = Object.keys(inputMethodBreakdown);
+    if (!methods.length) {
+        tbody.innerHTML = '<tr><td colspan="3" style="text-align:center; color: var(--text-secondary);">Nessun dato</td></tr>';
+        return;
+    }
+    tbody.innerHTML = methods.map(method => {
+        const d = inputMethodBreakdown[method];
+        return `<tr><td><code>${method}</code></td><td>${d.requests}</td><td>${d.total_tokens}</td></tr>`;
+    }).join('');
+}
+
+function updateProviderCostTable(providerCostBreakdown) {
+    const tbody = document.getElementById('providerCostTableBody');
+    if (!tbody || !providerCostBreakdown) return;
+    const rows = providerCostBreakdown.rows || [];
+    if (!rows.length) {
+        tbody.innerHTML = '<tr><td colspan="6" style="text-align:center; color: var(--text-secondary);">Nessun dato</td></tr>';
+        return;
+    }
+    tbody.innerHTML = rows.map(r => `
+        <tr>
+            <td><code>${r.provider}</code></td>
+            <td style="font-size:0.8rem; color: var(--text-secondary);">${r.model}</td>
+            <td>${r.requests}</td>
+            <td>${r.total_tokens}</td>
+            <td>$${r.cost_usd}</td>
+            <td>${r.cost_share_pct}%</td>
+        </tr>`).join('');
+}
+
+// ---------------------------------------------------------------------------
+// Selettore periodo per il grafico "Consumo Token LLM": 10gg/1mese/2mesi/N a
+// scelta. currentUsageChartDays è anche riusato dall'auto-refresh periodico,
+// così il grafico continua ad aggiornarsi sul periodo scelto dall'admin.
+// ---------------------------------------------------------------------------
+let currentUsageChartDays = 10;
+
+function _periodLabel(days) {
+    if (days === 10) return '10 Giorni';
+    if (days === 30) return '1 Mese';
+    if (days === 60) return '2 Mesi';
+    return days + ' Giorni';
+}
+
+function _setActivePeriodButton(days) {
+    document.querySelectorAll('.period-btn[data-days]').forEach(btn => {
+        btn.classList.toggle('active', parseInt(btn.dataset.days, 10) === days);
+    });
+}
+
+function _fetchUsageChartPeriod(days) {
+    currentUsageChartDays = days;
+    _setActivePeriodButton(days);
+    const label = document.getElementById('usageChartPeriodLabel');
+    if (label) label.textContent = _periodLabel(days) + ' — caricamento...';
+    fetch('/admin/api/overview?days=' + encodeURIComponent(days))
+        .then(r => r.json())
+        .then(data => {
+            updateUsageChart(data.kpis);
+            if (label) label.textContent = _periodLabel(days);
+        })
+        .catch(() => { if (label) label.textContent = _periodLabel(days) + ' — errore caricamento'; });
+}
+
+function setUsageChartPeriod(days) {
+    _fetchUsageChartPeriod(days);
+}
+
+function setUsageChartPeriodCustom() {
+    const input = document.getElementById('usageChartCustomDays');
+    const days = parseInt(input?.value, 10);
+    if (!days || days < 1) return;
+    _fetchUsageChartPeriod(Math.min(days, 180));
+}
+
+function refreshOverview() {
+    fetch('/admin/api/overview?days=' + encodeURIComponent(currentUsageChartDays))
+        .then(r => r.json())
+        .then(data => {
+            applyKpis(data.kpis, data.sys);
+            updateUsageChart(data.kpis);
+            updateSourceBreakdown(data.source_breakdown);
+            updateInputMethodTable(data.input_method_breakdown);
+            updateProviderCostTable(data.provider_cost_breakdown);
+            analyticsData = data.analytics_data;
+            updateAnalyticsChartsIfInitialized();
+            populateAnalyticsTable();
+            updateAnalyticsStats();
+            // Ricarica anche la tabella consumo per utente, ignorando il flag
+            // "già caricata" che serve solo al primo popolamento del tab.
+            const tbody = document.getElementById('userTokenTableBody');
+            if (tbody) { delete tbody.dataset.loaded; }
+            loadUserTokenTable();
+
+            const indicator = document.getElementById('kpi-refresh-indicator');
+            if (indicator) {
+                const now = new Date();
+                indicator.textContent = '· aggiornato alle ' + now.toLocaleTimeString('it-IT');
+            }
+        })
+        .catch(() => {
+            const indicator = document.getElementById('kpi-refresh-indicator');
+            if (indicator) indicator.textContent = '· aggiornamento fallito';
+        });
+}
+
+document.addEventListener('DOMContentLoaded', () => _setActivePeriodButton(10));
+setInterval(refreshOverview, REFRESH_INTERVAL_MS);
 </script>
 {% endblock %}

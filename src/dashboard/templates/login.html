@@ -95,6 +95,32 @@
             transition: border-color .2s, box-shadow .2s;
         }
         input::placeholder { color: #B0B5B9; font-weight: 400; }
+
+        /* Riga "Ricordami": la checkbox non deve ereditare lo stile globale di input */
+        .remember {
+            display: flex;
+            align-items: center;
+            gap: 9px;
+            margin-bottom: 20px;
+            cursor: pointer;
+        }
+        .remember input[type="checkbox"] {
+            width: 18px;
+            height: 18px;
+            margin: 0;
+            padding: 0;
+            border-radius: 5px;
+            accent-color: #1A3673;
+            cursor: pointer;
+            flex: none;
+        }
+        .remember span {
+            font-size: 13px;
+            font-weight: 500;
+            color: #1A3673;
+            letter-spacing: 0;
+            text-transform: none;
+        }
         input:focus {
             border-color: #1A3673;
             box-shadow: 0 0 0 3px rgba(26, 54, 115, 0.08);
@@ -177,6 +203,12 @@
                     <label>Password</label>
                     <input type="password" name="password" placeholder="••••••••" required {% if admin_mode %}autofocus{% endif %}>
                 </div>
+                {% if not admin_mode %}
+                <label class="remember">
+                    <input type="checkbox" name="remember" value="1" checked>
+                    <span>Ricordami su questo dispositivo</span>
+                </label>
+                {% endif %}
                 <button type="submit">Accedi →</button>
             </form>
 

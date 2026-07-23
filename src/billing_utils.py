@@ -65,3 +65,32 @@ def get_next_billing_date(last_billed: date | str | None, sub_type: str | None) 
         next_date = last_date.replace(year=year, month=month, day=day)
 
     return next_date
+
+
+def get_monthly_equivalent(amount: float | None, sub_type: str | None) -> float:
+    """Converte l'importo di un abbonamento nel costo mensile equivalente.
+
+    Un abbonamento semestrale da 271€ costa in media 271/6 = 45.17€/mese,
+    non 271€/mese. Usa la stessa classificazione di periodicità di
+    get_next_billing_date per restare coerente col resto del modulo.
+    """
+    if amount is None:
+        return 0.0
+
+    sub_type_lower = (sub_type or "monthly").lower()
+
+    if sub_type_lower in ("yearly", "annuale", "annual"):
+        period_months = 12.0
+    elif sub_type_lower in ("weekly", "settimanale"):
+        period_months = 7 / 30.44
+    elif sub_type_lower in ("bi-mensile", "bimensile", "bimestrale", "bimonthly"):
+        period_months = 2.0
+    elif sub_type_lower in ("trimestrale", "quarterly"):
+        period_months = 3.0
+    elif sub_type_lower in ("semestrale", "semi-annual", "semiannual", "biannual"):
+        period_months = 6.0
+    else:
+        # Default: mensile
+        period_months = 1.0
+
+    return float(amount) / period_months

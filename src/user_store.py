@@ -8,6 +8,8 @@ import hashlib
 import logging
 import os
 import uuid
+from contextlib import contextmanager
+from dataclasses import dataclass, field
 from datetime import datetime, date, timedelta
 import secrets
 import string
@@ -31,6 +33,7 @@ from sqlalchemy import (
     JSON,
     func,
     create_engine,
+    inspect,
     text,
     types,
 )
@@ -42,6 +45,48 @@ def _get_fernet() -> Fernet:
     secret = os.environ.get("FLASK_SECRET_KEY", "")
     key = base64.urlsafe_b64encode(hashlib.sha256(secret.encode()).digest())
     return Fernet(key)
+
+
+# ---------------------------------------------------------------------------
+# Report di riconciliazione categorie (cache Postgres ↔ Notion)
+# ---------------------------------------------------------------------------
+
+# Nome della categoria di fallback su cui riassegnare spese/abbonamenti quando
+# una categoria con record dipendenti viene rimossa da Notion.
+FALLBACK_CATEGORY_NAME = "Altro"
+
+
+@dataclass
+class CategoryReassignment:
+    """Record di una riassegnazione forzata a `Altro` durante la riconciliazione."""
+
+    category_name: str
+    moved_expenses: int
+    moved_subscriptions: int
+
+
+@dataclass
+class ReconcileReport:
+    """Esito di `reconcile_user_categories`.
+
+    `deleted_categories` elenca i nomi rimossi dalla cache; `reassignments` elenca
+    le categorie che avevano record dipendenti spostati su `Altro` prima della
+    cancellazione (il chiamante usa questo per notificare l'utente).
+    """
+
+    deleted_categories: list[str] = field(default_factory=list)
+    reassignments: list["CategoryReassignment"] = field(default_factory=list)
+    # Numero di categorie scaricate/aggiornate da Notion nell'upsert che precede
+    # la riconciliazione (retro-compatibile col vecchio valore di ritorno int).
+    synced_count: int = 0
+
+    @property
+    def has_reassignments(self) -> bool:
+        return bool(self.reassignments)
+
+    @property
+    def changed(self) -> bool:
+        return bool(self.deleted_categories or self.reassignments)
 
 
 # ---------------------------------------------------------------------------
@@ -163,6 +208,12 @@ class User(Base):
     email = Column(String, nullable=True, unique=True)
     password_hash = Column(String, nullable=True)
 
+    # Versione della sessione: incrementata per invalidare tutte le sessioni
+    # attive dell'utente (cambio password, "esci da tutti i dispositivi"). Il
+    # valore viene salvato nel cookie di sessione al login e confrontato ad ogni
+    # richiesta: se non combacia più, la sessione è considerata revocata.
+    token_version = Column(Integer, default=0, nullable=False)
+
     # Backend di storage
     storage_backend = Column(String, default="notion", nullable=False)
 
@@ -191,6 +242,13 @@ class User(Base):
 
     # Flag demo data — True se l'utente ha caricato dati fittizi da esplorare
     has_demo_data = Column(Boolean, default=False, nullable=False)
+
+    # Stato tour guidato webapp (10 step demo, vedi frontend/src/context/TourContext.tsx).
+    # Prima non era persistito da nessuna parte (solo localStorage del browser): questi
+    # campi arrivano da /api/track lato server, quando l'utente ha una sessione valida.
+    tour_step = Column(String, nullable=True)          # ultimo step id raggiunto
+    tour_status = Column(String, nullable=True)        # 'in_progress'|'completed'|'skipped'
+    tour_completed_at = Column(DateTime, nullable=True)
 
     def __repr__(self):
         return f"<User(chat_id={self.chat_id}, username='{self.username}')>"
@@ -387,6 +445,12 @@ class LlmUsageEvent(Base):
     provider = Column(String, nullable=False)
     model = Column(String, nullable=False)
     operation = Column(String, nullable=False)
+    # Modalità di input dell'utente: 'text'|'voice'|'photo'. NULL sulle righe
+    # storiche precedenti a questa colonna (non retroattivo: non era catturata
+    # prima). Serve a distinguere testo/voce/foto nei grafici admin, cosa che
+    # 'operation' da sola non permette (es. 'expense_parse' mescola testo e foto,
+    # 'chat_parse' lato webapp mescola tutte e tre le modalità).
+    input_method = Column(String, nullable=True)
     prompt_tokens = Column(Integer, nullable=False, default=0)
     completion_tokens = Column(Integer, nullable=False, default=0)
     total_tokens = Column(Integer, nullable=False, default=0)
@@ -428,11 +492,100 @@ class TallyLead(Base):
     synced_to_brevo       = Column(Boolean, default=False, nullable=False)
     beta_account_granted    = Column(Boolean, default=False, nullable=False)
     beta_account_granted_at = Column(DateTime, nullable=True)
+    # Referral: codice opaco assegnato a questo lead (usabile come referrer da altri) e,
+    # se questo lead è arrivato tramite un link di invito, il codice di chi lo ha invitato.
+    referral_code                  = Column(String, unique=True, index=True, nullable=True)
+    referred_by_code                = Column(String, index=True, nullable=True)
+    # Sbloccato quando questo lead (come referrer) accumula 3 referred lead: da onorare
+    # quando il flusso di acquisto Lifetime Founder (oggi solo marketing) verrà costruito.
+    lifetime_founder_guaranteed     = Column(Boolean, default=False, nullable=False)
+    lifetime_founder_guaranteed_at  = Column(DateTime, nullable=True)
+
+
+class ReferralReward(Base):
+    """Reward Pro (60gg) da un referral: uno per il 'referred', uno (a occorrenza
+    singola) per il 'referrer' — il tetto massimo per il referrer è fisso a
+    days_granted indipendentemente dal numero di persone invitate.
+    """
+    __tablename__ = "referral_rewards"
+
+    id                   = Column(Integer, primary_key=True, autoincrement=True)
+    beneficiary_email    = Column(String, nullable=False, index=True)
+    beneficiary_chat_id  = Column(String, nullable=True)
+    role                 = Column(String, nullable=False)  # 'referrer' | 'referred'
+    days_granted         = Column(Integer, nullable=False, default=60)
+    source_tally_lead_id = Column(Integer, ForeignKey("tally_leads.id"), nullable=True)
+    status               = Column(String, nullable=False, default="pending")  # 'pending'|'applied'
+    created_at           = Column(DateTime, default=datetime.utcnow)
+    applied_at           = Column(DateTime, nullable=True)
+
+
+class JobRun(Base):
+    """Esito di un'esecuzione di job schedulato, per il monitoraggio in dashboard.
+
+    Tabella operativa (nessun dato personale): registra ogni esecuzione dei job
+    APScheduler (via listener EVENT_JOB_EXECUTED/ERROR/MISSED) e dei job di sistema
+    (es. backup pg_dump, che vi scrive il proprio exit code reale). Consente alla
+    dashboard admin di sapere se i job di oggi sono girati e con che esito, e di
+    rilevare i "no-show" (job attesi ma mai eseguiti).
+
+    `error_text` non contiene mai dati liberi utente: solo tipo/messaggio di
+    eccezione, coerente con le regole di logging del progetto.
+    """
+    __tablename__ = "job_runs"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    job_id = Column(String, nullable=False, index=True)        # id logico del job
+    trigger_type = Column(String, nullable=True)               # 'cron'|'interval'|'manual'|'system'
+    scheduled_at = Column(DateTime, nullable=True)             # orario previsto (se noto)
+    started_at = Column(DateTime, nullable=True)
+    finished_at = Column(DateTime, nullable=False, default=datetime.utcnow, index=True)
+    status = Column(String, nullable=False)                    # 'success'|'error'|'missed'
+    duration_ms = Column(Integer, nullable=True)
+    return_code = Column(Integer, nullable=True)               # solo job-processo (es. backup)
+    error_text = Column(String, nullable=True)                 # breve, senza dati sensibili
+
+    __table_args__ = (
+        Index("ix_job_runs_job_finished", "job_id", "finished_at"),
+    )
+
+
+class TxEvent(Base):
+    """Esito di un tentativo di registrazione transazione (spesa/entrata/trasferimento).
+
+    Rispecchia in Postgres gli eventi già inviati a PostHog via `analytics.track`
+    (`expense_tracked` / `expense_tracking_failed`), così la dashboard admin può
+    interrogarli senza dipendere dal vendor esterno. "Successo" = l'utente ha
+    cliccato Conferma e la transazione è stata salvata (`outcome='confirmed'`).
+
+    Cross-canale: `source` distingue Telegram e webapp. `reason` è breve e senza
+    dati liberi utente (stessi valori già usati per PostHog: 'user_cancelled',
+    'no_account', 'ai_unavailable', 'save_error').
+    """
+    __tablename__ = "tx_events"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    chat_id = Column(String, ForeignKey("users.chat_id"), nullable=False, index=True)
+    occurred_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
+    tx_type = Column(String, nullable=False)         # 'expense'|'income'|'transfer'|'unknown'
+    input_method = Column(String, nullable=False)    # 'text'|'voice'|'photo'|'button'
+    outcome = Column(String, nullable=False)         # 'confirmed'|'cancelled'|'failed'
+    source = Column(String, nullable=False)          # 'telegram'|'webapp'
+    reason = Column(String, nullable=True)           # solo per cancelled/failed
+
+    __table_args__ = (
+        Index("ix_tx_events_type_method_occurred", "tx_type", "input_method", "occurred_at"),
+    )
 
 
 # 5. IL MANAGER DEL DATABASE
 class UserStore:
-    def __init__(self, db_url="sqlite:///users.db"):
+    def __init__(
+        self,
+        db_url="sqlite:///users.db",
+        pool_size: int = 5,
+        max_overflow: int = 10,
+    ):
         # create_engine è il "motore" che parla col database fisico
         engine_kwargs = {}
         if db_url.startswith("sqlite"):
@@ -445,14 +598,79 @@ class UserStore:
                 # multi-thread dei job.
                 from sqlalchemy.pool import StaticPool
                 engine_kwargs["poolclass"] = StaticPool
+        else:
+            # pool_size/max_overflow espliciti: bot e dashboard aprono ciascuno il proprio
+            # engine verso lo stesso Postgres (max_connections condiviso e limitato sulla
+            # VPS) — vanno dimensionati per processo, non lasciati al default SQLAlchemy
+            # (5+10), altrimenti la somma dei pool di più processi rischia di saturare
+            # Postgres da sola. pool_pre_ping evita di riusare connessioni cadute in
+            # silenzio (timeout di rete/Postgres) su una VPS piccola.
+            engine_kwargs["pool_size"] = pool_size
+            engine_kwargs["max_overflow"] = max_overflow
+            engine_kwargs["pool_pre_ping"] = True
         self.engine = create_engine(db_url, **engine_kwargs)
         # sessionmaker crea le "sessioni" di lavoro (come aprire una transazione)
         self.Session = sessionmaker(bind=self.engine, expire_on_commit=False)
-        # Questa riga crea fisicamente le tabelle se non esistono ancora
-        Base.metadata.create_all(self.engine)
-        self._ensure_sqlite_schema()
+
+        # DDL a runtime (create_all + migrazioni colonne) — gestione dei privilegi:
+        # su SQLite (dev/test) gira sempre, non c'è separazione di ruoli né Alembic.
+        # Su Postgres gira SOLO se RUN_RUNTIME_MIGRATIONS=true: in produzione il
+        # runtime usa un ruolo DML-only senza privilegi DDL, e lo schema lo gestisce
+        # esclusivamente Alembic. Vedi deployment documentation e development documentation.
+        is_sqlite = self.engine.dialect.name == "sqlite"
+        run_runtime_ddl = is_sqlite or os.getenv("RUN_RUNTIME_MIGRATIONS", "false").lower() == "true"
+        if run_runtime_ddl:
+            # Questa riga crea fisicamente le tabelle se non esistono ancora
+            Base.metadata.create_all(self.engine)
+            self._ensure_sqlite_schema()
+        else:
+            logger.info("DDL a runtime disattivato (RUN_RUNTIME_MIGRATIONS=false): schema gestito da Alembic.")
         self._seed_default_pricing()
+        # Engine OWNER (bypassa RLS) costruito on-demand: usato SOLO per le rare
+        # operazioni cross-tenant che la RLS non può soddisfare (vedi _owner_session).
+        self._owner_engine = None
+        self._owner_Session = None
         logger.info(f"UserStore inizializzato correttamente.")
+
+    @contextmanager
+    def _user_session(self, user_id: str):
+        """Sessione bindata al tenant `user_id`: imposta app.user_id per la RLS.
+
+        Va usata da tutti i metodi che toccano le tabelle finanziarie (Option A:
+        la RLS vincola anche il layer UserStore). No-op su SQLite. Fail-closed: se
+        un metodo dimentica di usarla, sotto RLS non vede righe invece di leggere
+        quelle di altri utenti.
+        """
+        from src.storage import rls
+        session = self.Session()
+        rls.bind_user(session, user_id)
+        try:
+            yield session
+        finally:
+            session.close()
+
+    @contextmanager
+    def _owner_session(self):
+        """Sessione col ruolo OWNER che BYPASSA la RLS. Superficie deliberatamente
+        minima: usarla SOLO per operazioni cross-tenant impossibili sotto RLS
+        (es. reassign_user_chat_id, old→new user_id). Mai per flussi per-utente.
+
+        In prod usa MIGRATION_DATABASE_URL (ruolo owner); in dev/sqlite ricade
+        sull'engine applicativo (stesso ruolo, nessuna separazione).
+        """
+        if self._owner_Session is None:
+            owner_url = os.getenv("MIGRATION_DATABASE_URL", "")
+            if owner_url and self.engine.dialect.name != "sqlite":
+                self._owner_engine = create_engine(owner_url)
+                self._owner_Session = sessionmaker(bind=self._owner_engine, expire_on_commit=False)
+            else:
+                # Nessun ruolo owner separato (dev/sqlite): riusa l'engine applicativo.
+                self._owner_Session = self.Session
+        session = self._owner_Session()
+        try:
+            yield session
+        finally:
+            session.close()
 
     def _next_cycle_reset(self, now: datetime) -> datetime:
         next_month = now.month % 12 + 1
@@ -533,6 +751,7 @@ class UserStore:
             "setup_completed_at": "DATETIME",
             "email": "TEXT",
             "password_hash": "TEXT",
+            "token_version": "INTEGER DEFAULT 0",
             "pinned_dashboard_msg_id": "INTEGER",
         }
 
@@ -867,7 +1086,13 @@ class UserStore:
             return True
 
     def update_password(self, chat_id: str, new_password: str) -> bool:
-        """Aggiorna solo l'hash della password di un utente già registrato. Ritorna False se l'utente non esiste."""
+        """Aggiorna l'hash della password di un utente già registrato.
+
+        Incrementa anche `token_version` per invalidare tutte le sessioni esistenti:
+        un cambio password deve sloggare ovunque (standard di sicurezza). Il device
+        che effettua il cambio dovrà riallineare la propria sessione al nuovo valore.
+        Ritorna False se l'utente non esiste.
+        """
         chat_id = str(chat_id)
         hashed = hash_password(new_password)
         with self.Session() as session:
@@ -875,8 +1100,38 @@ class UserStore:
             if not user:
                 return False
             user.password_hash = hashed
+            user.token_version = (user.token_version or 0) + 1
             session.commit()
             return True
+
+    def get_token_version(self, chat_id: str) -> int | None:
+        """Ritorna la `token_version` corrente dell'utente, o None se non esiste."""
+        chat_id = str(chat_id)
+        with self.Session() as session:
+            row = (
+                session.query(User.token_version)
+                .filter(User.chat_id == chat_id)
+                .first()
+            )
+            if row is None:
+                return None
+            return row[0] or 0
+
+    def bump_token_version(self, chat_id: str) -> int | None:
+        """Incrementa `token_version` per revocare tutte le sessioni dell'utente.
+
+        Usato da "esci da tutti i dispositivi". Ritorna il nuovo valore, o None
+        se l'utente non esiste.
+        """
+        chat_id = str(chat_id)
+        with self.Session() as session:
+            user = session.query(User).filter(User.chat_id == chat_id).first()
+            if not user:
+                return None
+            user.token_version = (user.token_version or 0) + 1
+            new_version = user.token_version
+            session.commit()
+            return new_version
 
     def get_user_by_email(self, email: str) -> User | None:
         """Cerca un utente attivo per email (case-insensitive)."""
@@ -961,7 +1216,10 @@ class UserStore:
         if old_chat_id == new_chat_id:
             return False
 
-        with self.Session() as session:
+        # BYPASS RLS CHIRURGICO: operazione cross-tenant (sposta righe da old→new
+        # user_id) impossibile sotto RLS con WITH CHECK. Unico uso di _owner_session
+        # nei flussi per-utente; query rigorosamente parametrizzate. Vedi Option A.
+        with self._owner_session() as session:
             user = session.query(User).filter(User.chat_id == old_chat_id).first()
             if not user:
                 return False
@@ -1179,12 +1437,17 @@ class UserStore:
             ).all()
 
     def get_active_postgres_users(self) -> list:
-        """Ritorna tutti gli utenti attivi con storage_backend Postgres."""
+        """Ritorna tutti gli utenti attivi con storage_backend Postgres.
+
+        Il flow di onboarding beta (create_beta_account) imposta setup_status
+        a "COMPLETED" invece di "DONE" (usato dal flow Notion) — accettiamo
+        entrambi i valori per non escludere gli utenti Postgres dai job.
+        """
         with self.Session() as session:
             return session.query(User).filter(
                 User.is_active == True,
                 User.storage_backend == "postgres",
-                User.setup_status == "DONE",
+                User.setup_status.in_(["DONE", "COMPLETED"]),
             ).all()
 
     def get_pro_users(self) -> list[User]:
@@ -1207,13 +1470,34 @@ class UserStore:
         from src.storage.models import UserCategory, UserCategoryNotionLink
         user_id = str(user_id)
         now = datetime.utcnow()
-        with self.Session() as session:
+        with self._user_session(user_id) as session:
             for cat in categories:
-                # Upsert user_categories (solo dati base 3NF)
-                cat_row = session.query(UserCategory).filter_by(
-                    user_id=user_id, name=cat["name"]
-                ).first()
-                if not cat_row:
+                notion_page_id = cat.get("notion_page_id")
+                cat_row = None
+
+                # 1. Match per notion_page_id: gestisce i rinomini (il page_id è
+                #    stabile, il nome cambia) senza creare duplicati.
+                if notion_page_id:
+                    link = (
+                        session.query(UserCategoryNotionLink)
+                        .join(UserCategory, UserCategory.id == UserCategoryNotionLink.category_id)
+                        .filter(
+                            UserCategory.user_id == user_id,
+                            UserCategoryNotionLink.notion_page_id == notion_page_id,
+                        )
+                        .first()
+                    )
+                    if link:
+                        cat_row = session.get(UserCategory, link.category_id)
+
+                # 2. Fallback: match per nome (righe legacy senza link).
+                if cat_row is None:
+                    cat_row = session.query(UserCategory).filter_by(
+                        user_id=user_id, name=cat["name"]
+                    ).first()
+
+                # 3. Crea se non esiste.
+                if cat_row is None:
                     cat_row = UserCategory(
                         user_id=user_id,
                         name=cat["name"],
@@ -1222,11 +1506,20 @@ class UserStore:
                     session.add(cat_row)
                     session.flush()  # ottieni l'id
                 else:
+                    # Rinomina: aggiorna il nome evitando la collisione col vincolo
+                    # unique (user_id, name). Se esiste già una riga col nuovo nome,
+                    # si fondono (i dipendenti passano alla riga corrente).
+                    if cat_row.name != cat["name"]:
+                        dup = session.query(UserCategory).filter_by(
+                            user_id=user_id, name=cat["name"]
+                        ).first()
+                        if dup is not None and dup.id != cat_row.id:
+                            self._merge_category_into(session, user_id, cat_row, dup)
+                        cat_row.name = cat["name"]
                     if cat.get("monthly_budget") is not None:
                         cat_row.monthly_budget = cat["monthly_budget"]
 
                 # Upsert user_category_notion_links se ci sono metadati Notion
-                notion_page_id = cat.get("notion_page_id")
                 if notion_page_id:
                     link = session.query(UserCategoryNotionLink).filter_by(
                         category_id=cat_row.id
@@ -1240,10 +1533,144 @@ class UserStore:
 
             session.commit()
 
+    @staticmethod
+    def _merge_category_into(session, user_id: str, keep, dup) -> None:
+        """Fonde la categoria `dup` in `keep`: sposta i record dipendenti e la elimina.
+
+        Serve quando un rinomina su Notion porta il nome a collidere con un'altra
+        riga esistente (caso limite). I metadati Notion di `keep` restano quelli
+        authoritative.
+        """
+        from src.storage.models import Expense, Subscription, UserCategoryNotionLink
+
+        session.query(Expense).filter_by(user_id=user_id, category_id=dup.id).update(
+            {"category_id": keep.id}, synchronize_session=False
+        )
+        session.query(Subscription).filter_by(user_id=user_id, category_id=dup.id).update(
+            {"category_id": keep.id}, synchronize_session=False
+        )
+        dup_link = session.query(UserCategoryNotionLink).filter_by(category_id=dup.id).first()
+        if dup_link is not None:
+            session.delete(dup_link)
+        session.delete(dup)
+        session.flush()
+        logger.warning(
+            "[Categories] Rinomina con collisione: fusa categoria duplicata id=%s in id=%s per %s.",
+            dup.id, keep.id, user_id,
+        )
+
+    def reconcile_user_categories(self, user_id: str, valid_page_ids: set) -> "ReconcileReport":
+        """Allinea `user_categories` allo stato corrente di Notion.
+
+        Cancella dalla cache le categorie il cui `notion_page_id` non è più tra i
+        `valid_page_ids` (cioè sono state rimosse/archiviate su Notion). Le categorie
+        con spese/abbonamenti dipendenti vengono prima riassegnate alla categoria di
+        fallback `Altro` (creata se assente), poi cancellate.
+
+        IMPORTANTE: il chiamante deve invocare questo metodo SOLO dopo un fetch Notion
+        andato a buon fine — altrimenti un errore transitorio azzererebbe la cache.
+
+        Ritorna un `ReconcileReport` con le cancellazioni e le riassegnazioni.
+        """
+        from src.storage.models import (
+            UserCategory,
+            UserCategoryNotionLink,
+            Expense,
+            Subscription,
+        )
+
+        user_id = str(user_id)
+        valid = set(valid_page_ids or [])
+        report = ReconcileReport()
+
+        with self._user_session(user_id) as session:
+            rows = (
+                session.query(UserCategory, UserCategoryNotionLink)
+                .join(
+                    UserCategoryNotionLink,
+                    UserCategoryNotionLink.category_id == UserCategory.id,
+                )
+                .filter(UserCategory.user_id == user_id)
+                .all()
+            )
+
+            fallback_row = None  # risolta pigramente solo se serve
+
+            for cat, link in rows:
+                # Solo le categorie mappate a Notion sono soggette a riconciliazione.
+                if link is None or link.notion_page_id is None:
+                    continue
+                if link.notion_page_id in valid:
+                    continue
+
+                cat_id = cat.id
+                cat_name = cat.name
+
+                expenses = session.query(Expense).filter_by(
+                    user_id=user_id, category_id=cat_id
+                ).all()
+                subs = session.query(Subscription).filter_by(
+                    user_id=user_id, category_id=cat_id
+                ).all()
+
+                if expenses or subs:
+                    # Non cancellare il fallback stesso: farebbe da rete di sicurezza
+                    # per i propri dipendenti. Lo si mantiene.
+                    if cat_name == FALLBACK_CATEGORY_NAME:
+                        logger.warning(
+                            "[Reconcile] '%s' con dipendenti è fuori da Notion ma è il "
+                            "fallback: mantenuta per %s.", cat_name, user_id,
+                        )
+                        continue
+
+                    if fallback_row is None:
+                        fallback_row = self._ensure_fallback_category(session, user_id)
+                    # Evita di riassegnare al fallback se coincide (paranoia).
+                    if fallback_row.id != cat_id:
+                        for e in expenses:
+                            e.category_id = fallback_row.id
+                        for sub in subs:
+                            sub.category_id = fallback_row.id
+                        report.reassignments.append(
+                            CategoryReassignment(
+                                category_name=cat_name,
+                                moved_expenses=len(expenses),
+                                moved_subscriptions=len(subs),
+                            )
+                        )
+                        session.flush()
+
+                session.delete(link)
+                session.delete(cat)
+                report.deleted_categories.append(cat_name)
+
+            if report.changed:
+                session.commit()
+                logger.info(
+                    "[Reconcile] %s: rimosse %d categorie fantasma, %d riassegnazioni.",
+                    user_id, len(report.deleted_categories), len(report.reassignments),
+                )
+
+        return report
+
+    @staticmethod
+    def _ensure_fallback_category(session, user_id: str):
+        """Ritorna la categoria di fallback `Altro` dell'utente, creandola se assente."""
+        from src.storage.models import UserCategory
+
+        row = session.query(UserCategory).filter_by(
+            user_id=user_id, name=FALLBACK_CATEGORY_NAME
+        ).first()
+        if row is None:
+            row = UserCategory(user_id=user_id, name=FALLBACK_CATEGORY_NAME)
+            session.add(row)
+            session.flush()
+        return row
+
     def get_user_category_names(self, user_id: str) -> list[str]:
         """Ritorna i nomi delle categorie dell'utente."""
         user_id = str(user_id)
-        with self.Session() as session:
+        with self._user_session(user_id) as session:
             rows = session.execute(
                 text("SELECT name FROM user_categories WHERE user_id = :uid ORDER BY name"),
                 {"uid": user_id},
@@ -1253,7 +1680,7 @@ class UserStore:
     def get_category_by_notion_page_id(self, user_id: str, page_id: str) -> dict:
         """Ritorna {name, average} per un page_id Notion. Fallback su Sconosciuta."""
         user_id = str(user_id)
-        with self.Session() as session:
+        with self._user_session(user_id) as session:
             row = session.execute(
                 text(
                     "SELECT uc.name, ucnl.average "
@@ -1270,7 +1697,7 @@ class UserStore:
     def get_notion_page_id_for_category(self, user_id: str, name: str) -> Optional[str]:
         """Ritorna il notion_page_id per un nome categoria. None se non trovato."""
         user_id = str(user_id)
-        with self.Session() as session:
+        with self._user_session(user_id) as session:
             row = session.execute(
                 text(
                     "SELECT ucnl.notion_page_id "
@@ -1299,7 +1726,7 @@ class UserStore:
     def update_category_average(self, user_id: str, category_name: str, new_average: float) -> None:
         """Aggiorna la media storica per una singola categoria in user_category_notion_links."""
         user_id = str(user_id)
-        with self.Session() as session:
+        with self._user_session(user_id) as session:
             session.execute(
                 text(
                     "UPDATE user_category_notion_links "
@@ -1352,7 +1779,7 @@ class UserStore:
         nel DB locale (user_categories + user_category_notion_links).
         """
         user_id = str(user_id)
-        with self.Session() as session:
+        with self._user_session(user_id) as session:
             rows = session.execute(
                 text(
                     "SELECT uc.name, uc.monthly_budget, ucnl.average "
@@ -1373,7 +1800,7 @@ class UserStore:
         `average` viene da `user_category_notion_links` (None per categorie senza link Notion).
         """
         user_id = str(user_id)
-        with self.Session() as session:
+        with self._user_session(user_id) as session:
             rows = session.execute(
                 text(
                     "SELECT uc.name, ucnl.average "
@@ -1559,6 +1986,8 @@ class UserStore:
         tally_submission_id: str,
         email: Optional[str],
         raw_payload: str,
+        referral_code: Optional[str] = None,
+        referred_by_code: Optional[str] = None,
     ) -> tuple["TallyLead", bool]:
         """Salva un submit del form Tally in modo idempotente su tally_submission_id.
 
@@ -1578,11 +2007,199 @@ class UserStore:
                 tally_submission_id=tally_submission_id,
                 email=email,
                 raw_payload=raw_payload,
+                referral_code=referral_code,
+                referred_by_code=referred_by_code,
             )
             session.add(lead)
             session.commit()
             session.refresh(lead)
             return lead, True
+
+    def get_tally_lead_by_referral_code(self, referral_code: str) -> Optional["TallyLead"]:
+        """Risolve il lead Tally (referrer) a partire dal suo referral_code."""
+        with self.Session() as session:
+            return (
+                session.query(TallyLead)
+                .filter(TallyLead.referral_code == referral_code)
+                .first()
+            )
+
+    def create_referral_rewards(
+        self, lead: "TallyLead", referrer_lead: "TallyLead"
+    ) -> dict:
+        """Crea i ReferralReward per un nuovo lead 'referred' e, se non ne ha già
+        uno, per il referrer. Il referrer riceve un solo reward in assoluto
+        (tetto fisso, non additivo per numero di referral). Al 3° referral andato
+        a buon fine, marca il referrer come 'lifetime_founder_guaranteed' — e da lì
+        in poi il link smette di generare reward: i referral oltre il 3° vengono
+        comunque registrati (referred_by_code resta valorizzato, per tracciamento),
+        ma non creano più alcun ReferralReward, né per il referrer né per l'invitato.
+
+        Ritorna {'referrer_first_reward': bool, 'lifetime_founder_unlocked': bool,
+        'reward_cap_reached': bool} per permettere al chiamante di decidere quali
+        email inviare.
+        """
+        result = {
+            "referrer_first_reward": False,
+            "lifetime_founder_unlocked": False,
+            "reward_cap_reached": False,
+        }
+        if not lead.email or not referrer_lead.email:
+            return result
+
+        with self.Session() as session:
+            referred_count = (
+                session.query(TallyLead)
+                .filter(TallyLead.referred_by_code == referrer_lead.referral_code)
+                .count()
+            )
+            if referred_count > 3:
+                result["reward_cap_reached"] = True
+                return result
+
+            session.add(ReferralReward(
+                beneficiary_email=lead.email,
+                role="referred",
+                days_granted=60,
+                source_tally_lead_id=lead.id,
+                status="pending",
+            ))
+
+            existing_referrer_reward = (
+                session.query(ReferralReward)
+                .filter(
+                    ReferralReward.role == "referrer",
+                    ReferralReward.beneficiary_email == referrer_lead.email,
+                )
+                .first()
+            )
+            if not existing_referrer_reward:
+                session.add(ReferralReward(
+                    beneficiary_email=referrer_lead.email,
+                    role="referrer",
+                    days_granted=60,
+                    source_tally_lead_id=lead.id,
+                    status="pending",
+                ))
+                result["referrer_first_reward"] = True
+
+            referrer_row = (
+                session.query(TallyLead)
+                .filter(TallyLead.id == referrer_lead.id)
+                .first()
+            )
+            if referred_count >= 3 and referrer_row and not referrer_row.lifetime_founder_guaranteed:
+                referrer_row.lifetime_founder_guaranteed = True
+                referrer_row.lifetime_founder_guaranteed_at = datetime.utcnow()
+                result["lifetime_founder_unlocked"] = True
+
+            session.commit()
+            logger.info(
+                "[Referral] Reward creati per lead %s (referrer=%s)",
+                lead.id, referrer_lead.id,
+                extra={
+                    "domain": "dashboard",
+                    "event": "referral_rewards_created",
+                    "meta": {
+                        "referrer_first_reward": result["referrer_first_reward"],
+                        "lifetime_founder_unlocked": result["lifetime_founder_unlocked"],
+                    },
+                },
+            )
+            return result
+
+    def apply_pending_referral_rewards(self, email: str) -> list["ReferralReward"]:
+        """Applica i reward referral 'pending' per un'email appena diventata un
+        account reale (chat_id risolvibile). Ritorna i reward applicati con
+        successo, per permettere al chiamante di inviare le email di notifica.
+        """
+        email = (email or "").strip().lower()
+        if not email:
+            return []
+
+        user = self.get_user_by_email_any_status(email)
+        if not user:
+            return []
+
+        applied: list["ReferralReward"] = []
+        with self.Session() as session:
+            pending = (
+                session.query(ReferralReward)
+                .filter(
+                    ReferralReward.status == "pending",
+                    ReferralReward.beneficiary_email == email,
+                )
+                .all()
+            )
+            for reward in pending:
+                self.extend_trial_days(user.chat_id, reward.days_granted)
+                reward.status = "applied"
+                reward.applied_at = datetime.utcnow()
+                reward.beneficiary_chat_id = user.chat_id
+                applied.append(reward)
+            session.commit()
+            for reward in applied:
+                session.refresh(reward)
+
+        return applied
+
+    def get_or_create_referral_code(self, email: str) -> str:
+        """Risolve il referral_code di un utente a partire dalla sua email.
+
+        Normalmente l'utente ha già un TallyLead (arrivato dalla waitlist) con
+        un referral_code assegnato al submit. Per gli account creati fuori da quel
+        flusso (es. administrative provisioning) crea un TallyLead sintetico solo
+        per ospitare il referral_code, così la web app può sempre mostrare un link.
+        """
+        email = (email or "").strip().lower()
+        with self.Session() as session:
+            lead = (
+                session.query(TallyLead)
+                .filter(TallyLead.email == email, TallyLead.referral_code.isnot(None))
+                .first()
+            )
+            if lead:
+                return lead.referral_code
+
+            lead = session.query(TallyLead).filter(TallyLead.email == email).first()
+            if lead:
+                lead.referral_code = secrets.token_urlsafe(6)
+                session.commit()
+                return lead.referral_code
+
+            new_lead = TallyLead(
+                tally_submission_id=f"manual_{uuid.uuid4().hex}",
+                email=email,
+                referral_code=secrets.token_urlsafe(6),
+            )
+            session.add(new_lead)
+            session.commit()
+            return new_lead.referral_code
+
+    def get_referral_status(self, email: str) -> dict:
+        """Stato referral di un utente: codice, numero di inviti andati a buon
+        fine, e se ha già sbloccato l'accesso garantito a Lifetime Founder.
+        """
+        email = (email or "").strip().lower()
+        referral_code = self.get_or_create_referral_code(email)
+        with self.Session() as session:
+            referred_count = (
+                session.query(TallyLead)
+                .filter(TallyLead.referred_by_code == referral_code)
+                .count()
+            )
+            lead = (
+                session.query(TallyLead)
+                .filter(TallyLead.referral_code == referral_code)
+                .first()
+            )
+            lifetime_founder_guaranteed = bool(lead and lead.lifetime_founder_guaranteed)
+
+        return {
+            "referral_code": referral_code,
+            "referred_count": referred_count,
+            "lifetime_founder_guaranteed": lifetime_founder_guaranteed,
+        }
 
     def mark_tally_lead_synced(self, tally_submission_id: str) -> None:
         """Marca un lead Tally come sincronizzato su Brevo."""
@@ -1650,6 +2267,9 @@ class UserStore:
             metadata={"consent_type": "privacy_policy", "version": Config.CURRENT_PRIVACY_POLICY_VERSION},
             ip_address=None, user_agent="create_beta_account",
         )
+        # Pro di default per tutta la fase beta (reason="beta_default" per poterlo
+        # revocare in blocco al lancio pubblico senza toccare i Pro pagati veri).
+        self.set_user_plan(chat_id, "pro", payment_reference="beta_default")
         return chat_id, password
 
     def delete_user_completely(self, chat_id: str) -> str:
@@ -1664,7 +2284,9 @@ class UserStore:
         )
 
         chat_id = str(chat_id)
-        with self.Session() as session:
+        # Cancellazione dei propri dati: bindata al tenant, la RLS consente il DELETE
+        # delle proprie righe (GDPR erasure). Vedi _user_session.
+        with self._user_session(chat_id) as session:
             user = session.query(User).filter(User.chat_id == chat_id).first()
             if not user:
                 return "not_found"
@@ -1700,8 +2322,24 @@ class UserStore:
 
             if backend == "postgres":
                 # Ordine obbligato dalle FK:
+                # transfers → from_account_id/to_account_id → accounts.id
                 # Expense/Income/Subscription → account_id → accounts.id
                 # Expense/Subscription → category_id → user_categories.id
+                #
+                # "transfers" non ha un modello ORM locale (schema gestito da
+                # Alembic, tabella aggiunta dopo l'ultima sincronizzazione di
+                # src/storage/models.py) — cancellazione via SQL diretto, come
+                # per user_categories sopra. Condizionata all'esistenza della
+                # tabella: gli ambienti di test (SQLite) non la hanno ancora.
+                if inspect(session.connection()).has_table("transfers"):
+                    session.execute(
+                        text(
+                            "DELETE FROM transfers WHERE "
+                            "from_account_id IN (SELECT id FROM accounts WHERE user_id = :uid) "
+                            "OR to_account_id IN (SELECT id FROM accounts WHERE user_id = :uid)"
+                        ),
+                        {"uid": chat_id},
+                    )
                 session.query(Expense).filter(Expense.user_id == chat_id).delete()
                 session.query(Income).filter(Income.user_id == chat_id).delete()
                 session.query(Subscription).filter(Subscription.user_id == chat_id).delete()
@@ -1726,7 +2364,7 @@ class UserStore:
     def get_user_subscriptions(self, user_id: str) -> list[dict]:
         """Ritorna gli abbonamenti dell'utente dal DB locale (tabella subscriptions)."""
         user_id = str(user_id)
-        with self.Session() as session:
+        with self._user_session(user_id) as session:
             rows = session.execute(
                 text(
                     "SELECT name, amount, last_billed, sub_type FROM subscriptions "
@@ -1921,6 +2559,49 @@ class UserStore:
             session.commit()
             logger.info("[User %s] Trial Pro avviato (%d giorni).", chat_id, days)
 
+    def extend_trial_days(self, chat_id: str, days: int = 60) -> None:
+        """Estende (additivamente) il Pro dell'utente di N giorni — reward referral.
+
+        Se un trial è già attivo e non ancora scaduto, i giorni si sommano alla
+        scadenza esistente invece di sovrascriverla (altrimenti referral multipli
+        si cancellerebbero a vicenda). Se non c'è trial attivo (piano free, o Pro
+        permanente beta senza scadenza), parte da ora. Applicato anche agli account
+        Pro permanenti (beta_default): li trasforma in un Pro con scadenza — scelta
+        esplicita del reward referral, non un effetto collaterale.
+        """
+        chat_id = str(chat_id)
+        now = datetime.utcnow()
+
+        with self.Session() as session:
+            plan = session.query(UserPlan).filter_by(chat_id=chat_id).first()
+            if not plan:
+                self.get_user_plan(chat_id)
+                plan = session.query(UserPlan).filter_by(chat_id=chat_id).first()
+
+            old_plan = plan.plan_type
+            base = plan.trial_ends_at if (plan.trial_ends_at and plan.trial_ends_at > now) else now
+
+            plan.plan_type = "pro"
+            plan.is_trial = True
+            plan.trial_started_at = plan.trial_started_at or now
+            plan.trial_ends_at = base + timedelta(days=days)
+            plan.tokens_total = 3000000
+
+            session.add(PlanChange(
+                chat_id=chat_id,
+                from_plan=old_plan,
+                to_plan="pro",
+                change_type="referral_reward",
+                changed_at=now,
+                reason="referral_reward",
+            ))
+
+            session.commit()
+            logger.info(
+                "[User %s] Pro esteso di %d giorni (reward referral), nuova scadenza %s.",
+                chat_id, days, plan.trial_ends_at.isoformat(),
+            )
+
     def get_expired_trials(self, reference_time: datetime | None = None) -> list["User"]:
         """Utenti con trial attivo la cui scadenza è già passata (o oggi)."""
         reference_time = reference_time or datetime.utcnow()
@@ -2059,6 +2740,7 @@ class UserStore:
         operation: str,
         thinking_tokens: int | None = None,
         cached_tokens: int | None = None,
+        input_method: str | None = None,
     ) -> "LlmUsageEvent":
         """Registra il consumo reale dopo una chiamata AI e finalizza la reservation.
 
@@ -2109,6 +2791,7 @@ class UserStore:
                 provider=provider,
                 model=model,
                 operation=operation,
+                input_method=input_method,
                 prompt_tokens=prompt_tokens,
                 completion_tokens=completion_tokens,
                 total_tokens=total_tokens,
@@ -2196,6 +2879,114 @@ class UserStore:
         if deleted:
             logger.info("[Cleanup] Rimossi %d chat_messages più vecchi di %d giorni.", deleted, days)
         return deleted
+
+    def cleanup_old_job_runs(self, days: int = 90) -> int:
+        """Rimuove le esecuzioni job più vecchie di `days` giorni.
+
+        La tabella `job_runs` cresce a ogni esecuzione: senza questa pulizia
+        (chiamata dal job notturno di retention) crescerebbe indefinitamente.
+        """
+        cutoff = datetime.utcnow() - timedelta(days=days)
+        with self.Session() as session:
+            deleted = session.query(JobRun).filter(
+                JobRun.finished_at < cutoff
+            ).delete(synchronize_session=False)
+            session.commit()
+        if deleted:
+            logger.info("[Cleanup] Rimosse %d job_runs più vecchie di %d giorni.", deleted, days)
+        return deleted
+
+    def record_job_run(
+        self,
+        job_id: str,
+        status: str,
+        *,
+        trigger_type: str | None = None,
+        scheduled_at: "datetime | None" = None,
+        started_at: "datetime | None" = None,
+        finished_at: "datetime | None" = None,
+        duration_ms: int | None = None,
+        return_code: int | None = None,
+        error_text: str | None = None,
+    ) -> None:
+        """Registra l'esito di un'esecuzione di job schedulato (best-effort).
+
+        Non solleva mai: il monitoraggio non deve poter far fallire un job.
+        `error_text` viene troncato e non deve contenere dati liberi utente.
+        """
+        try:
+            with self.Session() as session:
+                session.add(JobRun(
+                    job_id=job_id,
+                    status=status,
+                    trigger_type=trigger_type,
+                    scheduled_at=scheduled_at,
+                    started_at=started_at,
+                    finished_at=finished_at or datetime.utcnow(),
+                    duration_ms=duration_ms,
+                    return_code=return_code,
+                    error_text=(error_text or "")[:500] or None,
+                ))
+                session.commit()
+        except Exception as exc:  # noqa: BLE001 — monitoraggio best-effort
+            logger.warning("[JobRun] Impossibile registrare l'esito del job %s: %s", job_id, exc)
+
+    def record_tx_event(
+        self,
+        chat_id: str,
+        tx_type: str,
+        input_method: str,
+        outcome: str,
+        source: str,
+        reason: str | None = None,
+    ) -> None:
+        """Registra l'esito di un tentativo di registrazione transazione (best-effort).
+
+        Chiamata accanto a `analytics.track` nei punti in cui il bot/webapp già
+        emettono `expense_tracked`/`expense_tracking_failed` verso PostHog: non
+        sostituisce quell'invio, lo rispecchia in Postgres per la dashboard admin.
+        Non solleva mai: il tracking non deve poter interrompere il salvataggio.
+        """
+        try:
+            with self.Session() as session:
+                session.add(TxEvent(
+                    chat_id=chat_id,
+                    tx_type=tx_type or "unknown",
+                    input_method=input_method or "text",
+                    outcome=outcome,
+                    source=source,
+                    reason=(reason or "")[:200] or None,
+                ))
+                session.commit()
+        except Exception as exc:  # noqa: BLE001 — tracking best-effort
+            logger.warning("[TxEvent] Impossibile registrare l'evento per %s: %s", chat_id, exc)
+
+    def record_tour_event(self, chat_id: str, event: str, step_id: str | None) -> None:
+        """Persiste lo stato del tour guidato webapp sull'utente (best-effort).
+
+        Chiamata da POST /api/track quando arriva un evento 'tour_*' con una
+        sessione autenticata valida. Non sostituisce l'invio a PostHog, lo
+        rispecchia: prima lo stato del tour viveva solo in localStorage del
+        browser, quindi la dashboard admin non poteva sapere chi lo salta o a
+        quale step si ferma.
+        """
+        try:
+            with self.Session() as session:
+                user = session.query(User).filter(User.chat_id == chat_id).first()
+                if not user:
+                    return
+                if step_id:
+                    user.tour_step = step_id
+                if event == "tour_started":
+                    user.tour_status = "in_progress"
+                elif event == "tour_completed":
+                    user.tour_status = "completed"
+                    user.tour_completed_at = datetime.utcnow()
+                elif event == "tour_skipped":
+                    user.tour_status = "skipped"
+                session.commit()
+        except Exception as exc:  # noqa: BLE001 — tracking best-effort
+            logger.warning("[TourEvent] Impossibile registrare l'evento tour per %s: %s", chat_id, exc)
 
     def get_chat_history(self, chat_id: str, limit: int = 60) -> list[dict]:
         """Ritorna gli ultimi `limit` messaggi della cronologia, in ordine cronologico asc."""

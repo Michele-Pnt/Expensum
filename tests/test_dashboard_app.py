@@ -10,6 +10,16 @@ def _create_dashboard_user(store, chat_id="chat_123", email="test@example.com", 
     return chat_id, email, password
 
 
+def _csrf_token(client):
+    """Recupera un token CSRF valido per la sessione corrente del test client.
+
+    enforce_csrf_on_forms() chiama csrf.protect() manualmente, che valida il
+    token a prescindere da WTF_CSRF_ENABLED: i test che fanno POST devono quindi
+    allegare un token reale come i form/API in produzione.
+    """
+    return client.get("/api/csrf-token").json["csrf_token"]
+
+
 def test_web_login_success_redirects_to_setup(client):
     from src.dashboard.app import store
 
@@ -59,6 +69,153 @@ def test_web_login_invalid_credentials_shows_error(client):
 
     assert response.status_code == 200
     assert b"Email o password errati." in response.data
+
+
+def test_web_login_notion_user_denied_web_access(client):
+    """Un utente con backend Notion non può accedere alla web app dal browser."""
+    from src.dashboard.app import store
+
+    chat_id = "chat_notion_login"
+    store.add_user(chat_id=chat_id, username="notion-user", storage_backend="notion")
+    store.set_credentials(chat_id, "notion-login@example.com", "Password123")
+
+    response = client.post(
+        "/login",
+        data={
+            "email": "notion-login@example.com",
+            "password": "Password123",
+            "csrf_token": _csrf_token(client),
+        },
+        follow_redirects=False,
+    )
+
+    # Credenziali corrette ma nessuna sessione creata: resta sulla pagina di login.
+    assert response.status_code == 200
+    assert "collegato a Notion".encode() in response.data
+    with client.session_transaction() as sess:
+        assert not sess.get("user_logged_in")
+
+
+def test_web_login_remember_me_creates_persistent_session(client):
+    """Con "ricordami" la sessione è permanente e porta la token_version."""
+    from src.dashboard.app import store
+
+    _, email, password = _create_dashboard_user(store, chat_id="chat_remember", email="remember@example.com")
+
+    response = client.post(
+        "/login",
+        data={"email": email, "password": password, "remember": "1", "csrf_token": _csrf_token(client)},
+        follow_redirects=False,
+    )
+    assert response.status_code == 302
+    with client.session_transaction() as sess:
+        assert sess.get("user_logged_in") is True
+        assert sess.permanent is True
+        assert sess.get("token_version") == 0
+
+
+def test_web_login_without_remember_is_browser_session(client):
+    """Senza "ricordami" la sessione non è permanente (muore alla chiusura del browser)."""
+    from src.dashboard.app import store
+
+    _, email, password = _create_dashboard_user(store, chat_id="chat_noremember", email="noremember@example.com")
+
+    response = client.post(
+        "/login",
+        data={"email": email, "password": password, "csrf_token": _csrf_token(client)},
+        follow_redirects=False,
+    )
+    assert response.status_code == 302
+    with client.session_transaction() as sess:
+        assert sess.get("user_logged_in") is True
+        assert sess.permanent is False
+
+
+def test_stale_token_version_invalidates_session(client):
+    """Bumpando la token_version lato server, la sessione esistente viene revocata."""
+    from src.dashboard.app import store
+
+    chat_id, email, password = _create_dashboard_user(
+        store, chat_id="chat_revoke", email="revoke@example.com"
+    )
+    store.mark_setup_completed(chat_id)
+
+    client.post(
+        "/login",
+        data={"email": email, "password": password, "remember": "1", "csrf_token": _csrf_token(client)},
+        follow_redirects=False,
+    )
+    # La sessione è valida: /app instrada l'utente autenticato (non verso /login).
+    assert not client.get("/app", follow_redirects=False).headers["Location"].endswith("/login")
+
+    # Revoca globale delle sessioni.
+    store.bump_token_version(chat_id)
+
+    response = client.get("/app", follow_redirects=False)
+    assert response.status_code == 302
+    assert response.headers["Location"].endswith("/login")
+    with client.session_transaction() as sess:
+        assert not sess.get("user_logged_in")
+
+
+def test_logout_all_devices_bumps_token_version_and_clears_session(client):
+    from src.dashboard.app import store
+
+    chat_id, email, password = _create_dashboard_user(
+        store, chat_id="chat_logoutall", email="logoutall@example.com"
+    )
+    store.mark_setup_completed(chat_id)
+    client.post(
+        "/login",
+        data={"email": email, "password": password, "remember": "1", "csrf_token": _csrf_token(client)},
+        follow_redirects=False,
+    )
+
+    response = client.post(
+        "/api/settings/logout-all-devices",
+        headers={"X-CSRFToken": _csrf_token(client)},
+    )
+    assert response.status_code == 200
+    assert response.json["ok"] is True
+    assert store.get_token_version(chat_id) == 1
+    with client.session_transaction() as sess:
+        assert not sess.get("user_logged_in")
+
+
+def test_web_app_entry_notion_session_cleared_and_redirected_to_login(client):
+    """Una sessione browser residua di un utente Notion viene invalidata su /app."""
+    from src.dashboard.app import store
+
+    chat_id = "chat_notion_entry"
+    store.add_user(chat_id=chat_id, username="notion-user", storage_backend="notion")
+    store.mark_setup_completed(chat_id)
+    with client.session_transaction() as sess:
+        sess["user_logged_in"] = True
+        sess["chat_id"] = chat_id
+
+    response = client.get("/app", follow_redirects=False)
+
+    assert response.status_code == 302
+    assert response.headers["Location"].endswith("/login")
+    with client.session_transaction() as sess:
+        assert not sess.get("user_logged_in")
+
+
+def test_api_auth_session_denies_notion_browser_session(client):
+    """L'API di sessione considera non autorizzato un utente Notion."""
+    from src.dashboard.app import store
+
+    chat_id = "chat_notion_apisession"
+    store.add_user(chat_id=chat_id, username="notion-user", storage_backend="notion")
+    store.mark_setup_completed(chat_id)
+    with client.session_transaction() as sess:
+        sess["user_logged_in"] = True
+        sess["chat_id"] = chat_id
+
+    response = client.get("/api/auth/session")
+
+    assert response.status_code == 401
+    assert response.json["authorized"] is False
 
 
 def test_web_login_session_guard_uses_user_logged_in(client):
@@ -209,6 +366,66 @@ def test_browser_session_can_access_reports_api_without_telegram_header(client):
     assert response.json == {"reports": [], "plan_type": "free"}
 
 
+def _save_report(store, chat_id, share_token="tok-123", report_type="weekly"):
+    from datetime import date
+    from src.storage.postgres_storage import PostgresStorage
+
+    with store.Session() as s:
+        storage = PostgresStorage(session=s, user_id=chat_id)
+        storage.save_report(
+            user_id=chat_id,
+            report_type=report_type,
+            report_date=date.today(),
+            text_content="Report di prova",
+            report_data=None,
+        )
+        # save_report genera un token proprio: lo leggiamo per rendere il test
+        # deterministico rispetto al token atteso dal chiamante.
+        saved = storage.get_reports_for_user(user_id=chat_id, limit=1)[0]
+        return saved["share_token"]
+
+
+def test_report_detail_requires_auth(client):
+    response = client.get("/api/reports/some-token")
+    assert response.status_code == 401
+
+
+def test_report_detail_returns_404_for_other_users_report(client):
+    from src.dashboard.app import store
+
+    owner_chat_id, _, _ = _create_dashboard_user(
+        store, chat_id="chat_report_owner", email="owner@example.com"
+    )
+    token = _save_report(store, owner_chat_id)
+
+    _, other_email, other_password = _create_dashboard_user(
+        store, chat_id="chat_report_other", email="other@example.com"
+    )
+    store.mark_setup_completed("chat_report_other")
+    client.post("/login", data={"email": other_email, "password": other_password})
+
+    response = client.get(f"/api/reports/{token}")
+
+    assert response.status_code == 404
+
+
+def test_report_detail_returns_report_for_owner(client):
+    from src.dashboard.app import store
+
+    owner_chat_id, email, password = _create_dashboard_user(
+        store, chat_id="chat_report_self", email="self@example.com"
+    )
+    store.mark_setup_completed(owner_chat_id)
+    token = _save_report(store, owner_chat_id)
+
+    client.post("/login", data={"email": email, "password": password})
+    response = client.get(f"/api/reports/{token}")
+
+    assert response.status_code == 200
+    assert response.json["share_token"] == token
+    assert response.json["text_content"] == "Report di prova"
+
+
 def test_telegram_login_template_has_mobile_keyboard_guards(client):
     from src.dashboard.app import store
 
@@ -325,6 +542,9 @@ def _login_completed(client, store, chat_id, email, storage_backend="postgres"):
     with client.session_transaction() as sess:
         sess["user_logged_in"] = True
         sess["chat_id"] = chat_id
+        # La sessione deve portare la token_version corrente, altrimenti
+        # _get_session_chat_id la considera revocata (vedi meccanismo "ricordami").
+        sess["token_version"] = store.get_token_version(chat_id)
 
 
 def test_privacy_export_json_requires_auth(client):
@@ -368,7 +588,12 @@ def test_privacy_export_json_excludes_secrets_and_includes_financial_data(client
         assert log is not None
 
 
-def test_privacy_export_json_notion_backend_does_not_call_notion_api(client):
+def test_privacy_export_json_notion_backend_denied_web_access(client):
+    """Gli account Notion non hanno accesso alla web app: l'endpoint risponde 401.
+
+    L'export GDPR (Art. 15/20) per gli utenti Notion avviene via bot Telegram
+    (comando /export), non dalla web app riservata al backend PostgreSQL.
+    """
     from src.dashboard.app import store
 
     chat_id, email = "chat_privacy_json_notion", "privacy-json-notion@example.com"
@@ -376,8 +601,7 @@ def test_privacy_export_json_notion_backend_does_not_call_notion_api(client):
 
     response = client.get("/api/privacy/export-json")
 
-    assert response.status_code == 200
-    assert "note" in response.json["financial_data"]
+    assert response.status_code == 401
 
 
 def test_privacy_export_csv_requires_auth(client):
@@ -413,7 +637,8 @@ def test_privacy_export_csv_returns_csv_for_postgres_user(client):
     assert "monthly_balance" not in csv_text.lower()
 
 
-def test_privacy_export_csv_notion_backend_returns_404(client):
+def test_privacy_export_csv_notion_backend_denied_web_access(client):
+    """Gli account Notion non hanno accesso alla web app: l'endpoint risponde 401."""
     from src.dashboard.app import store
 
     chat_id, email = "chat_privacy_csv_notion", "privacy-csv-notion@example.com"
@@ -421,7 +646,7 @@ def test_privacy_export_csv_notion_backend_returns_404(client):
 
     response = client.get("/api/privacy/export-csv")
 
-    assert response.status_code == 404
+    assert response.status_code == 401
 
 
 def test_privacy_delete_account_writes_audit_log_before_deletion(client):
@@ -855,10 +1080,13 @@ def test_idor_account_and_expense_scoped_by_user(client):
 
     csrf_token = client.get("/api/csrf-token").json["csrf_token"]
 
-    # A si autentica (sessione browser)
+    # A si autentica (sessione browser). token_version deve combaciare con quello
+    # persistito, altrimenti _get_session_chat_id la considera revocata (401 invece
+    # del 404 atteso per lo scoping IDOR).
     with client.session_transaction() as sess:
         sess["user_logged_in"] = True
         sess["chat_id"] = "chat_user_a"
+        sess["token_version"] = store.get_token_version("chat_user_a")
 
     # A prova a modificare/cancellare il conto di B
     resp = client.put(
@@ -934,6 +1162,13 @@ def test_report_locked_for_free_user_only_from_second_month(client):
         jan_token = s.query(SavedReport).filter_by(report_date=date(2026, 1, 15)).first().share_token
         mar_token = s.query(SavedReport).filter_by(report_date=date(2026, 3, 1)).first().share_token
 
+    # L'endpoint di dettaglio ora richiede sessione autenticata + ownership check;
+    # token_version deve combaciare con quello persistito (vedi _get_session_chat_id).
+    with client.session_transaction() as sess:
+        sess["user_logged_in"] = True
+        sess["chat_id"] = chat_id
+        sess["token_version"] = store.get_token_version(chat_id)
+
     jan_resp = client.get(f"/api/reports/{jan_token}")
     mar_resp = client.get(f"/api/reports/{mar_token}")
 
@@ -945,7 +1180,7 @@ def test_report_locked_for_free_user_only_from_second_month(client):
     assert mar_resp.json["plan_type"] == "free"
     assert mar_resp.json["locked"] is True
 
-    # user_id non deve mai essere esposto sull'endpoint pubblico
+    # user_id non deve mai essere esposto sull'endpoint
     assert "user_id" not in jan_resp.json
 
 
@@ -969,6 +1204,11 @@ def test_report_never_locked_for_pro_user(client):
         ))
         s.commit()
         token = s.query(SavedReport).filter_by(report_date=date(2026, 5, 1)).first().share_token
+
+    with client.session_transaction() as sess:
+        sess["user_logged_in"] = True
+        sess["chat_id"] = chat_id
+        sess["token_version"] = store.get_token_version(chat_id)
 
     resp = client.get(f"/api/reports/{token}")
 
@@ -1003,6 +1243,7 @@ def test_reports_list_marks_locked_reports_for_free_user(client):
     with client.session_transaction() as sess:
         sess["user_logged_in"] = True
         sess["chat_id"] = chat_id
+        sess["token_version"] = store.get_token_version(chat_id)
 
     resp = client.get("/api/reports")
 
@@ -1011,3 +1252,288 @@ def test_reports_list_marks_locked_reports_for_free_user(client):
     locked_by_date = {r["report_date"]: r["locked"] for r in resp.json["reports"]}
     assert locked_by_date["2026-01-15"] is False
     assert locked_by_date["2026-03-01"] is True
+
+
+def test_space_transfers_create_and_list(client):
+    """POST /api/space/transfers crea il trasferimento e aggiorna i saldi;
+    GET /api/space/transfers lo restituisce nel range di date richiesto."""
+    from src.dashboard.app import store
+    from src.storage.postgres_storage import PostgresStorage
+
+    store.add_user(chat_id="chat_transfer_user", username="transfer-user", storage_backend="postgres")
+    with store.Session() as s:
+        pg = PostgresStorage(session=s, user_id="chat_transfer_user")
+        acc_from = pg.create_account("Corrente", initial_balance=500.0)
+        acc_to = pg.create_account("Risparmio", initial_balance=0.0)
+
+    with client.session_transaction() as sess:
+        sess["user_logged_in"] = True
+        sess["chat_id"] = "chat_transfer_user"
+        sess["token_version"] = store.get_token_version("chat_transfer_user")
+
+    csrf_token = client.get("/api/csrf-token").json["csrf_token"]
+
+    resp = client.post(
+        "/api/space/transfers",
+        json={
+            "amount": 150.0,
+            "from_account_id": acc_from["id"],
+            "to_account_id": acc_to["id"],
+            "date": "2026-04-10",
+            "name": "Giroconto test",
+        },
+        headers={"X-CSRFToken": csrf_token},
+    )
+    assert resp.status_code == 201
+
+    resp = client.get("/api/space/transfers?start=2026-04-01&end=2026-04-30")
+    assert resp.status_code == 200
+    transfers = resp.json["transfers"]
+    assert len(transfers) == 1
+    assert transfers[0]["amount"] == 150.0
+    assert transfers[0]["from_account_id"] == acc_from["id"]
+    assert transfers[0]["to_account_id"] == acc_to["id"]
+
+    resp = client.get("/api/space/accounts")
+    balances = {a["name"]: a["current_balance"] for a in resp.json["accounts"]}
+    assert balances["Corrente"] == 500.0 - 150.0
+    assert balances["Risparmio"] == 0.0 + 150.0
+
+
+def test_space_transfers_rejects_same_account(client):
+    """POST /api/space/transfers rifiuta from_account_id == to_account_id (400)."""
+    from src.dashboard.app import store
+    from src.storage.postgres_storage import PostgresStorage
+
+    store.add_user(chat_id="chat_transfer_same", username="transfer-same", storage_backend="postgres")
+    with store.Session() as s:
+        pg = PostgresStorage(session=s, user_id="chat_transfer_same")
+        acc = pg.create_account("Unico", initial_balance=100.0)
+
+    with client.session_transaction() as sess:
+        sess["user_logged_in"] = True
+        sess["chat_id"] = "chat_transfer_same"
+        sess["token_version"] = store.get_token_version("chat_transfer_same")
+
+    csrf_token = client.get("/api/csrf-token").json["csrf_token"]
+
+    resp = client.post(
+        "/api/space/transfers",
+        json={"amount": 10.0, "from_account_id": acc["id"], "to_account_id": acc["id"]},
+        headers={"X-CSRFToken": csrf_token},
+    )
+    assert resp.status_code == 400
+
+
+def _login_chat_user(client, store, chat_id):
+    """Sessione autenticata minimale (storage postgres) per gli endpoint /api/chat/*."""
+    store.add_user(chat_id=chat_id, username=chat_id, storage_backend="postgres")
+    with client.session_transaction() as sess:
+        sess["user_logged_in"] = True
+        sess["chat_id"] = chat_id
+        sess["token_version"] = store.get_token_version(chat_id)
+    return client.get("/api/csrf-token").json["csrf_token"]
+
+
+def _fake_parsed(**overrides):
+    from datetime import date as _date
+
+    base = {
+        "type": "expense",
+        "date": _date(2026, 4, 10),
+        "amount": 20.0,
+        "category": "Ristoranti",
+        "name": "Pizza",
+        "income_type": None,
+        "from_account": None,
+        "to_account": None,
+    }
+    base.update(overrides)
+    return base
+
+
+def test_chat_message_multi_transaction(client):
+    """Un messaggio con più spese restituisce più item in 'transactions' (bot.py:1769-1791)."""
+    from src.dashboard.app import store
+    from src.storage.postgres_storage import PostgresStorage
+    from src.expense_parser import ExpenseParser
+
+    csrf_token = _login_chat_user(client, store, "chat_multi_user")
+    with store.Session() as s:
+        pg = PostgresStorage(session=s, user_id="chat_multi_user")
+        pg.create_account("Corrente", initial_balance=100.0)
+
+    transactions = [
+        _fake_parsed(name="Pizza", amount=20.0),
+        _fake_parsed(name="Benzina", amount=15.0, category="Trasporti"),
+    ]
+    with patch.object(ExpenseParser, "parse_multi_with_usage", return_value=(transactions, {})):
+        resp = client.post(
+            "/api/chat/message",
+            json={"text": "Ho speso 20€ pizza e 15€ benzina"},
+            headers={"X-CSRFToken": csrf_token},
+        )
+
+    assert resp.status_code == 200
+    body = resp.json
+    assert body["ok"] is True
+    assert len(body["transactions"]) == 2
+    names = {tx["parsed"]["name"] for tx in body["transactions"]}
+    assert names == {"Pizza", "Benzina"}
+    assert all(tx["awaiting_confirm"] for tx in body["transactions"])
+
+
+def test_chat_confirm_expense_requires_account_id(client):
+    """/api/chat/confirm rifiuta una spesa senza account_id esplicito (niente default silenzioso)."""
+    from src.dashboard.app import store
+
+    csrf_token = _login_chat_user(client, store, "chat_noaccount_user")
+
+    resp = client.post(
+        "/api/chat/confirm",
+        json={"parsed": {"type": "expense", "amount": 20.0, "date": "2026-04-10", "name": "Pizza"}},
+        headers={"X-CSRFToken": csrf_token},
+    )
+    assert resp.status_code == 400
+
+
+def test_chat_confirm_expense_saves_with_category_override(client):
+    """/api/chat/confirm salva la categoria scelta dal picker rapido, non quella originale."""
+    from src.dashboard.app import store
+    from src.storage.postgres_storage import PostgresStorage
+    from src.storage.models import Expense as ExpenseModel
+
+    csrf_token = _login_chat_user(client, store, "chat_category_user")
+    with store.Session() as s:
+        pg = PostgresStorage(session=s, user_id="chat_category_user")
+        acc = pg.create_account("Corrente", initial_balance=100.0)
+
+    resp = client.post(
+        "/api/chat/confirm",
+        json={
+            "parsed": {"type": "expense", "amount": 20.0, "date": "2026-04-10", "name": "Pizza", "category": "Altro"},
+            "account_id": acc["id"],
+            "category": "Ristoranti & Fast Food",
+        },
+        headers={"X-CSRFToken": csrf_token},
+    )
+    assert resp.status_code == 200
+    assert resp.json["saved"] is True
+
+    from src.storage.models import UserCategory
+
+    with store.Session() as s:
+        row = s.query(ExpenseModel).filter_by(user_id="chat_category_user").first()
+        assert row is not None
+        cat_name = s.query(UserCategory.name).filter(UserCategory.id == row.category_id).scalar()
+        assert cat_name == "Ristoranti & Fast Food"
+
+
+def test_chat_confirm_transfer_creates_transfer_not_income(client):
+    """/api/chat/confirm con type=transfer crea un Transfer, non un'entrata (bug fix)."""
+    from datetime import date as _date
+    from src.dashboard.app import store
+    from src.storage.postgres_storage import PostgresStorage
+    from src.storage.models import Income as IncomeModel
+
+    csrf_token = _login_chat_user(client, store, "chat_transfer_confirm_user")
+    with store.Session() as s:
+        pg = PostgresStorage(session=s, user_id="chat_transfer_confirm_user")
+        acc_from = pg.create_account("Corrente", initial_balance=200.0)
+        acc_to = pg.create_account("Risparmio", initial_balance=0.0)
+
+    resp = client.post(
+        "/api/chat/confirm",
+        json={
+            "parsed": {
+                "type": "transfer", "amount": 50.0, "date": "2026-04-10", "name": "Giroconto",
+                "resolved_from_account_name": "Corrente", "resolved_to_account_name": "Risparmio",
+            },
+            "from_account_id": acc_from["id"],
+            "to_account_id": acc_to["id"],
+        },
+        headers={"X-CSRFToken": csrf_token},
+    )
+    assert resp.status_code == 200
+    assert resp.json["saved"] is True
+
+    with store.Session() as s:
+        pg = PostgresStorage(session=s, user_id="chat_transfer_confirm_user")
+        transfers = pg.fetch_transfers(_date(2026, 4, 1), _date(2026, 4, 30))
+        assert len(transfers) == 1
+        assert transfers[0]["amount"] == 50.0
+        incomes = s.query(IncomeModel).filter_by(user_id="chat_transfer_confirm_user").count()
+        assert incomes == 0
+
+
+def test_chat_confirm_transfer_rejects_same_account(client):
+    """/api/chat/confirm rifiuta un trasferimento con from_account_id == to_account_id."""
+    from src.dashboard.app import store
+    from src.storage.postgres_storage import PostgresStorage
+
+    csrf_token = _login_chat_user(client, store, "chat_transfer_same_user")
+    with store.Session() as s:
+        pg = PostgresStorage(session=s, user_id="chat_transfer_same_user")
+        acc = pg.create_account("Unico", initial_balance=100.0)
+
+    resp = client.post(
+        "/api/chat/confirm",
+        json={
+            "parsed": {"type": "transfer", "amount": 10.0, "date": "2026-04-10", "name": "Giroconto"},
+            "from_account_id": acc["id"],
+            "to_account_id": acc["id"],
+        },
+        headers={"X-CSRFToken": csrf_token},
+    )
+    assert resp.status_code == 400
+
+
+def test_chat_message_transfer_needs_second_account(client):
+    """Con un solo conto, un trasferimento riconosciuto viene bloccato con needs_second_account."""
+    from src.dashboard.app import store
+    from src.storage.postgres_storage import PostgresStorage
+    from src.expense_parser import ExpenseParser
+
+    csrf_token = _login_chat_user(client, store, "chat_transfer_single_acc_user")
+    with store.Session() as s:
+        pg = PostgresStorage(session=s, user_id="chat_transfer_single_acc_user")
+        pg.create_account("Unico", initial_balance=100.0)
+
+    transactions = [_fake_parsed(type="transfer", name="Giroconto", amount=50.0, category=None)]
+    with patch.object(ExpenseParser, "parse_multi_with_usage", return_value=(transactions, {})):
+        resp = client.post(
+            "/api/chat/message",
+            json={"text": "Trasferisci 50€"},
+            headers={"X-CSRFToken": csrf_token},
+        )
+
+    assert resp.status_code == 200
+    tx = resp.json["transactions"][0]
+    assert tx["needs_second_account"] is True
+    assert tx["awaiting_confirm"] is False
+
+
+def test_chat_message_no_account_blocks_batch(client):
+    """Senza nessun conto configurato, l'intero messaggio viene bloccato (no_account)."""
+    from src.dashboard.app import store
+    from src.expense_parser import ExpenseParser
+
+    csrf_token = _login_chat_user(client, store, "chat_no_account_at_all_user")
+
+    transactions = [_fake_parsed(name="Pizza", amount=20.0)]
+    with patch.object(ExpenseParser, "parse_multi_with_usage", return_value=(transactions, {})):
+        resp = client.post(
+            "/api/chat/message",
+            json={"text": "Ho speso 20€ pizza"},
+            headers={"X-CSRFToken": csrf_token},
+        )
+
+    assert resp.status_code == 200
+    assert resp.json["type"] == "no_account"
+    assert resp.json["ok"] is False
+
+
+def test_space_transfers_requires_auth(client):
+    """GET /api/space/transfers senza sessione/init-data valido risponde 401."""
+    resp = client.get("/api/space/transfers")
+    assert resp.status_code == 401

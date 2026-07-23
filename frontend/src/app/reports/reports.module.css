@@ -135,6 +135,9 @@
   align-items: center;
   justify-content: space-between;
   transition: border-color 0.15s, background 0.15s;
+  width: 100%;
+  font: inherit;
+  text-align: left;
 }
 
 .reportCard:hover {

@@ -8,7 +8,11 @@
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600;700;800&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
-    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <!-- Vendorizzato same-origin (src/dashboard/static/vendor/): la CSP di produzione
+         (impostata a livello nginx, fuori da questo repo) ha script-src 'self', coerente
+         con la regola del progetto di non caricare mai script di terze parti nel browser
+         (vedi src/analytics.py). Caricarlo da un CDN esterno veniva bloccato in silenzio. -->
+    <script src="{{ url_for('static', filename='vendor/chart.umd.min.js') }}"></script>
 </head>
 <body>
     <div class="app-container">
@@ -17,10 +21,16 @@
                 <h2>Expensum<span>Admin</span></h2>
             </div>
             <ul class="nav-links">
-                <li><a href="{{ url_for('index') }}" class="{% if request.endpoint == 'index' %}active{% endif %}">📊 Overview</a></li>
-                <li><a href="{{ url_for('users_list') }}" class="{% if request.endpoint == 'users_list' %}active{% endif %}">👥 Utenti</a></li>
-                <li><a href="{{ url_for('feedbacks_list') }}" class="{% if request.endpoint == 'feedbacks_list' %}active{% endif %}">📧 Feedback</a></li>
-                <li><a href="{{ url_for('logs_viewer') }}" class="{% if request.endpoint == 'logs_viewer' %}active{% endif %}">💻 Log Terminal</a></li>
+                <li><a href="{{ url_for('admin.index') }}" class="{% if request.endpoint == 'admin.index' %}active{% endif %}">📊 Overview</a></li>
+                <li><a href="{{ url_for('admin.product_metrics') }}" class="{% if request.endpoint == 'admin.product_metrics' %}active{% endif %}">📈 Prodotto</a></li>
+                <li><a href="{{ url_for('admin.business_metrics') }}" class="{% if request.endpoint == 'admin.business_metrics' %}active{% endif %}">💶 Business</a></li>
+                <li><a href="{{ url_for('admin.referrals') }}" class="{% if request.endpoint == 'admin.referrals' %}active{% endif %}">🔗 Referral</a></li>
+                <li><a href="{{ url_for('admin.jobs_status') }}" class="{% if request.endpoint == 'admin.jobs_status' %}active{% endif %}">⏱️ Job</a></li>
+                <li><a href="{{ url_for('admin.users_list') }}" class="{% if request.endpoint == 'admin.users_list' %}active{% endif %}">👥 Utenti</a></li>
+                <li><a href="{{ url_for('admin.feedbacks_list') }}" class="{% if request.endpoint == 'admin.feedbacks_list' %}active{% endif %}">📧 Feedback</a></li>
+                <li><a href="{{ url_for('admin.logs_viewer') }}" class="{% if request.endpoint == 'admin.logs_viewer' %}active{% endif %}">💻 Log</a></li>
+                <li><a href="https://eu.posthog.com/project/186394/dashboard/835311" target="_blank" rel="noopener noreferrer">🦔 PostHog ↗</a></li>
+                <li><a href="https://analytics.google.com/analytics/web/#/analysis/a395541870p538790680" target="_blank" rel="noopener noreferrer">📉 GA4 ↗</a></li>
             </ul>
             <div class="nav-footer">
                 <a href="{{ url_for('admin_logout') }}" class="btn-logout">Esci</a>
@@ -31,5 +41,82 @@
             {% block content %}{% endblock %}
         </main>
     </div>
+
+    <!-- Popover unico per i bottoni info (ⓘ): posizionato via JS per non essere
+         tagliato da contenitori con overflow (tabelle, card). -->
+    <div id="info-pop" class="info-pop" role="tooltip"></div>
+    <script>
+    (function () {
+        const pop = document.getElementById('info-pop');
+        let current = null;
+
+        function hide() { pop.classList.remove('open'); current = null; }
+
+        function show(btn) {
+            pop.textContent = btn.dataset.info || '';
+            pop.classList.add('open');
+            const r = btn.getBoundingClientRect();
+            const pw = pop.offsetWidth, ph = pop.offsetHeight;
+            let left = r.left;
+            if (left + pw > window.innerWidth - 8) left = window.innerWidth - pw - 8;
+            if (left < 8) left = 8;
+            let top = r.bottom + 6;
+            if (top + ph > window.innerHeight - 8) top = r.top - ph - 6;
+            pop.style.left = left + 'px';
+            pop.style.top = top + 'px';
+            current = btn;
+        }
+
+        document.addEventListener('click', function (e) {
+            const btn = e.target.closest('.info-btn');
+            if (btn) {
+                e.preventDefault();
+                e.stopPropagation();
+                if (current === btn) { hide(); } else { show(btn); }
+                return;
+            }
+            if (!e.target.closest('#info-pop')) hide();
+        });
+        document.addEventListener('keydown', e => { if (e.key === 'Escape') hide(); });
+        window.addEventListener('scroll', hide, true);
+        window.addEventListener('resize', hide);
+    })();
+    </script>
+
+    <!-- Toggle giorni/ore riutilizzabile: qualunque card con .time-value
+         (data-days/data-hours) e opzionalmente .time-sub (data-avg-days/
+         data-avg-hours/data-suffix) ottiene un toggle funzionante senza JS
+         dedicato — un solo handler delegato per tutta la dashboard. -->
+    <script>
+    (function () {
+        document.addEventListener('click', function (e) {
+            const btn = e.target.closest('.unit-toggle button[data-unit]');
+            if (!btn) return;
+            const card = btn.closest('.stat-card');
+            if (!card) return;
+            const unit = btn.dataset.unit;
+            const unitLabel = unit === 'hours' ? 'h' : 'gg';
+
+            card.querySelectorAll('.unit-toggle button[data-unit]').forEach(
+                b => b.classList.toggle('active', b === btn)
+            );
+
+            const valueEl = card.querySelector('.time-value');
+            if (valueEl) {
+                const num = unit === 'hours' ? valueEl.dataset.hours : valueEl.dataset.days;
+                const numEl = valueEl.querySelector('.time-value-num');
+                const unitEl = valueEl.querySelector('.time-value-unit');
+                if (numEl) numEl.textContent = num;
+                if (unitEl) unitEl.textContent = ' ' + unitLabel;
+            }
+
+            const subEl = card.querySelector('.time-sub');
+            if (subEl) {
+                const avg = unit === 'hours' ? subEl.dataset.avgHours : subEl.dataset.avgDays;
+                subEl.textContent = 'media ' + avg + ' ' + unitLabel + ' · ' + subEl.dataset.suffix;
+            }
+        });
+    })();
+    </script>
 </body>
 </html>
