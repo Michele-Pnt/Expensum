@@ -538,16 +538,23 @@ async def _build_and_send_weekly_plan(
     except Exception as e:
         logger.warning(f"[User {chat_id}] Generazione tabella immagine fallita: {e}")
 
+    telegram_text = plan_text
+    if _free_plan_report_locked(chat_id, plan_data.reference_date):
+        telegram_text += (
+            "\n\n🔒 _Dal secondo mese il report completo (grafici e dettagli) è sfocato "
+            "sulla Dashboard. Passa a Premium con /piano per sbloccarlo._"
+        )
+
     try:
         if message:
-            await message.reply_text(plan_text, parse_mode=ParseMode.MARKDOWN)
+            await message.reply_text(telegram_text, parse_mode=ParseMode.MARKDOWN)
             if table_image_path:
                 with open(table_image_path, "rb") as img:
                     await message.reply_photo(img)
         elif bot:
             await bot.send_message(
                 chat_id=int(chat_id),
-                text=plan_text,
+                text=telegram_text,
                 parse_mode=ParseMode.MARKDOWN,
             )
             if table_image_path:
@@ -660,13 +667,20 @@ async def _build_and_send_monthly_plan(
     except Exception as e:
         logger.warning(f"[User {chat_id}] Salvataggio report mensile fallito: {e}")
 
+    telegram_text = plan_text
+    if _free_plan_report_locked(chat_id, plan_data.target_month):
+        telegram_text += (
+            "\n\n🔒 _Dal secondo mese il report completo (grafici e dettagli) è sfocato "
+            "sulla Dashboard. Passa a Premium con /piano per sbloccarlo._"
+        )
+
     try:
         if message:
-            await message.reply_text(plan_text, parse_mode=ParseMode.MARKDOWN)
+            await message.reply_text(telegram_text, parse_mode=ParseMode.MARKDOWN)
         elif bot:
             await bot.send_message(
                 chat_id=int(chat_id),
-                text=plan_text,
+                text=telegram_text,
                 parse_mode=ParseMode.MARKDOWN,
             )
     except Exception as e:
@@ -760,6 +774,41 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     logger.info(f"[User {chat_id}] Dashboard inviata e pinnata (msg_id={msg.message_id})")
 
 
+def _is_pro_plan(chat_id: str) -> bool:
+    """Ritorna True se l'utente ha accesso Premium (piano pro o trial attivo)."""
+    return _user_store.get_user_plan(chat_id)["plan_type"] == "pro"
+
+
+def _free_plan_report_locked(chat_id: str, report_date: date) -> bool:
+    """Piano Free: il report del mese di iscrizione è completo; dal secondo mese
+    in poi viene mostrato sfocato (lato webapp) per incentivare l'upgrade a Premium."""
+    if _is_pro_plan(chat_id):
+        return False
+    with _user_store.Session() as session:
+        user = session.query(User).filter_by(chat_id=str(chat_id)).first()
+    if not user or not user.created_at:
+        return False
+    signup = user.created_at.date()
+    months_since_signup = (report_date.year - signup.year) * 12 + (report_date.month - signup.month)
+    return months_since_signup >= 1
+
+
+async def _reply_report_on_demand_blocked(update: Update, kind: str) -> None:
+    """Informa l'utente Free che il report è solo automatico, non generabile a richiesta."""
+    cadence = "ogni lunedì mattina" if kind == "weekly" else "il primo di ogni mese"
+    await update.message.reply_text(
+        "🔒 *Report su richiesta riservato al piano Premium*\n"
+        f"Sul piano Free il report {kind_label(kind)} arriva automaticamente {cadence}: "
+        "non è generabile a richiesta.\n\n"
+        "Passa a Premium con /piano per generarlo quando vuoi.",
+        parse_mode=ParseMode.MARKDOWN,
+    )
+
+
+def kind_label(kind: str) -> str:
+    return "settimanale" if kind == "weekly" else "mensile"
+
+
 async def cmd_weekly_report(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Alias legacy → rimanda a cmd_weekly_plan."""
     await cmd_weekly_plan(update, context)
@@ -772,6 +821,11 @@ async def cmd_weekly_plan(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         return
 
     chat_id = str(update.effective_chat.id)
+
+    if not _is_pro_plan(chat_id):
+        await _reply_report_on_demand_blocked(update, "weekly")
+        return
+
     await update.message.chat.send_action("typing")
 
     await _build_and_send_weekly_plan(
@@ -787,6 +841,11 @@ async def cmd_monthly_plan(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         return
 
     chat_id = str(update.effective_chat.id)
+
+    if not _is_pro_plan(chat_id):
+        await _reply_report_on_demand_blocked(update, "monthly")
+        return
+
     await update.message.chat.send_action("typing")
 
     overrides = context.user_data.get("monthly_overrides")
@@ -808,22 +867,18 @@ async def cmd_monthly_report(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     chat_id = str(update.effective_chat.id)
 
+    if not _is_pro_plan(chat_id):
+        await _reply_report_on_demand_blocked(update, "monthly")
+        return
+
     # Verifica quota token prima di avviare il subprocess (5000 token stimati)
     plan = _user_store.get_user_plan(chat_id)
     if plan["tokens_remaining"] < 5000:
-        if plan["plan_type"] == "free":
-            await update.message.reply_text(
-                f"🛑 *Token mensili insufficienti*\n"
-                f"Il report mensile richiede molte risorse, ma ne hai solo {plan['tokens_remaining']:,} rimasti.\n\n"
-                f"Usa /piano per fare l'upgrade o attendi il reset mensile.",
-                parse_mode=ParseMode.MARKDOWN,
-            )
-        else:
-            await update.message.reply_text(
-                "🛑 *Limite sistema raggiunto*\n"
-                "Token insufficienti per generare il report. Contatta l'assistenza.",
-                parse_mode=ParseMode.MARKDOWN,
-            )
+        await update.message.reply_text(
+            "🛑 *Limite sistema raggiunto*\n"
+            "Token insufficienti per generare il report. Contatta l'assistenza.",
+            parse_mode=ParseMode.MARKDOWN,
+        )
         return
 
     month_value = context.args[0] if context.args else None

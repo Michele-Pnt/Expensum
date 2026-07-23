@@ -206,7 +206,7 @@ def test_browser_session_can_access_reports_api_without_telegram_header(client):
     response = client.get("/api/reports")
 
     assert response.status_code == 200
-    assert response.json == {"reports": []}
+    assert response.json == {"reports": [], "plan_type": "free"}
 
 
 def test_telegram_login_template_has_mobile_keyboard_guards(client):
@@ -904,3 +904,110 @@ def test_idor_account_and_expense_scoped_by_user(client):
         assert expense_row is not None
         assert expense_row.name == "Spesa di B"
         assert expense_row.user_id == "chat_user_b"
+
+
+def test_report_locked_for_free_user_only_from_second_month(client):
+    """Piano Free: il report del mese di iscrizione è visibile per intero, dal secondo
+    mese in poi viene marcato 'locked' (sfocato lato webapp) per spingere l'upgrade."""
+    from datetime import date, datetime
+    from src.dashboard.app import store
+    from src.storage.models import SavedReport
+    from src.user_store import User
+
+    chat_id = "chat_locked_free"
+    store.add_user(chat_id=chat_id, username="locked-user", storage_backend="postgres")
+
+    with store.Session() as s:
+        user = s.query(User).filter_by(chat_id=chat_id).first()
+        user.created_at = datetime(2026, 1, 10)  # iscritto a gennaio 2026
+
+        s.add(SavedReport(
+            user_id=chat_id, report_type="monthly",
+            report_date=date(2026, 1, 15), text_content="report di gennaio",
+        ))
+        s.add(SavedReport(
+            user_id=chat_id, report_type="monthly",
+            report_date=date(2026, 3, 1), text_content="report di marzo",
+        ))
+        s.commit()
+
+        jan_token = s.query(SavedReport).filter_by(report_date=date(2026, 1, 15)).first().share_token
+        mar_token = s.query(SavedReport).filter_by(report_date=date(2026, 3, 1)).first().share_token
+
+    jan_resp = client.get(f"/api/reports/{jan_token}")
+    mar_resp = client.get(f"/api/reports/{mar_token}")
+
+    assert jan_resp.status_code == 200
+    assert jan_resp.json["plan_type"] == "free"
+    assert jan_resp.json["locked"] is False
+
+    assert mar_resp.status_code == 200
+    assert mar_resp.json["plan_type"] == "free"
+    assert mar_resp.json["locked"] is True
+
+    # user_id non deve mai essere esposto sull'endpoint pubblico
+    assert "user_id" not in jan_resp.json
+
+
+def test_report_never_locked_for_pro_user(client):
+    """Piano Pro: nessun report va mai marcato come 'locked', a prescindere dal mese."""
+    from datetime import date, datetime
+    from src.dashboard.app import store
+    from src.storage.models import SavedReport
+    from src.user_store import User
+
+    chat_id = "chat_locked_pro"
+    store.add_user(chat_id=chat_id, username="pro-user", storage_backend="postgres")
+    store.set_user_plan(chat_id, "pro")
+
+    with store.Session() as s:
+        user = s.query(User).filter_by(chat_id=chat_id).first()
+        user.created_at = datetime(2026, 1, 10)
+        s.add(SavedReport(
+            user_id=chat_id, report_type="monthly",
+            report_date=date(2026, 5, 1), text_content="report di maggio",
+        ))
+        s.commit()
+        token = s.query(SavedReport).filter_by(report_date=date(2026, 5, 1)).first().share_token
+
+    resp = client.get(f"/api/reports/{token}")
+
+    assert resp.status_code == 200
+    assert resp.json["plan_type"] == "pro"
+    assert resp.json["locked"] is False
+
+
+def test_reports_list_marks_locked_reports_for_free_user(client):
+    """L'endpoint di lista /api/reports deve riportare 'locked' coerente per ogni report."""
+    from datetime import date, datetime
+    from src.dashboard.app import store
+    from src.storage.models import SavedReport
+    from src.user_store import User
+
+    chat_id = "chat_locked_list"
+    store.add_user(chat_id=chat_id, username="locked-list-user", storage_backend="postgres")
+
+    with store.Session() as s:
+        user = s.query(User).filter_by(chat_id=chat_id).first()
+        user.created_at = datetime(2026, 1, 10)
+        s.add(SavedReport(
+            user_id=chat_id, report_type="monthly",
+            report_date=date(2026, 1, 15), text_content="report di gennaio",
+        ))
+        s.add(SavedReport(
+            user_id=chat_id, report_type="monthly",
+            report_date=date(2026, 3, 1), text_content="report di marzo",
+        ))
+        s.commit()
+
+    with client.session_transaction() as sess:
+        sess["user_logged_in"] = True
+        sess["chat_id"] = chat_id
+
+    resp = client.get("/api/reports")
+
+    assert resp.status_code == 200
+    assert resp.json["plan_type"] == "free"
+    locked_by_date = {r["report_date"]: r["locked"] for r in resp.json["reports"]}
+    assert locked_by_date["2026-01-15"] is False
+    assert locked_by_date["2026-03-01"] is True

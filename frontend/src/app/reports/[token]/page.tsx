@@ -3,6 +3,7 @@
 
 import React, { useEffect, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
+import Link from "next/link";
 import { CircularProgress } from "@mui/material";
 import {
   BarChart, Bar, LineChart, Line, PieChart, Pie, Cell,
@@ -22,6 +23,8 @@ interface ReportDetail {
   text_content: string;
   report_data: Record<string, any> | null;
   created_at: string;
+  plan_type?: string;
+  locked?: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -71,7 +74,7 @@ function buildReportSubtitle(report: ReportDetail): string {
   }
   const monthLabel = analyzedMonth.toLocaleDateString("it-IT", { month: "long" });
   const monthTitle = monthLabel ? monthLabel.charAt(0).toUpperCase() + monthLabel.slice(1) : "";
-  return `Analaisi del mese chiuso: ${monthTitle}`;
+  return `Analisi del mese chiuso: ${monthTitle}`;
 }
 
 function stripTelegramMarkdown(text: string): string {
@@ -329,6 +332,7 @@ export default function ReportDetailPage() {
 
   const isWeekly = report.report_type === "weekly";
   const hasChartData = report.report_data !== null;
+  const isLocked = report.locked === true;
 
   return (
     <div className={styles.container}>
@@ -348,15 +352,31 @@ export default function ReportDetailPage() {
         <p className={styles.subtitle}>{buildReportSubtitle(report)}</p>
       </div>
 
-      {hasChartData && (
-        isWeekly
-          ? <WeeklyCharts data={report.report_data!} />
-          : <MonthlyCharts data={report.report_data!} />
-      )}
+      <div className={isLocked ? styles.lockedWrap : undefined}>
+        <div className={isLocked ? styles.lockedContent : undefined} aria-hidden={isLocked || undefined}>
+          {hasChartData && (
+            isWeekly
+              ? <WeeklyCharts data={report.report_data!} />
+              : <MonthlyCharts data={report.report_data!} />
+          )}
 
-      <div className={styles.textCard}>
-        <div className={styles.textCardTitle}>Testo del report</div>
-        <pre className={styles.reportText}>{stripTelegramMarkdown(report.text_content)}</pre>
+          <div className={styles.textCard}>
+            <div className={styles.textCardTitle}>Testo del report</div>
+            <pre className={styles.reportText}>{stripTelegramMarkdown(report.text_content)}</pre>
+          </div>
+        </div>
+
+        {isLocked && (
+          <div className={styles.lockedOverlay}>
+            <p className={styles.lockedOverlayTitle}>🔒 Report completo riservato a Premium</p>
+            <p className={styles.lockedOverlayText}>
+              Dal secondo mese i report sul piano Free arrivano sfocati.
+            </p>
+            <Link href="/abbonamenti" className={styles.lockedCta}>
+              Passa a Premium
+            </Link>
+          </div>
+        )}
       </div>
     </div>
   );

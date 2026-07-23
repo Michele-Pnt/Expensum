@@ -2,6 +2,13 @@
 
 ## Da fare
 
+- **Piano Premium non ancora acquistabile**: dopo l'introduzione dei report Free
+  sfocati dal secondo mese (2026-07-23), il CTA "Passa a Premium" (banner reports,
+  pricing page) punta a `/abbonamenti#premium`, ma il piano Premium è ancora
+  "Prossimamente" (bottone disabilitato) — l'unico piano acquistabile oggi è
+  Lifetime Founder (€89 una tantum). Da decidere: attivare Premium con pagamento
+  reale (Stripe?) o far puntare questi CTA a Lifetime Founder finché Premium non è live.
+
 - **Tradurre l'app completa in EN** (dashboard, chat, onboarding, impostazioni, abbonamenti,
   analytics, reports, feedback, tour guidato) — estensione dell'i18n con next-intl già
   impostato per le pagine pubbliche (`frontend/src/app/[locale]/`: landing, come-funziona-moneo,

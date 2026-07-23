@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { CircularProgress } from "@mui/material";
+import { Lock } from "lucide-react";
 import styles from "./reports.module.css";
 import { trackReportViewed, trackReportShared } from "@/lib/analytics";
 import { getCsrfToken } from "@/lib/csrf";
@@ -14,6 +15,7 @@ interface ReportSummary {
   report_date: string;
   share_token: string;
   created_at: string;
+  locked?: boolean;
 }
 
 type TelegramWindow = Window & {
@@ -39,6 +41,7 @@ export default function ReportsPage() {
   const [error, setError] = useState<string | null>(null);
   const [generating, setGenerating] = useState<"weekly" | "monthly" | null>(null);
   const [generateError, setGenerateError] = useState<string | null>(null);
+  const [isPro, setIsPro] = useState(false);
 
   async function handleGenerate(type: "weekly" | "monthly") {
     setGenerating(type);
@@ -58,6 +61,10 @@ export default function ReportsPage() {
         headers,
         body: JSON.stringify({ type }),
       });
+      if (res.status === 403) {
+        setGenerateError("Su piano Free i report sono solo automatici. Passa a Premium per generarli quando vuoi.");
+        return;
+      }
       if (res.status === 402) {
         setGenerateError("Token mensili insufficienti per generare il report mensile.");
         return;
@@ -92,7 +99,10 @@ export default function ReportsPage() {
         if (!r.ok) throw new Error("load_failed");
         return r.json();
       })
-      .then((data) => setReports(data.reports ?? []))
+      .then((data) => {
+        setReports(data.reports ?? []);
+        setIsPro(data.plan_type === "pro");
+      })
       .catch((e) => setError(e.message))
       .finally(() => setLoading(false));
   }, []);
@@ -112,22 +122,39 @@ export default function ReportsPage() {
       <div className={styles.header}>
         <h1 className={styles.title}>Storico Report</h1>
         <p className={styles.subtitle}>Report settimanali e mensili generati automaticamente</p>
-        <div className={styles.generateRow}>
-          <button
-            className={styles.generateBtn}
-            disabled={generating !== null}
-            onClick={() => handleGenerate("weekly")}
-          >
-            {generating === "weekly" ? "Generazione..." : "📅 Genera report settimanale"}
-          </button>
-          <button
-            className={styles.generateBtn}
-            disabled={generating !== null}
-            onClick={() => handleGenerate("monthly")}
-          >
-            {generating === "monthly" ? "Generazione..." : "📆 Genera report mensile"}
-          </button>
-        </div>
+        {isPro ? (
+          <div className={styles.generateRow}>
+            <button
+              className={styles.generateBtn}
+              disabled={generating !== null}
+              onClick={() => handleGenerate("weekly")}
+            >
+              {generating === "weekly" ? "Generazione..." : "📅 Genera report settimanale"}
+            </button>
+            <button
+              className={styles.generateBtn}
+              disabled={generating !== null}
+              onClick={() => handleGenerate("monthly")}
+            >
+              {generating === "monthly" ? "Generazione..." : "📆 Genera report mensile"}
+            </button>
+          </div>
+        ) : (
+          <div className={styles.upgradeNote}>
+            <div className={styles.upgradeNoteIcon}>
+              <Lock size={16} strokeWidth={2.5} />
+            </div>
+            <div className={styles.upgradeNoteBody}>
+              <p className={styles.upgradeNoteTitle}>Report automatici sul piano Free</p>
+              <p className={styles.upgradeNoteText}>
+                Arrivano ogni lunedì e a inizio mese. Passa a Premium per generarli quando vuoi.
+              </p>
+            </div>
+            <Link href="/abbonamenti#premium" className={styles.upgradeNoteCta}>
+              Passa a Premium
+            </Link>
+          </div>
+        )}
         {generateError && <p className={styles.subtitle}>{generateError}</p>}
       </div>
 
@@ -168,11 +195,18 @@ export default function ReportsPage() {
                 <div className={styles.reportDate}>{formatDate(r.report_date)}</div>
               </div>
             </div>
-            <span
-              className={`${styles.reportBadge} ${r.report_type === "weekly" ? styles.reportBadgeWeekly : ""}`}
-            >
-              {r.report_type === "weekly" ? "Settimanale" : "Mensile"}
-            </span>
+            <div className={styles.reportCardRight}>
+              {r.locked && (
+                <span className={styles.lockBadge} title="Sfocato su piano Free">
+                  <Lock size={12} strokeWidth={2.5} />
+                </span>
+              )}
+              <span
+                className={`${styles.reportBadge} ${r.report_type === "weekly" ? styles.reportBadgeWeekly : ""}`}
+              >
+                {r.report_type === "weekly" ? "Settimanale" : "Mensile"}
+              </span>
+            </div>
           </Link>
         ))}
       </div>

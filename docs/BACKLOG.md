@@ -12,6 +12,36 @@ Nessun task in corso.
 
 ## ✅ Completati
 
+### 2026-07-23
+- **Piano Free — report solo automatici + blur dal secondo mese**: nuova policy sui report
+  per il piano Free (1 report settimanale + 1 mensile, generati solo dal sistema, non a
+  richiesta dell'utente; dal secondo mese di iscrizione i report arrivano sfocati per
+  spingere l'upgrade a Premium).
+  - `bot.py`: `/weekly_plan`, `/monthly_plan`, `/monthly_report` (e alias `/weekly_report`)
+    bloccati per utenti Free con messaggio di upsell verso `/piano`; i report restano
+    generabili solo dai job automatici (`_weekly_plan_job` lun 08:05, `_monthly_plan_job`
+    1° del mese 08:00). Il testo Telegram del report automatico riceve una riga di upsell
+    quando il report è "locked" (dal secondo mese, piano Free).
+  - `src/dashboard/app.py`: `/api/reports/generate` risponde 403 per utenti non-pro;
+    `/api/reports` e `/api/reports/<token>` espongono ora `plan_type` e `locked`
+    (helper `_is_report_locked`); rimosso leak di `user_id` dall'endpoint pubblico
+    `/api/reports/<token>`.
+  - Frontend `frontend/src/app/reports/`: pulsanti "Genera report" nascosti per utenti
+    Free (sostituiti da banner upsell con link a `/abbonamenti#premium`); badge lucchetto
+    (lucide `Lock`) sui report bloccati nella lista; overlay sfocato in stile
+    `PremiumGate` (già usato in analytics) nella pagina di dettaglio report.
+  - Copy pricing aggiornato (`frontend/src/messages/{it,en}.json`,
+    `frontend/src/app/abbonamenti/page.tsx`) per riflettere la nuova policy Free;
+    aggiunta ancora `#premium` alla card Premium in `/abbonamenti`.
+  - Fix bug pre-esistente non collegato: typo "Analaisi" → "Analisi" nel sottotitolo
+    report mensile (`frontend/src/app/reports/[token]/page.tsx`).
+  - Nuovi test in `tests/test_dashboard_app.py`:
+    `test_report_locked_for_free_user_only_from_second_month`,
+    `test_report_never_locked_for_pro_user`,
+    `test_reports_list_marks_locked_reports_for_free_user`.
+  - Verificato anche manualmente in locale (utente usa-e-getta creato e rimosso con
+    `delete_user_completely`, DB ripristinato allo stato originale).
+
 ### 2026-04-28
 - Bug fix routine abbonamenti 
 

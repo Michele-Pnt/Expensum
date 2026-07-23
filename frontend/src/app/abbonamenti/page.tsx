@@ -43,7 +43,14 @@ export default function Abbonamenti() {
                   <ListItemIcon sx={{ minWidth: 36 }}><Check color="primary" /></ListItemIcon>
                   <ListItemText primary="Scelta tra Avatar Base" />
                 </ListItem>
+                <ListItem disablePadding sx={{ mb: 1 }}>
+                  <ListItemIcon sx={{ minWidth: 36 }}><Check color="primary" /></ListItemIcon>
+                  <ListItemText primary="Report settimanale e mensile automatici" />
+                </ListItem>
               </List>
+              <Typography variant="caption" color="text.secondary" sx={{ display: "block", mt: 2 }}>
+                Dal secondo mese i report arrivano sfocati: sblocca tutto con Premium.
+              </Typography>
             </CardContent>
             <CardActions sx={{ p: 3, pt: 0 }}>
               <Button fullWidth variant="outlined" color="primary" size="large">
@@ -54,7 +61,7 @@ export default function Abbonamenti() {
         </Grid>
 
         {/* PREMIUM PLAN */}
-        <Grid item xs={12} md={4}>
+        <Grid item xs={12} md={4} id="premium">
           <Card
             sx={{
               height: '100%', display: 'flex', flexDirection: 'column', borderRadius: 4,

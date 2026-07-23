@@ -99,11 +99,11 @@
       "oneTime": "/una tantum",
       "free": {
         "label": "Free",
-        "note": "Per chi vuole iniziare a tenere traccia senza impegno.",
+        "note": "Per chi vuole iniziare a tenere traccia senza impegno. Dal secondo mese i report arrivano sfocati: sblocca tutto con Premium.",
         "features": [
           "Registrazione spese illimitata",
           "Categorie personalizzabili",
-          "Report mensile via Telegram",
+          "Report settimanale e mensile automatici (generati da noi, non a richiesta)",
           "Sincronizzazione Notion"
         ]
       },

@@ -29,6 +29,7 @@ from src.user_store import UserStore, User, LlmUsageEvent, LlmPricing, DailyMetr
 from src import analytics
 from src import brevo_client
 from src import beta_access
+from src import category_matcher
 from src.privacy_export import build_export_json, build_csv_rows, CSV_HEADER, NOTION_CSV_UNAVAILABLE_MESSAGE
 from src.notion_client import NotionFinanceClient
 from src.storage.notion_storage import NotionStorage
@@ -2519,6 +2520,30 @@ def _chat_parse_text(chat_id: str, text: str, skip_length_check: bool = False) -
         except Exception:
             pass
 
+    # Categorizzazione adattiva — stesso hook usato da bot.py (src/category_matcher.py),
+    # qui mancava: senza questo la chat webapp non traccia mai le occorrenze e resta
+    # bloccata sulla categoria fallback anche dopo N ripetizioni dello stesso pattern.
+    if result and result.get("type") == "expense" and result.get("category"):
+        try:
+            cm_user = _get_user_by_chat_id(chat_id)
+            if cm_user.storage_backend == "postgres":
+                with store.Session() as s:
+                    cm_storage = _build_financial_storage(cm_user, pg_session=s)
+                    match_result = category_matcher.evaluate_and_track(
+                        s, cm_storage, store, chat_id,
+                        result["name"], result["category"], categories,
+                    )
+            else:
+                cm_storage = _build_financial_storage(cm_user)
+                with store.Session() as cm_session:
+                    match_result = category_matcher.evaluate_and_track(
+                        cm_session, cm_storage, store, chat_id,
+                        result["name"], result["category"], categories,
+                    )
+            result["category"] = match_result.category_name
+        except Exception:
+            logger.exception("Errore categorizzazione adattiva chat webapp")
+
     return result, usage, ""
 
 
@@ -4213,14 +4238,31 @@ def analytics_month_comparison():
 # API Reports — storico report web
 # ---------------------------------------------------------------------------
 
+def _is_report_locked(plan_type: str, signup: date | None, report_date_str: str | None) -> bool:
+    """Piano Free: il report del mese di iscrizione è visibile per intero; dal
+    secondo mese in poi viene mostrato sfocato per incentivare l'upgrade a Premium."""
+    if plan_type == "pro" or not signup or not report_date_str:
+        return False
+    report_date = date.fromisoformat(report_date_str)
+    months_since_signup = (report_date.year - signup.year) * 12 + (report_date.month - signup.month)
+    return months_since_signup >= 1
+
+
 @app.route("/api/reports/<share_token>", methods=["GET"])
 def api_get_report_by_token(share_token: str):
     """Endpoint pubblico: restituisce un report tramite share_token (no auth richiesta)."""
     with store.Session() as s:
         storage = PostgresStorage(session=s, user_id="")
         report = storage.get_report_by_token(share_token)
-    if not report:
-        return jsonify({"error": "Report non trovato"}), 404
+        if not report:
+            return jsonify({"error": "Report non trovato"}), 404
+        user = s.query(User).filter_by(chat_id=report["user_id"]).first()
+        signup = user.created_at.date() if user and user.created_at else None
+
+    plan_info = store.get_user_plan(report["user_id"])
+    report["plan_type"] = plan_info["plan_type"]
+    report["locked"] = _is_report_locked(plan_info["plan_type"], signup, report.get("report_date"))
+    report.pop("user_id", None)
     return jsonify(report)
 
 
@@ -4230,7 +4272,10 @@ def api_get_report_by_token(share_token: str):
 def api_generate_report():
     """Endpoint autenticato: genera on-demand il report weekly o monthly per l'utente
     corrente, riusando la stessa logica della routine automatica (bot.py). Se l'utente
-    ha anche Telegram collegato, il messaggio viene inviato anche lì."""
+    ha anche Telegram collegato, il messaggio viene inviato anche lì.
+
+    Riservato al piano Premium: sul piano Free i report sono solo automatici
+    (generati da noi, non a richiesta dell'utente)."""
     from flask import g
 
     body = request.get_json(silent=True) or {}
@@ -4239,6 +4284,15 @@ def api_generate_report():
         return jsonify({"error": "type deve essere 'weekly' o 'monthly'"}), 400
 
     chat_id = g.chat_id
+
+    if store.get_user_plan(chat_id)["plan_type"] != "pro":
+        return jsonify({
+            "error": "Sul piano Free i report arrivano automaticamente (ogni lunedì per il "
+                     "settimanale, il 1° del mese per il mensile). Passa a Premium per generarli "
+                     "quando vuoi.",
+            "code": "premium_required",
+        }), 403
+
     telegram_connected = not str(chat_id).startswith("web_")
 
     import asyncio
@@ -4279,6 +4333,10 @@ def api_get_reports_for_user():
     with store.Session() as s:
         storage = PostgresStorage(session=s, user_id=g.chat_id)
         reports = storage.get_reports_for_user(user_id=g.chat_id, limit=limit)
+        user = s.query(User).filter_by(chat_id=g.chat_id).first()
+        signup = user.created_at.date() if user and user.created_at else None
+
+    plan_info = store.get_user_plan(g.chat_id)
     # Omette text_content e report_data per tenere la lista leggera
     summary = [
         {
@@ -4287,10 +4345,11 @@ def api_get_reports_for_user():
             "report_date": r["report_date"],
             "share_token": r["share_token"],
             "created_at": r["created_at"],
+            "locked": _is_report_locked(plan_info["plan_type"], signup, r["report_date"]),
         }
         for r in reports
     ]
-    return jsonify({"reports": summary})
+    return jsonify({"reports": summary, "plan_type": plan_info["plan_type"]})
 
 
 # ---------------------------------------------------------------------------
