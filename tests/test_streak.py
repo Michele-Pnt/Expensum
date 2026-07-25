@@ -216,8 +216,8 @@ def test_reset_stale_streaks_resets_only_counting_users_with_gap(mock_db_session
         reward_active_until=datetime.utcnow() + timedelta(days=1),
     )
 
-    reset_count = store.reset_stale_streaks()
-    assert reset_count == 1
+    reset_users = store.reset_stale_streaks()
+    assert reset_users == [("s10", 5)]
 
     with store.Session() as s:
         assert s.query(UserStreak).filter_by(chat_id="s10").first().current_streak_days == 0

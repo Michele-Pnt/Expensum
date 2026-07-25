@@ -74,8 +74,8 @@ class Config:
 
     # --- MISTRAL ---
     MISTRAL_API_KEY: str = os.getenv("MISTRAL_API_KEY", "")
-    MISTRAL_SMALL_MODEL: str = "mistral-small-latest"   # Mistral Small 3.1
-    MISTRAL_LARGE_MODEL: str = "mistral-large-latest"   # Mistral Large 3
+    MISTRAL_SMALL_MODEL: str = "mistral-small-latest"   # risolve a Mistral Small 4 (2026)
+    MISTRAL_LARGE_MODEL: str = "mistral-large-latest"   # risolve a Mistral Large 3 (2026)
     # Timeout HTTP per chiamata (ms): senza questo il client può restare
     # appeso a tempo indeterminato su una risposta lenta (nessuna eccezione,
     # quindi né retry né except a valle scattano mai).

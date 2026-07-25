@@ -287,7 +287,23 @@ async def run_agent(
             budget_by_cat = {}
 
     if not transactions:
-        logger.error("Nessuna transazione trovata. Uscita.")
+        logger.info(
+            "Nessuna transazione nel periodo richiesto, invio nudge invece del report.",
+            extra={"domain": "app", "event": "monthly_report_no_transactions"},
+        )
+        if chat_id and not dry_run and not str(chat_id).startswith("web_"):
+            try:
+                telegram = TelegramClient(chat_id=chat_id)
+                await telegram.send_report(
+                    "📭 *Non siamo riusciti a prepararti la tua dashboard*\n\n"
+                    "Il motivo è semplice: non risulta nessuna transazione registrata per "
+                    "questo periodo.\n\n"
+                    "Ti invitiamo a prendere consapevolezza delle tue spese: scrivi a Moneo la "
+                    "tua prossima spesa o entrata e scopri tutti i vantaggi che Expensum può "
+                    "portarti nella gestione delle tue finanze! 💪"
+                )
+            except Exception as e:
+                logger.warning(f"Impossibile inviare nudge 'nessuna transazione' a utente: {e}")
         return None
 
     # 2. ELABORAZIONE DATI
@@ -447,6 +463,12 @@ async def run_agent(
             final_report = ReportBuilder.build_fallback_report(report, forecast, accounts=accounts, budget_by_cat=budget_by_cat)
 
     final_report = _insert_accounts_section_near_summary(final_report, accounts)
+
+    if not dry_run:
+        try:
+            final_report += user_store.get_referral_footer_text(user.email if user else None)
+        except Exception as e:
+            logger.warning(f"Impossibile aggiungere footer referral al report: {e}")
 
     # 5. LOG DEL REPORT
     logger.info("▶ Step 5/7: Report generato")

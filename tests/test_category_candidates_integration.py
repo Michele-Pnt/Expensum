@@ -249,13 +249,18 @@ class TestPromotionCycle:
         for _ in range(2):
             result = _evaluate(db_session, mock_storage, user_store, "Scorie radioattive", "Altro")
             assert result.category_name == "Altro"
-            assert result.promoted is False
+            assert result.awaiting_confirmation is False
 
         result = _evaluate(db_session, mock_storage, user_store, "Scorie radioattive", "Altro")
+        assert result.awaiting_confirmation is True
 
-        assert result.promoted is True
-        assert result.category_name == "Scorie radioattive"
-        mock_storage.create_category.assert_called_once_with("Scorie radioattive")
+        match_result = category_matcher.confirm_promotion(
+            db_session, mock_storage, user_store, result.candidate_id
+        )
+
+        assert match_result.promoted is True
+        assert match_result.category_name == "Scorie Radioattive"
+        mock_storage.create_category.assert_called_once_with("Scorie Radioattive")
 
     def test_mirror_updated_immediately_after_promotion(
         self, db_session, user_store, mock_storage,
