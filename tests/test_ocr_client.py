@@ -88,6 +88,17 @@ def test_extract_text_raises_ocr_error_when_empty(mock_open, _mock_tess):
         client.extract_text_from_image("/fake/dark_photo.jpg", chat_id="123")
 
 
+@patch("src.ocr_client.Image.open")
+def test_extract_text_raises_ocr_error_on_decompression_bomb(mock_open):
+    """Un'immagine con dimensioni pixel dichiarate enormi (decompression bomb) viene
+    rifiutata come OCRError gestito, non propagata come eccezione non catturata."""
+    mock_open.side_effect = Image.DecompressionBombError("immagine troppo grande")
+
+    client = OcrClient()
+    with pytest.raises(OCRError):
+        client.extract_text_from_image("/fake/bomb.png", chat_id="123")
+
+
 @patch("src.ocr_client.pytesseract.image_to_string", return_value="A")
 @patch("src.ocr_client.Image.open")
 def test_extract_text_raises_ocr_error_when_too_short(mock_open, _mock_tess):

@@ -19,6 +19,13 @@ from PIL import Image, ImageEnhance, ImageFilter
 
 logger = logging.getLogger("financial_agent.ocr")
 
+# Difesa da decompression bomb: un file piccolo (sotto MAX_FILE_SIZE_MB) può
+# dichiarare dimensioni pixel enormi e far allocare a Pillow centinaia di MB in
+# memoria al decode. Una foto scontrino reale (anche da fotocamera 48MP) sta
+# ampiamente sotto questa soglia; il default di Pillow (~89M pixel, solo warning,
+# non blocca) è troppo permissivo per input non fidati da Telegram.
+Image.MAX_IMAGE_PIXELS = 30_000_000
+
 # Soglia minima di caratteri per considerare l'OCR riuscito
 _MIN_TEXT_LENGTH = 10
 
@@ -102,8 +109,16 @@ class OcrClient:
             extra={"domain": "usage", "event": "ocr_started", "chat_id": chat_id, "meta": {}},
         )
 
-        img = Image.open(image_path)
-        img = self._preprocess(img)
+        try:
+            img = Image.open(image_path)
+            img = self._preprocess(img)
+        except Image.DecompressionBombError:
+            logger.warning(
+                "ocr_decompression_bomb_rejected",
+                extra={"domain": "security", "event": "ocr_decompression_bomb_rejected",
+                       "chat_id": chat_id, "meta": {}},
+            )
+            raise OCRError("immagine non valida")
 
         raw_text = pytesseract.image_to_string(img, lang="ita", config=_TESSERACT_CONFIG)
         cleaned = self._clean(raw_text)
