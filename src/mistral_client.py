@@ -147,7 +147,7 @@ class MistralClient:
     """Client Mistral Small 3.1 per generazione report mensile finanziario."""
 
     def __init__(self) -> None:
-        self._client = Mistral(api_key=Config.MISTRAL_API_KEY)
+        self._client = Mistral(api_key=Config.MISTRAL_API_KEY, timeout_ms=Config.MISTRAL_TIMEOUT_MS)
 
     @retry(
         retry=retry_if_exception(_is_retryable),
