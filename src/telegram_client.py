@@ -33,8 +33,13 @@ MAX_MESSAGE_LENGTH = 4096
 class TelegramClient:
     """Client per l'invio di messaggi Telegram."""
 
-    def __init__(self, chat_id: str | None = None):
-        self._bot = Bot(token=Config.TELEGRAM_BOT_TOKEN)
+    def __init__(self, chat_id: str | None = None, bot_token: str | None = None):
+        """`bot_token` è opzionale: gli alert operativi (log anomali, servizi down)
+        possono girare su un bot Telegram separato da quello che l'utente usa per
+        tracciare le proprie finanze (Config.ALERTS_BOT_TOKEN), così i due flussi
+        di messaggi non si mischiano nella stessa chat. Default: lo stesso bot
+        applicativo, per non rompere i chiamanti esistenti (report utente reali)."""
+        self._bot = Bot(token=bot_token or Config.TELEGRAM_BOT_TOKEN)
         self._chat_id = chat_id or Config.TELEGRAM_CHAT_ID
 
     # ------------------------------------------------------------------

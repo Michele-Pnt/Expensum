@@ -100,6 +100,10 @@ class Config:
     ADMIN_ALERT_CHAT_IDS: list[str] = [
         cid.strip() for cid in os.getenv("ADMIN_ALERT_CHAT_IDS", "").split(",") if cid.strip()
     ] or ([TELEGRAM_CHAT_ID] if TELEGRAM_CHAT_ID else [])
+    # Bot Telegram dedicato agli alert operativi (separato da quello che l'utente usa
+    # per tracciare le proprie finanze, così i due flussi di messaggi non si mischiano
+    # nella stessa chat). Se assente ricade sullo stesso bot applicativo.
+    ALERTS_BOT_TOKEN: str = os.getenv("ALERTS_BOT_TOKEN", "") or TELEGRAM_BOT_TOKEN
     # Username del bot (senza @), usato per costruire deep link t.me/<username>?start=...
     TELEGRAM_BOT_USERNAME: str = os.getenv("TELEGRAM_BOT_USERNAME", "")
     INVITE_CODE: str = os.getenv("INVITE_CODE", "")
