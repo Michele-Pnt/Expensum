@@ -2884,9 +2884,16 @@ class UserStore:
             )
 
         if plan_info["plan_type"] == "pro" and plan_info["tokens_remaining"] < reserved_tokens:
+            # Strutturato (non solo testo libero) cosi' log analysis tooling puo'
+            # aggregare per chat_id: un singolo evento e' normale usura del soft cap,
+            # ripetuto piu' volte e' il segnale di script/account compromesso che la
+            # checklist di sicurezza chiede di monitorare (Token Monitoring).
             logger.warning(
-                "[User %s] Pro ha toccato il cap: %s token rimasti (richiesti %s). Anomalia.",
-                chat_id, plan_info["tokens_remaining"], reserved_tokens,
+                "pro_cap_hit",
+                extra={
+                    "domain": "security", "event": "pro_cap_hit", "chat_id": chat_id,
+                    "meta": {"tokens_remaining": plan_info["tokens_remaining"], "requested": reserved_tokens},
+                },
             )
 
         with self.Session() as session:
