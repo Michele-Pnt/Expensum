@@ -95,6 +95,11 @@ class Config:
     # --- TELEGRAM ---
     TELEGRAM_BOT_TOKEN: str = os.getenv("TELEGRAM_BOT_TOKEN", "")
     TELEGRAM_CHAT_ID: str = os.getenv("TELEGRAM_CHAT_ID", "")
+    # Destinatari degli alert operativi (log anomali, servizi down) — co-founder inclusi.
+    # Comma-separated; se assente ricade sul solo TELEGRAM_CHAT_ID (mai vuoto per errore).
+    ADMIN_ALERT_CHAT_IDS: list[str] = [
+        cid.strip() for cid in os.getenv("ADMIN_ALERT_CHAT_IDS", "").split(",") if cid.strip()
+    ] or ([TELEGRAM_CHAT_ID] if TELEGRAM_CHAT_ID else [])
     # Username del bot (senza @), usato per costruire deep link t.me/<username>?start=...
     TELEGRAM_BOT_USERNAME: str = os.getenv("TELEGRAM_BOT_USERNAME", "")
     INVITE_CODE: str = os.getenv("INVITE_CODE", "")
