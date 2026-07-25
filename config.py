@@ -65,6 +65,10 @@ class Config:
     MISTRAL_API_KEY: str = os.getenv("MISTRAL_API_KEY", "")
     MISTRAL_SMALL_MODEL: str = "mistral-small-latest"   # Mistral Small 3.1
     MISTRAL_LARGE_MODEL: str = "mistral-large-latest"   # Mistral Large 3
+    # Timeout HTTP per chiamata (ms): senza questo il client può restare
+    # appeso a tempo indeterminato su una risposta lenta (nessuna eccezione,
+    # quindi né retry né except a valle scattano mai).
+    MISTRAL_TIMEOUT_MS: int = int(os.getenv("MISTRAL_TIMEOUT_MS", "120000"))
 
     # --- GEMINI / VERTEX AI ---
     # GEMINI_API_KEY usato solo come fallback; la produzione usa Vertex AI
