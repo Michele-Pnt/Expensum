@@ -893,14 +893,27 @@ def _free_plan_report_locked(chat_id: str, report_date: date) -> bool:
 
 
 async def _reply_report_on_demand_blocked(update: Update, kind: str) -> None:
-    """Informa l'utente Free che il report è solo automatico, non generabile a richiesta."""
+    """Informa l'utente Free che il report è solo automatico, non generabile a richiesta,
+    con CTA di upgrade (stesso URL usato dal drip trial D25/D29: login webapp con
+    redirect alla pagina abbonamenti — il checkout Stripe è fuori scope in beta).
+
+    Telegram rifiuta bottoni inline con url non-https (400 "wrong http url"): in locale
+    WEBAPP_BASE_URL è spesso http://localhost, quindi il bottone si aggiunge solo se lo
+    schema è valido, altrimenti si manda comunque il messaggio testuale senza bottone."""
     cadence = "ogni lunedì mattina" if kind == "weekly" else "il primo di ogni mese"
+    upgrade_url = f"{Config.WEBAPP_BASE_URL}/login?next=/abbonamenti"
+    keyboard = None
+    if upgrade_url.startswith("https://") or upgrade_url.startswith("tg://"):
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("🚀 Passa a Premium", url=upgrade_url)]
+        ])
     await update.message.reply_text(
         "🔒 *Report su richiesta riservato al piano Premium*\n"
         f"Sul piano Free il report {kind_label(kind)} arriva automaticamente {cadence}: "
         "non è generabile a richiesta.\n\n"
-        "Passa a Premium con /piano per generarlo quando vuoi.",
+        "Passa a Premium per generarlo quando vuoi 👇",
         parse_mode=ParseMode.MARKDOWN,
+        reply_markup=keyboard,
     )
 
 
@@ -1000,9 +1013,19 @@ async def cmd_monthly_report(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     try:
         import main as main_module
-        await main_module.run_agent(
-            target_year, target_month, dry_run=False, chat_id=chat_id, shared_store=_user_store,
+        await asyncio.wait_for(
+            main_module.run_agent(
+                target_year, target_month, dry_run=False, chat_id=chat_id, shared_store=_user_store,
+            ),
+            timeout=300,
         )
+    except asyncio.TimeoutError:
+        logger.error("[User %s] monthly_report: timeout dopo 300s", chat_id)
+        await update.message.reply_text(
+            "⏱️ Il report mensile ha impiegato troppo tempo (>5 min). Riprova più tardi — "
+            "potrebbe essere un problema temporaneo con Notion o Mistral."
+        )
+        return
     except Exception as e:
         logger.exception("[User %s] Errore generazione monthly_report: %s", chat_id, e)
         await update.message.reply_text(
@@ -3113,12 +3136,17 @@ def _monthly_plan_job(app: Application, loop: asyncio.AbstractEventLoop) -> None
                 logger.info(f"[MonthlyReport] Salto {chat_id}: token insufficienti")
                 continue
             try:
-                await main_module.run_agent(
-                    target_year, target_month, dry_run=False, chat_id=chat_id, shared_store=_user_store,
+                await asyncio.wait_for(
+                    main_module.run_agent(
+                        target_year, target_month, dry_run=False, chat_id=chat_id, shared_store=_user_store,
+                    ),
+                    timeout=300,
                 )
                 _track_event(chat_id, "notification_sent", {"notification_type": "monthly_report"})
                 sent += 1
                 logger.info(f"[MonthlyReport] Report inviato a {chat_id}")
+            except asyncio.TimeoutError:
+                logger.error(f"[MonthlyReport] Timeout (>300s) per {chat_id}")
             except Exception as e:
                 logger.error(f"[MonthlyReport] Errore per {chat_id}: {e}")
             await asyncio.sleep(0.5)
