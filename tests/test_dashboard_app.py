@@ -442,8 +442,17 @@ def test_telegram_login_template_has_mobile_keyboard_guards(client):
     assert 'enterkeyhint="next"' in html
     assert 'enterkeyhint="go"' in html
 
-def test_telegram_login_reassigns_account_to_new_chat_id(client):
+def test_telegram_login_reassigns_account_to_new_chat_id(client, monkeypatch):
     from src.dashboard.app import store
+
+    # La route arruola la riassegnazione in coda e attende (polling) il worker fuori
+    # banda (scripts/process_reassignment_jobs.py) — vedi
+    # UserStore.enqueue_chat_id_reassignment/wait_for_reassignment_job. Nessun worker
+    # gira nei test: si simula il suo turno eseguendo la coda al posto dello sleep.
+    monkeypatch.setattr(
+        "src.user_store.time.sleep",
+        lambda _: store.process_pending_reassignment_jobs(),
+    )
 
     old_chat_id, email, password = _create_dashboard_user(
         store,

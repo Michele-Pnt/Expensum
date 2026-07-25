@@ -51,6 +51,7 @@ from telegram.ext import (
 )
 
 import os
+import tempfile
 
 from config import Config, setup_logging
 from src.expense_parser import ExpenseParser
@@ -619,7 +620,7 @@ async def _build_and_send_weekly_plan(
             if table_image_path:
                 with open(table_image_path, "rb") as img:
                     await message.reply_photo(img)
-        elif bot:
+        elif bot and not str(chat_id).startswith("web_"):
             await bot.send_message(
                 chat_id=int(chat_id),
                 text=telegram_text,
@@ -741,6 +742,11 @@ async def _build_and_send_monthly_plan(
             "\n\n🔒 _Dal secondo mese il report completo (grafici e dettagli) è sfocato "
             "sulla Dashboard. Passa a Premium con /piano per sbloccarlo._"
         )
+    try:
+        user = _user_store.get_user(chat_id)
+        telegram_text += _user_store.get_referral_footer_text(user.email if user else None)
+    except Exception as e:
+        logger.warning(f"[User {chat_id}] Impossibile aggiungere footer referral al piano mensile: {e}")
 
     try:
         if message:
@@ -1172,19 +1178,28 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                     "Riprova dalle Impostazioni della webapp."
                 )
             return
-        try:
-            _user_store.reassign_user_chat_id(old_chat_id, chat_id)
-        except ValueError:
-            logger.warning("[User %s] Collegamento Telegram fallito: chat_id già associato", chat_id)
-            await update.message.reply_text(
-                "⚠️ Questo account Telegram è già associato a un altro profilo Expensum."
-            )
+        # Riassegnazione cross-tenant: arruolata qui (ruolo DML-only), eseguita da
+        # scripts/process_reassignment_jobs.py (worker fuori banda, ruolo owner mai
+        # esposto a rete). Vedi security design notes § Vulnerabilità residua #2.
+        job_id = _user_store.enqueue_chat_id_reassignment(old_chat_id, chat_id)
+        status, error_text = _user_store.wait_for_reassignment_job(job_id)
+        if status == "failed":
+            if error_text and "gia associato" in error_text:
+                logger.warning("[User %s] Collegamento Telegram fallito: chat_id già associato", chat_id)
+                await update.message.reply_text(
+                    "⚠️ Questo account Telegram è già associato a un altro profilo Expensum."
+                )
+            else:
+                logger.warning("[User %s] Collegamento Telegram fallito: %s", chat_id, error_text)
+                await update.message.reply_text(
+                    "⚠️ Si è verificato un errore durante il collegamento. Riprova tra qualche istante "
+                    "riaprendo lo stesso link."
+                )
             return
-        except Exception:
-            logger.exception("[User %s] Collegamento Telegram fallito per errore imprevisto", chat_id)
+        if status == "pending":
+            logger.warning("[User %s] Collegamento Telegram: job %s ancora in coda dopo il timeout", chat_id, job_id)
             await update.message.reply_text(
-                "⚠️ Si è verificato un errore durante il collegamento. Riprova tra qualche istante "
-                "riaprendo lo stesso link."
+                "⏳ Il collegamento richiede qualche istante in più. Riprova tra poco riaprendo lo stesso link."
             )
             return
         # Consuma il token solo ora che il collegamento è andato a buon fine: un
@@ -2023,7 +2038,7 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     logger.info(f"[User {chat_id}] Vocale ricevuto: '{file_info.file_id}' ({voice.file_size} bytes)")
 
     # 🛡️ Nome file unico per chat_id (evita race condition tra utenti)
-    temp_path = f"temp_voice_{chat_id}.ogg"
+    temp_path = os.path.join(tempfile.gettempdir(), f"temp_voice_{chat_id}.ogg")
 
     # 🛡️ try/finally garantisce la pulizia del file anche in caso di errore
     try:
@@ -2182,7 +2197,7 @@ async def handle_photos(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     logger.info(f"[User {chat_id}] Foto ricevuta: '{file_info.file_id}' ({foto_hd.file_size} bytes)")
 
     # 🛡️ Nome file unico per chat_id (evita race condition tra utenti)
-    temp_path = f"temp_photo_{chat_id}.jpg"
+    temp_path = os.path.join(tempfile.gettempdir(), f"temp_photo_{chat_id}.jpg")
 
     # 🛡️ try/finally garantisce la pulizia del file anche in caso di errore
     try:
@@ -2988,6 +3003,9 @@ def _daily_dashboard_job(app: Application, loop: asyncio.AbstractEventLoop) -> N
         sent = 0
         for user in all_users:
             chat_id = user.chat_id
+            if str(chat_id).startswith("web_"):
+                # Utenti solo webapp: nessun Telegram collegato, niente da inviare
+                continue
             try:
                 dashboard_text = _build_dashboard_for_user(chat_id)
 
@@ -3346,15 +3364,57 @@ def _nightly_retention_cleanup() -> None:
         logger.error(f"[NightlyRetention] Errore job: {e}")
 
 
-def _nightly_streak_reset_job() -> None:
-    """Job APScheduler alle 03:15 — azzera le streak interrotte da un giorno saltato.
+def _streak_break_message(lost_streak_days: int) -> str:
+    """Testo scherzoso per l'alert di streak interrotta, variante se era solo 1 giorno."""
+    tail = (
+        " Ricorda che segnare le tue finanze è fondamentale per trovare le "
+        "inefficienze delle tue abitudini finanziarie!"
+    )
+    if lost_streak_days <= 1:
+        return (
+            "😅 Ops! Ieri ti sei dimenticato di segnare le spese e la streak è già "
+            "andata in fumo... ripartiamo da zero, dai!" + tail
+        )
+    return (
+        f"😅 Ops! Ieri ti sei dimenticato di segnare le spese e la streak di "
+        f"*{lost_streak_days} giorni* è andata in fumo... si riparte da zero, dai!" + tail
+    )
+
+
+def _nightly_streak_reset_job(app: Application, loop: asyncio.AbstractEventLoop) -> None:
+    """Job APScheduler alle 03:15 — azzera le streak interrotte da un giorno saltato
+    e avvisa scherzosamente l'utente via Telegram.
 
     Safety net: senza una transazione futura non c'è altro modo di accorgersi che un
     utente ha smesso di registrare durante un ciclo di conteggio.
     """
+    async def _notify_reset_users(reset_users: list[tuple[str, int]]) -> int:
+        bot = app.bot
+        sent = 0
+        for chat_id, lost_streak_days in reset_users:
+            user = _user_store.get_user(chat_id)
+            if not user or not user.notifications_enabled:
+                continue
+            try:
+                await bot.send_message(
+                    chat_id=chat_id,
+                    text=_streak_break_message(lost_streak_days),
+                    parse_mode="Markdown",
+                )
+                _track_event(chat_id, "notification_sent", {"notification_type": "streak_break"})
+                sent += 1
+            except Exception as e:
+                logger.error(f"[NightlyStreakReset] Errore invio a {chat_id}: {e}")
+            await asyncio.sleep(0.5)
+        return sent
+
     try:
-        reset_count = _user_store.reset_stale_streaks()
-        logger.info("[NightlyStreakReset] Streak azzerate: %d", reset_count)
+        reset_users = _user_store.reset_stale_streaks()
+        logger.info("[NightlyStreakReset] Streak azzerate: %d", len(reset_users))
+        if reset_users:
+            future = asyncio.run_coroutine_threadsafe(_notify_reset_users(reset_users), loop)
+            sent = future.result(timeout=300)
+            logger.info(f"[NightlyStreakReset] Notifiche inviate: {sent}/{len(reset_users)}")
     except Exception as e:
         logger.error(f"[NightlyStreakReset] Errore job: {e}")
 
@@ -3477,7 +3537,7 @@ async def _start_scheduler(app: Application) -> None:
     scheduler.add_job(_nightly_category_sync, 'cron', hour=3, minute=0, args=[app, loop], id='nightly_category_sync')
     scheduler.add_job(_nightly_subscription_job, 'cron', hour=3, minute=5, args=[app, loop], id='nightly_subscription_job')
     scheduler.add_job(_nightly_retention_cleanup, 'cron', hour=3, minute=10, id='nightly_retention_cleanup')
-    scheduler.add_job(_nightly_streak_reset_job, 'cron', hour=3, minute=15, id='nightly_streak_reset_job')
+    scheduler.add_job(_nightly_streak_reset_job, 'cron', hour=3, minute=15, args=[app, loop], id='nightly_streak_reset_job')
     scheduler.add_job(_trial_expiry_job, 'cron', hour=4, minute=0, args=[app, loop], id='trial_expiry_job')
     scheduler.add_job(_daily_dashboard_job, 'cron', hour=8, minute=0, args=[app, loop], id='daily_dashboard_job')
     scheduler.add_job(_weekly_plan_job, 'cron', day_of_week='mon', hour=8, minute=5, args=[app, loop], id='weekly_plan_job')

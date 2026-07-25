@@ -14,6 +14,7 @@ from datetime import datetime, date, timedelta, timezone
 from zoneinfo import ZoneInfo
 import secrets
 import string
+import time
 from decimal import Decimal, ROUND_HALF_UP
 from typing import Optional
 import json
@@ -677,6 +678,12 @@ class UserStore:
         minima: usarla SOLO per operazioni cross-tenant impossibili sotto RLS
         (es. reassign_user_chat_id, old→new user_id). Mai per flussi per-utente.
 
+        Dall'introduzione della coda (Opzione B, v. security design notes § Vulnerabilità
+        residua #2), l'unico chiamante in produzione è
+        `scripts/process_reassignment_jobs.py` — un processo separato, mai esposto a
+        rete, che è l'unico a tenere `MIGRATION_DATABASE_URL` in memoria. bot.py e
+        src/dashboard/app.py non la usano più direttamente.
+
         In prod usa MIGRATION_DATABASE_URL (ruolo owner); in dev/sqlite ricade
         sull'engine applicativo (stesso ruolo, nessuna separazione).
         """
@@ -706,8 +713,9 @@ class UserStore:
             {
                 "provider": "mistral",
                 "model": Config.MISTRAL_SMALL_MODEL,
-                "input_cost_per_1k": 0.0001,
-                "output_cost_per_1k": 0.0003,
+                # Mistral Small 4 — listino ufficiale 2026: $0.15/M input, $0.60/M output
+                "input_cost_per_1k": 0.00015,
+                "output_cost_per_1k": 0.0006,
             },
             {
                 "provider": "mistral",
@@ -1250,10 +1258,113 @@ class UserStore:
             session.query(User).filter(User.chat_id == chat_id).update({"is_active": True})
             session.commit()
 
+    def enqueue_chat_id_reassignment(self, old_chat_id: str, new_chat_id: str) -> int:
+        """Arruola una richiesta di riassegnazione chat_id, da eseguire fuori banda.
+
+        Chiamata dal bot/dashboard (ruolo DML-only, nessun privilegio owner) quando un
+        utente collega la webapp a Telegram o cambia account Telegram (`bot.py` sul
+        deep-link `/start link_<state>`, `src/dashboard/app.py` sul login da chat_id
+        diverso). L'esecuzione vera — che richiede bypass RLS cross-tenant — è demandata
+        a `scripts/process_reassignment_jobs.py`, l'unico processo con le credenziali
+        owner (`MIGRATION_DATABASE_URL`), mai esposto a rete. Vedi
+        `wait_for_reassignment_job` per attendere l'esito e `reassign_user_chat_id` per
+        la logica effettiva. security design notes § Vulnerabilità residua #2.
+        """
+        from src.storage.models import ChatIdReassignmentJob
+
+        with self.Session() as session:
+            job = ChatIdReassignmentJob(
+                old_chat_id=str(old_chat_id),
+                new_chat_id=str(new_chat_id),
+                status="pending",
+            )
+            session.add(job)
+            session.commit()
+            return job.id
+
+    def process_pending_reassignment_jobs(self, limit: int = 10) -> int:
+        """Esegue i job 'pending' in coda (claim atomico + `reassign_user_chat_id` +
+        aggiornamento stato). Logica condivisa da `scripts/process_reassignment_jobs.py`
+        (il worker fuori banda in produzione) e dai test, che simulano il worker senza
+        far girare un processo separato. Ritorna il numero di job processati.
+        """
+        from src.storage.models import ChatIdReassignmentJob
+
+        with self.Session() as session:
+            job_ids = [
+                row[0] for row in session.query(ChatIdReassignmentJob.id).filter(
+                    ChatIdReassignmentJob.status == "pending"
+                ).order_by(ChatIdReassignmentJob.created_at).limit(limit).all()
+            ]
+
+        processed = 0
+        for job_id in job_ids:
+            with self.Session() as session:
+                claimed = session.query(ChatIdReassignmentJob).filter(
+                    ChatIdReassignmentJob.id == job_id,
+                    ChatIdReassignmentJob.status == "pending",
+                ).update({"status": "processing"})
+                session.commit()
+                if not claimed:
+                    continue
+                job = session.query(ChatIdReassignmentJob).filter(
+                    ChatIdReassignmentJob.id == job_id
+                ).first()
+                old_chat_id, new_chat_id = job.old_chat_id, job.new_chat_id
+
+            status, error_text = "done", None
+            try:
+                self.reassign_user_chat_id(old_chat_id, new_chat_id)
+            except ValueError as exc:
+                status, error_text = "failed", str(exc)
+            except Exception:
+                logger.exception("[ReassignmentJob %s] Fallito per errore imprevisto", job_id)
+                status, error_text = "failed", "internal_error"
+
+            with self.Session() as session:
+                session.query(ChatIdReassignmentJob).filter(
+                    ChatIdReassignmentJob.id == job_id
+                ).update({
+                    "status": status,
+                    "error_text": error_text,
+                    "processed_at": datetime.utcnow(),
+                })
+                session.commit()
+            processed += 1
+        return processed
+
+    def wait_for_reassignment_job(
+        self, job_id: int, timeout: float = 8.0, poll_interval: float = 0.3
+    ) -> tuple[str, Optional[str]]:
+        """Attende (polling) l'esito di un job arruolato da `enqueue_chat_id_reassignment`.
+
+        Ritorna (status, error_text): status è "done"/"failed" se il worker ha già
+        processato il job entro `timeout` secondi, altrimenti resta "pending" (il worker
+        lo processerà comunque a breve — il chiamante mostra un messaggio di attesa
+        invece di un errore secco).
+        """
+        from src.storage.models import ChatIdReassignmentJob
+
+        deadline = time.monotonic() + timeout
+        while True:
+            with self.Session() as session:
+                job = session.query(ChatIdReassignmentJob).filter(
+                    ChatIdReassignmentJob.id == job_id
+                ).first()
+                if job and job.status != "pending":
+                    return job.status, job.error_text
+            if time.monotonic() >= deadline:
+                return "pending", None
+            time.sleep(poll_interval)
+
     def reassign_user_chat_id(self, old_chat_id: str, new_chat_id: str) -> bool:
         """Ricollega un account esistente a un nuovo chat_id Telegram.
 
-        Aggiorna anche tutte le tabelle locali che referenziano `users.chat_id`.
+        Aggiorna anche tutte le tabelle locali che referenziano `users.chat_id`. Eseguita
+        SOLO da `scripts/process_reassignment_jobs.py` (worker fuori banda con credenziali
+        owner) — il bot/dashboard non la chiamano più direttamente, usano
+        `enqueue_chat_id_reassignment` + `wait_for_reassignment_job`. Vedi Opzione B in
+        security design notes § Vulnerabilità residua #2.
         Se il `new_chat_id` è già occupato da un altro account reale, solleva ValueError.
         """
         from src.storage.models import (
@@ -2251,6 +2362,20 @@ class UserStore:
             "lifetime_founder_guaranteed": lifetime_founder_guaranteed,
         }
 
+    def get_referral_footer_text(self, email: Optional[str]) -> str:
+        """Footer da appendere in coda ai report (mensili/settimanali) con il link
+        referral personale dell'utente. Ritorna stringa vuota se l'utente non ha
+        un'email associata (utenti solo-Telegram mai passati dalla webapp).
+        """
+        email = (email or "").strip().lower()
+        if not email:
+            return ""
+        from config import Config
+
+        referral_code = self.get_or_create_referral_code(email)
+        link = f"{Config.WEBAPP_BASE_URL}?ref={referral_code}"
+        return f"\n\n---\n🎁 Ti piace Expensum? Invita un amico col tuo link e sblocca ricompense: {link}"
+
     def mark_tally_lead_synced(self, tally_submission_id: str) -> None:
         """Marca un lead Tally come sincronizzato su Brevo."""
         with self.Session() as session:
@@ -3161,7 +3286,7 @@ class UserStore:
             logger.warning("[UserStreak] Impossibile aggiornare la streak per %s: %s", chat_id, exc)
             return None
 
-    def reset_stale_streaks(self) -> int:
+    def reset_stale_streaks(self) -> list[tuple[str, int]]:
         """Azzera `current_streak_days` per chi ha saltato un giorno (job notturno, best-effort).
 
         Senza una transazione futura non c'è altro modo di accorgersi che un utente
@@ -3171,8 +3296,12 @@ class UserStore:
         tentativo fallito non lo fa scalare, si riprova allo stesso target. Le righe
         in `cycle_state='reward_active'` non vengono toccate: la loro transizione è
         gestita pigramente da `record_streak_activity`.
+
+        Returns:
+            Lista di `(chat_id, lost_streak_days)` per ogni utente resettato, così il
+            job chiamante può notificarlo.
         """
-        reset_count = 0
+        reset_users: list[tuple[str, int]] = []
         try:
             with self.Session() as session:
                 streaks = (
@@ -3185,12 +3314,12 @@ class UserStore:
                     tz = ZoneInfo(user.timezone) if user and user.timezone else ZoneInfo("Europe/Rome")
                     today = datetime.now(tz).date()
                     if streak.last_qualifying_date is not None and streak.last_qualifying_date < today - timedelta(days=1):
+                        reset_users.append((streak.chat_id, streak.current_streak_days))
                         streak.current_streak_days = 0
-                        reset_count += 1
                 session.commit()
         except Exception as exc:  # noqa: BLE001 — job best-effort
             logger.warning("[UserStreak] Errore reset streak notturno: %s", exc)
-        return reset_count
+        return reset_users
 
     def record_tour_event(self, chat_id: str, event: str, step_id: str | None) -> None:
         """Persiste lo stato del tour guidato webapp sull'utente (best-effort).

@@ -1500,16 +1500,25 @@ def telegram_login_miniapp():
     if was_suspended:
         store.reactivate_user(user.chat_id)
 
-    # Gestisce accesso da chat_id diverso (cambio account Telegram)
+    # Gestisce accesso da chat_id diverso (cambio account Telegram). Riassegnazione
+    # cross-tenant: arruolata qui (ruolo DML-only), eseguita da
+    # scripts/process_reassignment_jobs.py (worker fuori banda, ruolo owner mai esposto
+    # a rete). Vedi security design notes § Vulnerabilità residua #2.
     final_chat_id = chat_id
     if user.chat_id != chat_id:
-        try:
-            store.reassign_user_chat_id(user.chat_id, chat_id)
-        except ValueError:
+        job_id = store.enqueue_chat_id_reassignment(user.chat_id, chat_id)
+        status, error_text = store.wait_for_reassignment_job(job_id)
+        if status == "failed":
             return render_template(
                 "telegram_login.html",
                 state=state,
                 error="Questo account Telegram e gia associato a un altro profilo.",
+            )
+        if status == "pending":
+            return render_template(
+                "telegram_login.html",
+                state=state,
+                error="Il collegamento richiede qualche istante in più. Riprova tra poco.",
             )
 
     # Consuma il token di sessione

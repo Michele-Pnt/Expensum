@@ -192,3 +192,25 @@ class SavedReport(Base):
     text_content = Column(Text, nullable=False)
     report_data = Column(JSON, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class ChatIdReassignmentJob(Base):
+    """Coda per `UserStore.reassign_user_chat_id`.
+
+    old_chat_id/new_chat_id appartengono a due account (potenzialmente due tenant)
+    diversi: operazione cross-tenant per natura, quindi nessuna RLS su questa
+    tabella (stesso criterio di `JobRun` in `user_store.py`). L'app (ruolo
+    DML-only) può solo arruolare/leggere; solo `scripts/process_reassignment_jobs.py`
+    (ruolo owner, mai esposto a rete) esegue davvero la riassegnazione — vedi
+    security design notes § Vulnerabilità residua #2.
+    """
+
+    __tablename__ = "chat_id_reassignment_jobs"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    old_chat_id = Column(String, nullable=False, index=True)
+    new_chat_id = Column(String, nullable=False)
+    status = Column(String, nullable=False, default="pending")  # pending|done|failed
+    error_text = Column(String, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    processed_at = Column(DateTime, nullable=True)

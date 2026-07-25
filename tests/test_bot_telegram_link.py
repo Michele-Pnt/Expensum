@@ -5,6 +5,21 @@ from unittest.mock import AsyncMock, MagicMock
 pytestmark = pytest.mark.integration
 
 
+@pytest.fixture(autouse=True)
+def _simulate_reassignment_worker(monkeypatch):
+    """cmd_start arruola la riassegnazione chat_id in coda e attende (polling) che
+    scripts/process_reassignment_jobs.py la esegua — vedi UserStore.enqueue_chat_id_reassignment
+    / wait_for_reassignment_job. Nei test nessun worker separato gira: si simula il suo
+    turno rimpiazzando lo sleep del polling con l'esecuzione sincrona della coda, cosi'
+    il test resta veloce e deterministico invece di aspettare il timeout reale (8s)."""
+    import bot
+
+    monkeypatch.setattr(
+        "src.user_store.time.sleep",
+        lambda _: bot._user_store.process_pending_reassignment_jobs(),
+    )
+
+
 def _make_update_context(chat_id: str, args: list[str]):
     update = MagicMock()
     update.effective_chat.id = int(chat_id)

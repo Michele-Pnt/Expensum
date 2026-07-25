@@ -499,6 +499,102 @@ def test_reassign_user_chat_id_cleans_up_placeholder_target_children(mock_db_ses
 
 
 # ---------------------------------------------------------------------------
+# Coda riassegnazione chat_id (Opzione B — security design notes § Vuln. residua #2)
+# ---------------------------------------------------------------------------
+
+def test_enqueue_chat_id_reassignment_creates_pending_job(mock_db_session):
+    """enqueue_chat_id_reassignment deve solo arruolare, mai eseguire in-line: il
+    ruolo DML-only che la chiama (bot/dashboard) non ha i privilegi per l'operazione
+    cross-tenant, solo il worker fuori banda (process_pending_reassignment_jobs)."""
+    from src.storage.models import ChatIdReassignmentJob
+
+    store = mock_db_session
+    job_id = store.enqueue_chat_id_reassignment("old_q1", "new_q1")
+
+    with store.Session() as s:
+        job = s.query(ChatIdReassignmentJob).filter_by(id=job_id).first()
+        assert job is not None
+        assert job.status == "pending"
+        assert job.old_chat_id == "old_q1"
+        assert job.new_chat_id == "new_q1"
+
+    # Nessun account riassegnato finche' nessuno processa la coda
+    assert store.get_user("old_q1") is None
+    assert store.get_user("new_q1") is None
+
+
+def test_process_pending_reassignment_jobs_executes_and_marks_done(mock_db_session):
+    from src.storage.models import ChatIdReassignmentJob
+
+    store = mock_db_session
+    store.add_user(chat_id="old_q2", username="t", storage_backend="postgres")
+
+    job_id = store.enqueue_chat_id_reassignment("old_q2", "new_q2")
+    processed = store.process_pending_reassignment_jobs()
+
+    assert processed == 1
+    assert store.get_user("new_q2") is not None
+    assert store.get_user("old_q2") is None
+    with store.Session() as s:
+        job = s.query(ChatIdReassignmentJob).filter_by(id=job_id).first()
+        assert job.status == "done"
+        assert job.processed_at is not None
+
+
+def test_process_pending_reassignment_jobs_marks_failed_on_conflict(mock_db_session):
+    """Se new_chat_id e' gia' un account reale, reassign_user_chat_id solleva
+    ValueError: il job va marcato 'failed' con l'errore, non far esplodere il worker."""
+    from src.storage.models import ChatIdReassignmentJob
+
+    store = mock_db_session
+    store.add_user(chat_id="old_q3", username="t", storage_backend="postgres")
+    store.add_user(chat_id="new_q3", username="t2", storage_backend="postgres")
+    store.set_credentials("new_q3", "already-real@example.com", "Password123")
+
+    job_id = store.enqueue_chat_id_reassignment("old_q3", "new_q3")
+    processed = store.process_pending_reassignment_jobs()
+
+    assert processed == 1
+    with store.Session() as s:
+        job = s.query(ChatIdReassignmentJob).filter_by(id=job_id).first()
+        assert job.status == "failed"
+        assert "gia associato" in job.error_text
+    # Entrambi gli account restano intatti, nessuno cancellato a meta'
+    assert store.get_user("old_q3") is not None
+    assert store.get_user("new_q3") is not None
+
+
+def test_wait_for_reassignment_job_returns_pending_on_timeout(mock_db_session, monkeypatch):
+    """Se nessun worker processa il job entro il timeout, ritorna 'pending' (non
+    solleva e non blocca a lungo: qui simuliamo il timeout gia' scaduto)."""
+    store = mock_db_session
+    job_id = store.enqueue_chat_id_reassignment("old_q4", "new_q4")
+
+    monkeypatch.setattr("src.user_store.time.sleep", lambda _: None)
+    status, error_text = store.wait_for_reassignment_job(job_id, timeout=0, poll_interval=0.01)
+
+    assert status == "pending"
+    assert error_text is None
+
+
+def test_wait_for_reassignment_job_returns_done_once_processed(mock_db_session, monkeypatch):
+    """Simula il worker che processa la coda al posto dello sleep del polling —
+    stesso pattern usato nei test end-to-end di bot.py/dashboard app.py."""
+    store = mock_db_session
+    store.add_user(chat_id="old_q5", username="t", storage_backend="postgres")
+    job_id = store.enqueue_chat_id_reassignment("old_q5", "new_q5")
+
+    monkeypatch.setattr(
+        "src.user_store.time.sleep",
+        lambda _: store.process_pending_reassignment_jobs(),
+    )
+    status, error_text = store.wait_for_reassignment_job(job_id, timeout=5, poll_interval=0.01)
+
+    assert status == "done"
+    assert error_text is None
+
+
+# ---------------------------------------------------------------------------
 # Registro violazioni dati personali (Art. 33(5) GDPR)
 # ---------------------------------------------------------------------------
 
