@@ -19,6 +19,7 @@ import uuid
 from src.storage.base import FinancialStorage
 from src.storage.models import (
     Account, UserCategory, UserCategoryNotionLink, Expense, Income, Subscription, SavedReport, Transfer,
+    SavingsGoal, SavingsGoalEvaluation,
 )
 from src.storage import rls  # registra il listener RLS e fornisce bind_user
 
@@ -130,15 +131,24 @@ class PostgresStorage(FinancialStorage):
         self._commit()
         return names
 
-    def create_category(self, name: str, monthly_budget: float | None = None) -> dict:
+    def create_category(
+        self, name: str, monthly_budget: float | None = None,
+        description: str | None = None, description_summary: str | None = None,
+    ) -> dict:
         """Crea una nuova categoria per l'utente."""
-        category = UserCategory(user_id=self._user_id, name=name, monthly_budget=monthly_budget)
+        category = UserCategory(
+            user_id=self._user_id, name=name, monthly_budget=monthly_budget,
+            description=description, description_summary=description_summary,
+        )
         self._session.add(category)
         self._commit()
-        return {"id": category.id, "name": category.name, "monthly_budget": category.monthly_budget}
+        return {
+            "id": category.id, "name": category.name, "monthly_budget": category.monthly_budget,
+            "description": category.description, "description_summary": category.description_summary,
+        }
 
     def get_categories(self) -> list[dict]:
-        """Restituisce id, nome, budget mensile e average di tutte le categorie dell'utente."""
+        """Restituisce id, nome, budget mensile, descrizione e average di tutte le categorie dell'utente."""
         rows = self._session.query(UserCategory, UserCategoryNotionLink).outerjoin(
             UserCategoryNotionLink,
             UserCategoryNotionLink.category_id == UserCategory.id,
@@ -150,6 +160,8 @@ class PostgresStorage(FinancialStorage):
                 "id": cat.id,
                 "name": cat.name,
                 "monthly_budget": _d(cat.monthly_budget) if cat.monthly_budget is not None else None,
+                "description": cat.description,
+                "description_summary": cat.description_summary,
                 "average": _d(link.average) if link else 0.0,
             }
             for cat, link in rows
@@ -157,9 +169,11 @@ class PostgresStorage(FinancialStorage):
         self._commit()
         return result
 
-    def update_category(self, cat_id: int, name: str | None = None,
-                        monthly_budget: float | None = None) -> dict | None:
-        """Aggiorna nome o budget di una categoria."""
+    def update_category(
+        self, cat_id: int, name: str | None = None, monthly_budget: float | None = None,
+        description: str | None = None, description_summary: str | None = None,
+    ) -> dict | None:
+        """Aggiorna nome, budget e/o descrizione di una categoria."""
         row = self._session.query(UserCategory).filter(
             UserCategory.id == cat_id,
             UserCategory.user_id == self._user_id,
@@ -171,8 +185,14 @@ class PostgresStorage(FinancialStorage):
             row.name = name
         if monthly_budget is not None:
             row.monthly_budget = monthly_budget
+        if description is not None:
+            row.description = description
+            row.description_summary = description_summary
         self._commit()
-        return {"id": row.id, "name": row.name, "monthly_budget": row.monthly_budget}
+        return {
+            "id": row.id, "name": row.name, "monthly_budget": row.monthly_budget,
+            "description": row.description, "description_summary": row.description_summary,
+        }
 
     def delete_category(self, cat_id: int) -> bool:
         """Elimina una categoria (e il relativo link Notion se presente)."""
@@ -853,7 +873,7 @@ class PostgresStorage(FinancialStorage):
         return result
 
     def fetch_categories_full(self) -> list[dict]:
-        """Restituisce categorie con id, name e monthly_budget come float."""
+        """Restituisce categorie con id, name, monthly_budget (float) e descrizione."""
         rows = self._session.query(UserCategory).filter(
             UserCategory.user_id == self._user_id
         ).all()
@@ -862,6 +882,8 @@ class PostgresStorage(FinancialStorage):
                 "id": r.id,
                 "name": r.name,
                 "monthly_budget": float(r.monthly_budget) if r.monthly_budget is not None else None,
+                "description": r.description,
+                "description_summary": r.description_summary,
             }
             for r in rows
         ]
@@ -947,3 +969,151 @@ class PostgresStorage(FinancialStorage):
             "report_data": row.report_data,
             "created_at": row.created_at.isoformat() if row.created_at else None,
         }
+
+    # ------------------------------------------------------------------ savings goals
+
+    @staticmethod
+    def _goal_to_dict(row: SavingsGoal) -> dict:
+        return {
+            "id": row.id,
+            "goal_type": row.goal_type,
+            "name": row.name,
+            "target_amount": _d(row.target_amount),
+            "current_snapshot": _d(row.current_snapshot) if row.current_snapshot is not None else None,
+            "account_id": row.account_id,
+            "category_id": row.category_id,
+            "start_date": row.start_date.isoformat() if row.start_date else None,
+            "target_date": row.target_date.isoformat() if row.target_date else None,
+            "status": row.status,
+            "last_evaluated_at": row.last_evaluated_at.isoformat() if row.last_evaluated_at else None,
+            "completed_at": row.completed_at.isoformat() if row.completed_at else None,
+        }
+
+    def create_savings_goal(
+        self,
+        goal_type: str,
+        name: str,
+        target_amount: float,
+        account_id: int | None = None,
+        category_id: int | None = None,
+        start_date: date | None = None,
+        target_date: date | None = None,
+    ) -> dict:
+        """Crea un obiettivo di risparmio per l'utente corrente."""
+        goal = SavingsGoal(
+            user_id=self._user_id,
+            goal_type=goal_type,
+            name=name,
+            target_amount=target_amount,
+            account_id=account_id,
+            category_id=category_id,
+            start_date=start_date or date.today(),
+            target_date=target_date,
+        )
+        self._session.add(goal)
+        self._commit()
+        return self._goal_to_dict(goal)
+
+    def fetch_savings_goals(self, status: str | None = None) -> list[dict]:
+        """Restituisce gli obiettivi dell'utente, opzionalmente filtrati per stato."""
+        q = self._session.query(SavingsGoal).filter(SavingsGoal.user_id == self._user_id)
+        if status is not None:
+            q = q.filter(SavingsGoal.status == status)
+        rows = q.order_by(SavingsGoal.created_at.desc()).all()
+        result = [self._goal_to_dict(r) for r in rows]
+        self._commit()
+        return result
+
+    def update_savings_goal(self, goal_id: int, **fields) -> dict | None:
+        """Aggiorna name/target_amount/target_date/status di un obiettivo."""
+        row = self._session.query(SavingsGoal).filter(
+            SavingsGoal.id == goal_id,
+            SavingsGoal.user_id == self._user_id,
+        ).first()
+        if not row:
+            self._commit()
+            return None
+        if "name" in fields and fields["name"] is not None:
+            row.name = fields["name"]
+        if "target_amount" in fields and fields["target_amount"] is not None:
+            row.target_amount = fields["target_amount"]
+        if "target_date" in fields:
+            row.target_date = fields["target_date"]
+        if "status" in fields and fields["status"] is not None:
+            row.status = fields["status"]
+        if "current_snapshot" in fields:
+            row.current_snapshot = fields["current_snapshot"]
+        if "last_evaluated_at" in fields:
+            row.last_evaluated_at = fields["last_evaluated_at"]
+        if "completed_at" in fields:
+            row.completed_at = fields["completed_at"]
+        row.updated_at = datetime.utcnow()
+        self._commit()
+        return self._goal_to_dict(row)
+
+    def delete_savings_goal(self, goal_id: int) -> bool:
+        """Elimina un obiettivo e lo storico evaluation collegato (cascade FK)."""
+        row = self._session.query(SavingsGoal).filter(
+            SavingsGoal.id == goal_id,
+            SavingsGoal.user_id == self._user_id,
+        ).first()
+        if not row:
+            self._commit()
+            return False
+        self._session.query(SavingsGoalEvaluation).filter(
+            SavingsGoalEvaluation.goal_id == goal_id
+        ).delete()
+        self._session.delete(row)
+        self._commit()
+        return True
+
+    def save_savings_goal_evaluation(
+        self,
+        goal_id: int,
+        period_month: date,
+        progress_pct: float,
+        score_label: str,
+        eta_date: date | None,
+    ) -> None:
+        """Upsert della valutazione mensile per (goal_id, period_month)."""
+        existing = self._session.query(SavingsGoalEvaluation).filter(
+            SavingsGoalEvaluation.goal_id == goal_id,
+            SavingsGoalEvaluation.period_month == period_month,
+        ).first()
+        if existing:
+            existing.progress_pct = progress_pct
+            existing.score_label = score_label
+            existing.eta_date = eta_date
+            self._commit()
+            return
+        row = SavingsGoalEvaluation(
+            goal_id=goal_id,
+            user_id=self._user_id,
+            period_month=period_month,
+            progress_pct=progress_pct,
+            score_label=score_label,
+            eta_date=eta_date,
+        )
+        self._session.add(row)
+        self._commit()
+
+    def fetch_savings_goal_evaluations(self, goal_id: int, limit: int = 12) -> list[dict]:
+        """Restituisce lo storico delle valutazioni mensili di un obiettivo (più recenti prima)."""
+        rows = (
+            self._session.query(SavingsGoalEvaluation)
+            .filter(SavingsGoalEvaluation.goal_id == goal_id, SavingsGoalEvaluation.user_id == self._user_id)
+            .order_by(SavingsGoalEvaluation.period_month.desc())
+            .limit(limit)
+            .all()
+        )
+        result = [
+            {
+                "period_month": r.period_month.isoformat(),
+                "progress_pct": _d(r.progress_pct),
+                "score_label": r.score_label,
+                "eta_date": r.eta_date.isoformat() if r.eta_date else None,
+            }
+            for r in rows
+        ]
+        self._commit()
+        return result

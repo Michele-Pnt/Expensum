@@ -125,7 +125,10 @@ def _detect_time_sensitive_hint(
     return None
 
 
-def _build_user_prompt(message: str, categories: list[str], when: datetime) -> str:
+def _build_user_prompt(
+    message: str, categories: list[str], when: datetime,
+    category_descriptions: dict[str, str] | None = None,
+) -> str:
     """Costruisce il prompt utente con contesto.
 
     `when` è il timestamp reale associato al messaggio (es. `update.message.date` di
@@ -134,11 +137,27 @@ def _build_user_prompt(message: str, categories: list[str], when: datetime) -> s
     contiene una keyword ambigua rispetto all'ora del giorno (es. "coca" mattina vs
     sera) e l'utente ha una categoria reale corrispondente, viene aggiunto un breve
     blocco di contesto — altrimenti il prompt resta identico a prima.
+
+    `category_descriptions` (nome categoria -> sintesi LLM scritta dall'utente,
+    vedi `MistralClient.synthesize_category_description`) dà all'LLM un criterio
+    comportamentale esplicito per categoria invece del solo nome. Se assente o
+    vuoto, il prompt resta byte-identico a prima (nessuna categoria ha ancora una
+    descrizione — comportamento invariato, retrocompatibile).
     """
-    cats_str = ", ".join(categories) if categories else "Nessuna categoria disponibile"
+    if category_descriptions and any(category_descriptions.get(c) for c in categories):
+        lines = [
+            f"- {c}: {category_descriptions[c]}" if category_descriptions.get(c) else f"- {c}"
+            for c in categories
+        ]
+        cats_block = "\n".join(lines) if lines else "Nessuna categoria disponibile"
+        cats_line = f"Categorie disponibili:\n{cats_block}"
+    else:
+        cats_str = ", ".join(categories) if categories else "Nessuna categoria disponibile"
+        cats_line = f"Categorie disponibili: [{cats_str}]"
+
     base_prompt = (
         f"Data di oggi: {when.date().isoformat()}\n"
-        f"Categorie disponibili: [{cats_str}]\n\n"
+        f"{cats_line}\n\n"
         f"Messaggio dell'utente: \"{message}\""
     )
 
@@ -184,6 +203,53 @@ def match_category_string(
     return matched, score
 
 
+def _build_response_schema(categories: list[str]) -> dict:
+    """JSON Schema strutturato per forzare Mistral a rispondere SOLO con una delle
+    categorie reali dell'utente (o null), invece di fidarsi della sola istruzione
+    testuale nel prompt ("RIGOROSAMENTE UNA SOLA voce dalla lista fornita"), che
+    non impedisce al modello di restituire una categoria inventata (es. "Bar",
+    copiata dagli esempi fissi in _SYSTEM_PROMPT anche quando non è tra le
+    categorie reali). Con `category`/`income_type` come enum e `strict: True`,
+    l'API rifiuta/corregge a monte qualunque valore fuori lista — non serve più
+    fare affidamento solo sul fuzzy-match a valle in `_normalize`.
+    """
+    transaction_schema = {
+        "type": "object",
+        "properties": {
+            "type": {"type": "string", "enum": ["expense", "income", "transfer"]},
+            "amount": {"type": ["number", "null"]},
+            "category": {"enum": [*categories, None]},
+            "income_type": {"enum": [*_INCOME_TYPES, None]},
+            "name": {"type": "string"},
+            "date": {"type": "string"},
+            "from_account": {"type": ["string", "null"]},
+            "to_account": {"type": ["string", "null"]},
+        },
+        "required": [
+            "type", "amount", "category", "income_type", "name", "date",
+            "from_account", "to_account",
+        ],
+        "additionalProperties": False,
+    }
+    return {
+        "anyOf": [
+            transaction_schema,
+            {
+                "type": "object",
+                "properties": {"transactions": {"type": "array", "items": transaction_schema}},
+                "required": ["transactions"],
+                "additionalProperties": False,
+            },
+            {
+                "type": "object",
+                "properties": {"error": {"type": "string", "enum": ["not_expense"]}},
+                "required": ["error"],
+                "additionalProperties": False,
+            },
+        ]
+    }
+
+
 def _extract_json(text: str) -> dict | None:
     """Estrae un oggetto JSON dal testo, anche se circondato da altro testo."""
     # Prova prima il parsing diretto
@@ -214,12 +280,20 @@ def _extract_json(text: str) -> dict | None:
 class ExpenseParser:
     """Parser LLM per estrarre dati di spesa da testo libero."""
 
-    def __init__(self, categories: list[str] | None = None):
+    def __init__(
+        self, categories: list[str] | None = None,
+        category_descriptions: dict[str, str] | None = None,
+    ):
         """
         Args:
             categories: Lista nomi categorie da Notion (es. ["Affitto", "Supermercato", ...])
+            category_descriptions: nome categoria -> sintesi LLM della descrizione scritta
+                dall'utente (solo backend Postgres, vedi
+                `MistralClient.synthesize_category_description`). Opzionale e
+                retrocompatibile: se assente il prompt resta identico a prima.
         """
         self._categories = categories or []
+        self._category_descriptions = category_descriptions or {}
         self._mistral_client = Mistral(api_key=Config.MISTRAL_API_KEY)
 
         logger.info(
@@ -251,7 +325,7 @@ class ExpenseParser:
         """
         when = when or datetime.now()
         today = when.date()
-        user_prompt = _build_user_prompt(message, self._categories, when)
+        user_prompt = _build_user_prompt(message, self._categories, when, self._category_descriptions)
 
         logger.info(
             "parsing_expense",
@@ -325,7 +399,7 @@ class ExpenseParser:
         """
         when = when or datetime.now()
         today = when.date()
-        user_prompt = _build_user_prompt(message, self._categories, when)
+        user_prompt = _build_user_prompt(message, self._categories, when, self._category_descriptions)
 
         logger.info(
             "parsing_expense_multi",
@@ -401,7 +475,14 @@ class ExpenseParser:
                         ],
                         temperature=0.1,
                         max_tokens=1024,
-                        response_format={"type": "json_object"},
+                        response_format={
+                            "type": "json_schema",
+                            "json_schema": {
+                                "name": "expense_transaction",
+                                "schema": _build_response_schema(self._categories),
+                                "strict": True,
+                            },
+                        },
                     )
                     content = response.choices[0].message.content or ""
                     usage = {}

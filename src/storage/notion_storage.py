@@ -71,7 +71,11 @@ class NotionStorage(FinancialStorage):
         result = self._client.create_account(name, initial_amount=initial_balance)
         return {"id": result["id"], "name": name}
 
-    def create_category(self, name: str) -> dict:
+    def create_category(
+        self, name: str, monthly_budget: float | None = None,
+        description: str | None = None, description_summary: str | None = None,
+    ) -> dict:
+        # description/description_summary non supportati su Notion (solo Postgres, vedi base.py).
         result = self._client.create_category(name)
         return {"id": result["id"], "name": name}
 

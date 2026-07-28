@@ -871,6 +871,10 @@ class UserStore:
             cat_cols = _existing_columns(connection, "user_categories")
             if cat_cols and "monthly_budget" not in cat_cols:
                 connection.execute(text("ALTER TABLE user_categories ADD COLUMN monthly_budget REAL"))
+            if cat_cols and "description" not in cat_cols:
+                connection.execute(text("ALTER TABLE user_categories ADD COLUMN description TEXT"))
+            if cat_cols and "description_summary" not in cat_cols:
+                connection.execute(text("ALTER TABLE user_categories ADD COLUMN description_summary TEXT"))
 
             if dialect == "sqlite":
                 # Ripulisce la tabella legacy non più usata.
@@ -1625,7 +1629,9 @@ class UserStore:
         """Inserisce o aggiorna le categorie di un utente.
 
         Ogni dict deve avere: `name` (str) e opzionalmente `average` (float),
-        `notion_page_id` (str), `synced_at` (datetime), `monthly_budget` (float).
+        `notion_page_id` (str), `synced_at` (datetime), `monthly_budget` (float),
+        `description` (str), `description_summary` (str, sintesi LLM — solo
+        backend Postgres, vedi `ExpenseParser`/`MistralClient.synthesize_category_description`).
         I metadati Notion sono salvati in `user_category_notion_links`.
         """
         from src.storage.models import UserCategory, UserCategoryNotionLink
@@ -1663,6 +1669,8 @@ class UserStore:
                         user_id=user_id,
                         name=cat["name"],
                         monthly_budget=cat.get("monthly_budget"),
+                        description=cat.get("description"),
+                        description_summary=cat.get("description_summary"),
                     )
                     session.add(cat_row)
                     session.flush()  # ottieni l'id
@@ -1679,6 +1687,9 @@ class UserStore:
                         cat_row.name = cat["name"]
                     if cat.get("monthly_budget") is not None:
                         cat_row.monthly_budget = cat["monthly_budget"]
+                    if cat.get("description") is not None:
+                        cat_row.description = cat["description"]
+                        cat_row.description_summary = cat.get("description_summary")
 
                 # Upsert user_category_notion_links se ci sono metadati Notion
                 if notion_page_id:
@@ -1837,6 +1848,23 @@ class UserStore:
                 {"uid": user_id},
             ).fetchall()
             return [r[0] for r in rows]
+
+    def get_user_categories_with_descriptions(self, user_id: str) -> list[dict]:
+        """Ritorna [{"name": ..., "description_summary": ...}, ...] per il parser LLM.
+
+        `description_summary` è `None` per le categorie senza descrizione (comportamento
+        odierno, solo nome) — vedi `ExpenseParser(category_descriptions=...)`.
+        """
+        user_id = str(user_id)
+        with self._user_session(user_id) as session:
+            rows = session.execute(
+                text(
+                    "SELECT name, description_summary FROM user_categories "
+                    "WHERE user_id = :uid ORDER BY name"
+                ),
+                {"uid": user_id},
+            ).fetchall()
+            return [{"name": r[0], "description_summary": r[1]} for r in rows]
 
     def get_category_by_notion_page_id(self, user_id: str, page_id: str) -> dict:
         """Ritorna {name, average} per un page_id Notion. Fallback su Sconosciuta."""
@@ -2455,7 +2483,7 @@ class UserStore:
         """
         from src.storage.models import (
             Expense, Income, Account, Subscription, UserCategory, UserCategoryNotionLink,
-            SavedReport,
+            SavedReport, SavingsGoal, SavingsGoalEvaluation,
         )
 
         chat_id = str(chat_id)
@@ -2515,6 +2543,13 @@ class UserStore:
                         ),
                         {"uid": chat_id},
                     )
+                # Obiettivi di risparmio: solo backend postgres (feature non
+                # supportata su Notion). Evaluations prima dei goal (FK), goal
+                # prima di accounts/user_categories (FK account_id/category_id).
+                session.query(SavingsGoalEvaluation).filter(
+                    SavingsGoalEvaluation.user_id == chat_id
+                ).delete()
+                session.query(SavingsGoal).filter(SavingsGoal.user_id == chat_id).delete()
                 session.query(Expense).filter(Expense.user_id == chat_id).delete()
                 session.query(Income).filter(Income.user_id == chat_id).delete()
                 session.query(Subscription).filter(Subscription.user_id == chat_id).delete()
@@ -2694,6 +2729,20 @@ class UserStore:
                 changed_at=datetime.utcnow(),
                 reason=payment_reference,
             ))
+
+            # Obiettivi di risparmio: mai cancellati automaticamente al downgrade.
+            # Passano a "paused_downgrade" (nascosti/non calcolati finché non si
+            # torna Pro) e tornano "active" al successivo upgrade — nessuna perdita
+            # di dati, coerente con la feature che resta Pro-only.
+            from src.storage.models import SavingsGoal
+            if change_type == "downgrade":
+                session.query(SavingsGoal).filter(
+                    SavingsGoal.user_id == chat_id, SavingsGoal.status == "active",
+                ).update({"status": "paused_downgrade"})
+            elif change_type == "upgrade" and old_plan == "free":
+                session.query(SavingsGoal).filter(
+                    SavingsGoal.user_id == chat_id, SavingsGoal.status == "paused_downgrade",
+                ).update({"status": "active"})
 
             session.commit()
             logger.info(

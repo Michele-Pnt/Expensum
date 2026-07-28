@@ -235,9 +235,13 @@ def _get_storage(chat_id: str) -> FinancialStorage:
 def _get_parser(chat_id: str) -> ExpenseParser:
     """Crea un parser con categorie lette da user_categories (DB locale, < 1ms)."""
     chat_id = str(chat_id)
-    categories = _user_store.get_user_category_names(chat_id)
+    categories_with_desc = _user_store.get_user_categories_with_descriptions(chat_id)
+    categories = [c["name"] for c in categories_with_desc]
+    category_descriptions = {
+        c["name"]: c["description_summary"] for c in categories_with_desc if c["description_summary"]
+    }
     logger.info(f"Parser con {len(categories)} categorie per {chat_id}")
-    return ExpenseParser(categories=categories)
+    return ExpenseParser(categories=categories, category_descriptions=category_descriptions)
 
 
 def _get_message_when(update: Update, chat_id: str) -> datetime:
@@ -1166,6 +1170,25 @@ async def cmd_piano(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         testo += "Grazie per essere un utente PRO! Hai accesso a tutte le funzionalità premium di Expensum 🚀"
         
     await update.message.reply_text(testo, parse_mode=ParseMode.MARKDOWN)
+
+async def cmd_obiettivi(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Rimanda alla gestione degli obiettivi di risparmio sulla webapp.
+
+    CRUD e dashboard restano solo webapp (come budget/conti) — il bot fa solo
+    da entry point rapido, coerente con il resto del bot che e' gia' webapp-driven.
+    """
+    chat_id = str(update.effective_chat.id)
+    if not _is_authorized(update):
+        await update.message.reply_text("Devi prima registrarti con /registrati.")
+        return
+
+    url = f"{Config.WEBAPP_BASE_URL}/login?next=/goals"
+    await update.message.reply_text(
+        "🎯 Gestisci i tuoi obiettivi di risparmio (creazione, avanzamento, ETA) dalla webapp:\n"
+        f"{url}",
+        disable_web_page_preview=True,
+    )
+
 
 _SOCIAL_KEYBOARD = InlineKeyboardMarkup([
     [InlineKeyboardButton("🌐 Sito", url="https://expensum.it")],
@@ -3161,6 +3184,86 @@ def _monthly_plan_job(app: Application, loop: asyncio.AbstractEventLoop) -> None
         raise
 
 
+def _savings_goals_monthly_job(app: Application, loop: asyncio.AbstractEventLoop) -> None:
+    """Job APScheduler il 1° di ogni mese alle 07:30 (prima del report delle 8:00) —
+    calcola voto mensile + ETA per ogni obiettivo attivo degli utenti Pro/postgres,
+    salva `savings_goal_evaluations`, aggiorna `current_snapshot`/`status` e notifica
+    via Telegram i goal appena completati (testo semplice, mai un badge/reward).
+    """
+    from src.savings_goals_service import compute_goal_progress, compute_monthly_score, explain_score
+    from src.storage.postgres_storage import PostgresStorage
+
+    logger.info("[SavingsGoals] Avvio valutazione mensile obiettivi.")
+    today = date.today()
+    period_month = date(today.year, today.month, 1)
+
+    completed_notifications: list[tuple[str, dict, dict]] = []  # (chat_id, goal, score)
+    evaluated = 0
+
+    pro_pg_users = [u for u in _user_store.get_pro_users() if u.storage_backend == "postgres"]
+    for user in pro_pg_users:
+        chat_id = user.chat_id
+        try:
+            storage = _get_storage(chat_id)
+            if not isinstance(storage, PostgresStorage):
+                continue
+            goals = storage.fetch_savings_goals(status="active")
+            for goal in goals:
+                progress = compute_goal_progress(storage, goal)
+                score = compute_monthly_score(storage, goal, progress)
+                storage.save_savings_goal_evaluation(
+                    goal_id=goal["id"],
+                    period_month=period_month,
+                    progress_pct=progress["progress_pct"],
+                    score_label=score["score_label"],
+                    eta_date=progress["eta_date"],
+                )
+                update_fields = {
+                    "current_snapshot": progress["current"],
+                    "last_evaluated_at": datetime.utcnow(),
+                }
+                if progress["evaluable"] and progress["progress_pct"] >= 100 and goal["goal_type"] != "savings_rate":
+                    update_fields["status"] = "completed"
+                    update_fields["completed_at"] = datetime.utcnow()
+                    completed_notifications.append((chat_id, goal, score))
+                storage.update_savings_goal(goal["id"], **update_fields)
+                evaluated += 1
+        except Exception as e:
+            logger.error(f"[SavingsGoals] Errore valutazione per {chat_id}: {e}")
+
+    logger.info(f"[SavingsGoals] Obiettivi valutati: {evaluated} (utenti: {len(pro_pg_users)})")
+
+    if not completed_notifications:
+        return
+
+    async def _notify_completed():
+        bot = app.bot
+        sent = 0
+        for chat_id, goal, score in completed_notifications:
+            user = _user_store.get_user(chat_id)
+            if not user or not user.notifications_enabled:
+                continue
+            try:
+                text = (
+                    f"🎉 Obiettivo raggiunto: *{goal['name']}*!\n"
+                    f"{explain_score(goal, score, markdown=True)}"
+                )
+                await bot.send_message(chat_id=chat_id, text=text, parse_mode=ParseMode.MARKDOWN)
+                _track_event(chat_id, "notification_sent", {"notification_type": "savings_goal_completed"})
+                sent += 1
+            except Exception as e:
+                logger.error(f"[SavingsGoals] Errore notifica completamento per {chat_id}: {e}")
+            await asyncio.sleep(0.5)
+        return sent
+
+    future = asyncio.run_coroutine_threadsafe(_notify_completed(), loop)
+    try:
+        sent = future.result(timeout=300)
+        logger.info(f"[SavingsGoals] Notifiche completamento inviate: {sent}/{len(completed_notifications)}")
+    except Exception as e:
+        logger.error(f"[SavingsGoals] Errore invio notifiche completamento: {e}")
+
+
 def _trial_expiry_job(app: Application, loop: asyncio.AbstractEventLoop) -> None:
     """Job APScheduler alle 04:00 — downgrade automatico a Free per trial scaduti.
 
@@ -3569,6 +3672,7 @@ async def _start_scheduler(app: Application) -> None:
     scheduler.add_job(_trial_expiry_job, 'cron', hour=4, minute=0, args=[app, loop], id='trial_expiry_job')
     scheduler.add_job(_daily_dashboard_job, 'cron', hour=8, minute=0, args=[app, loop], id='daily_dashboard_job')
     scheduler.add_job(_weekly_plan_job, 'cron', day_of_week='mon', hour=8, minute=5, args=[app, loop], id='weekly_plan_job')
+    scheduler.add_job(_savings_goals_monthly_job, 'cron', day=1, hour=7, minute=30, args=[app, loop], id='savings_goals_monthly_job')
     scheduler.add_job(_monthly_plan_job, 'cron', day=1, hour=8, minute=0, args=[app, loop], id='monthly_plan_job')
     scheduler.add_job(_trial_lifecycle_job, 'cron', hour=9, minute=0, args=[app, loop], id='trial_lifecycle_job')
     scheduler.add_job(_health_check_job, 'interval', hours=4, id='health_check_job')
@@ -4168,6 +4272,7 @@ def main():
     app.add_handler(CommandHandler("feedback", cmd_feedback))
     app.add_handler(CommandHandler("status", cmd_status))
     app.add_handler(CommandHandler("piano", cmd_piano))
+    app.add_handler(CommandHandler("obiettivi", cmd_obiettivi))
     app.add_handler(CommandHandler("weekly_report", cmd_weekly_report))
     app.add_handler(CommandHandler("weekly_plan", cmd_weekly_plan))
     app.add_handler(CommandHandler("monthly_report", cmd_monthly_report))

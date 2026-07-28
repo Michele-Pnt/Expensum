@@ -56,7 +56,8 @@ export default function PrivacyContentEn() {
             Legal basis: performance of a contract (Art. 6(1)(b)).
           </li>
           <li>
-            <strong>Financial data</strong> (amounts, categories, accounts, subscriptions):
+            <strong>Financial data</strong> (amounts, categories, accounts, subscriptions,
+            declared savings goals with their tracked progress — Pro plan only):
             entered voluntarily for managing personal expenses. Legal basis: performance
             of a contract (Art. 6(1)(b)). Providing this data is optional in substance (no
             obligation to log every expense), but necessary to use the service&apos;s features.

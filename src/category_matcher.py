@@ -166,6 +166,29 @@ def score_categorization(
     return max(0.0, min(1.0, combined))
 
 
+def _generate_promoted_category_description(display_name: str) -> str | None:
+    """Genera una descrizione comportamentale una tantum per una categoria
+    promossa automaticamente da un pattern ricorrente (nessun testo scritto
+    dall'utente da cui partire, solo il nome — vedi
+    `MistralClient.generate_category_description_from_name`).
+
+    Best-effort: mai bloccare la promozione per un errore Mistral, la categoria
+    viene comunque creata senza descrizione se la generazione fallisce.
+    """
+    try:
+        from src.mistral_client import MistralClient
+        return MistralClient().generate_category_description_from_name(display_name)
+    except Exception as e:
+        logger.warning(
+            "category_description_generation_failed",
+            extra={
+                "domain": "usage", "event": "category_description_generation_failed",
+                "meta": {"error_type": type(e).__name__},
+            },
+        )
+        return None
+
+
 def _promote_candidate(
     session: Session,
     storage: FinancialStorage,
@@ -185,13 +208,16 @@ def _promote_candidate(
     (`confirm_promotion`) è responsabile della gestione dell'errore.
     """
     display_name = _capitalize_display_name(candidate.display_name)
+    description_summary = _generate_promoted_category_description(display_name)
 
-    created = storage.create_category(display_name)
+    created = storage.create_category(display_name, description_summary=description_summary)
     notion_page_id = created.get("id") if isinstance(created.get("id"), str) else None
 
     category_payload = {"name": display_name}
     if notion_page_id:
         category_payload["notion_page_id"] = notion_page_id
+    if description_summary:
+        category_payload["description_summary"] = description_summary
     user_store.upsert_user_categories(user_id, [category_payload])
 
     user_category = (

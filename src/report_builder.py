@@ -602,6 +602,7 @@ class MonthlyPlanData:
         self.total_accounts: float = 0.0
         self.spent_by_cat: dict[str, float] = {}         # spesa per categoria del mese scorso
         self.monthly_history: list[dict] = []            # storico mensile {month, income, expenses, net}
+        self.savings_goals_summary: list[dict] = []       # {name, progress_pct, score_label, explanation}
 
     def to_prompt_text(self) -> str:
         """Serializza i dati in testo strutturato per il prompt AI."""
@@ -641,6 +642,13 @@ class MonthlyPlanData:
             lines.append("VINCOLI ESPLICITI DELL'UTENTE:")
             for cat, val in self.category_overrides.items():
                 lines.append(f"  {cat}: max €{val:.2f}/mese")
+
+        if self.savings_goals_summary:
+            lines.append("")
+            lines.append("OBIETTIVI DI RISPARMIO:")
+            for g in self.savings_goals_summary:
+                lines.append(f"  🎯 {g['name']}: {g['score_label']} ({g['progress_pct']:.0f}% raggiunto)")
+                lines.append(f"     {g['explanation']}")
 
         return "\n".join(lines)
 
@@ -798,6 +806,26 @@ class MonthlyPlanBuilder:
         data.total_accounts = total_accounts
         data.spent_by_cat = spent_by_cat
         data.monthly_history = monthly_history
+
+        # Obiettivi di risparmio: stessa funzione di calcolo usata da webapp e dal
+        # job mensile (bot.py::_savings_goals_monthly_job) — così i numeri nella
+        # spiegazione sono sempre coerenti su tutti i canali. No-op per Notion
+        # (fetch_savings_goals -> [] di default in FinancialStorage).
+        try:
+            from src.savings_goals_service import compute_goal_progress, compute_monthly_score, explain_score
+            active_goals = storage.fetch_savings_goals(status="active")
+            for goal in active_goals:
+                progress = compute_goal_progress(storage, goal)
+                score = compute_monthly_score(storage, goal, progress)
+                data.savings_goals_summary.append({
+                    "name": goal["name"],
+                    "progress_pct": progress["progress_pct"],
+                    "score_label": score["score_label"],
+                    "eta_date": progress["eta_date"].isoformat() if progress["eta_date"] else None,
+                    "explanation": explain_score(goal, score, markdown=False),
+                })
+        except Exception:
+            logger.warning("Impossibile popolare il riepilogo obiettivi di risparmio nel piano mensile", exc_info=True)
 
         return data
 

@@ -372,6 +372,79 @@ class MistralClient:
 
         return list(DEFAULT_CATEGORIES)
 
+    def synthesize_category_description(self, raw_description: str) -> str:
+        """Sintetizza la descrizione di una categoria scritta dall'utente in una
+        frase breve, chiamata una tantum quando l'utente crea/modifica una
+        categoria (non ad ogni parsing spesa — vedi `ExpenseParser`, che riusa
+        solo il risultato salvato in `description_summary`).
+
+        Mantiene il registro discorsivo dell'utente (frase in linguaggio
+        naturale, non parole chiave): serve a comprimere descrizioni verbose in
+        una forma compatta senza perdere il criterio comportamentale espresso.
+
+        Fallback: se Mistral non risponde, ritorna `raw_description` troncata
+        (mai bloccare il salvataggio della categoria per un errore Mistral).
+        """
+        fallback = raw_description.strip()[:200]
+
+        prompt = (
+            "Sintetizza in UNA sola frase breve (massimo 20 parole), in italiano "
+            "naturale e nello stesso registro discorsivo dell'originale, la seguente "
+            "descrizione di una categoria di spesa personale. Non usare parole chiave "
+            "o elenchi puntati, scrivi una frase normale che descriva il comportamento "
+            "di spesa. Rispondi SOLO con la frase, nessun altro testo.\n\n"
+            f"Descrizione originale: \"{raw_description.strip()}\""
+        )
+
+        try:
+            response = self._client.chat.complete(
+                model=Config.MISTRAL_SMALL_MODEL,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.3,
+                max_tokens=128,
+            )
+            summary = (response.choices[0].message.content or "").strip().strip('"')
+            return summary or fallback
+        except Exception as e:
+            logger.warning("Errore sintesi descrizione categoria: %s — uso fallback troncato", e)
+            return fallback
+
+    def generate_category_description_from_name(
+        self, category_name: str, example_expense_name: str | None = None,
+    ) -> str | None:
+        """Genera una descrizione comportamentale per una categoria creata
+        automaticamente (promozione da pattern ricorrente, vedi
+        `category_matcher._promote_candidate`), dove non esiste un testo scritto
+        dall'utente da sintetizzare — solo il nome della categoria (e opzionalmente
+        il nome di una spesa reale che l'ha originata).
+
+        Ritorna `None` (non un fallback troncato: qui non c'è testo originale da
+        recuperare) se Mistral non risponde — la categoria viene comunque creata,
+        semplicemente senza descrizione, l'utente potrà scriverne una in webapp.
+        """
+        context = f" (nata da spese come \"{example_expense_name}\")" if example_expense_name else ""
+        prompt = (
+            "Sei un assistente finanziario. Scrivi UNA sola frase breve (massimo 15 "
+            "parole), in italiano naturale, che descriva a quale tipo di spese si "
+            f"riferisce generalmente una categoria di spesa personale chiamata "
+            f"\"{category_name}\"{context}. Non usare parole chiave o elenchi, scrivi "
+            "una frase normale. Rispondi SOLO con la frase, nessun altro testo."
+        )
+        try:
+            response = self._client.chat.complete(
+                model=Config.MISTRAL_SMALL_MODEL,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.3,
+                max_tokens=128,
+            )
+            summary = (response.choices[0].message.content or "").strip().strip('"')
+            return summary or None
+        except Exception as e:
+            logger.warning(
+                "Errore generazione descrizione per categoria promossa '%s': %s", category_name, e,
+            )
+            return None
+
 
 _WEEKLY_PLAN_PROMPT_TEMPLATE = """
 Sei un Coach Finanziario Personale specializzato in finanza quotidiana.

@@ -75,8 +75,17 @@ def mock_storage():
     (già coperta in test_postgres_storage.py), verificando solo che il matcher
     chiami create_category invece di toccare Notion/Postgres direttamente."""
     storage = MagicMock(spec=FinancialStorage)
-    storage.create_category.side_effect = lambda name: {"id": 999, "name": name}
+    storage.create_category.side_effect = lambda name, **kwargs: {"id": 999, "name": name}
     return storage
+
+
+@pytest.fixture(autouse=True)
+def mock_category_description_generation(monkeypatch):
+    """Evita chiamate reali a Mistral per la descrizione delle categorie promosse
+    automaticamente — non pertinente qui (già coperto in
+    tests/test_mistral_client_category_description.py), e i test di questo modulo
+    devono restare deterministici e senza rete."""
+    monkeypatch.setattr(category_matcher, "_generate_promoted_category_description", lambda display_name: None)
 
 
 @pytest.fixture(autouse=True)
@@ -177,7 +186,7 @@ class TestPromotionCycle:
 
         assert match_result.promoted is True
         assert match_result.category_name == "Ciabatte"
-        mock_storage.create_category.assert_called_once_with("Ciabatte")
+        mock_storage.create_category.assert_called_once_with("Ciabatte", description_summary=None)
 
         candidate = (
             db_session.query(CategoryCandidate)
@@ -260,7 +269,7 @@ class TestPromotionCycle:
 
         assert match_result.promoted is True
         assert match_result.category_name == "Scorie Radioattive"
-        mock_storage.create_category.assert_called_once_with("Scorie Radioattive")
+        mock_storage.create_category.assert_called_once_with("Scorie Radioattive", description_summary=None)
 
     def test_mirror_updated_immediately_after_promotion(
         self, db_session, user_store, mock_storage,
@@ -283,7 +292,7 @@ class TestPromotionCycle:
 
         match_result = category_matcher.confirm_promotion(db_session, mock_storage, user_store, result.candidate_id)
         assert match_result.category_name == "Netflix"
-        mock_storage.create_category.assert_called_once_with("Netflix")
+        mock_storage.create_category.assert_called_once_with("Netflix", description_summary=None)
 
     def test_next_occurrence_after_promotion_matches_new_category_directly(
         self, db_session, user_store, mock_storage,
@@ -386,7 +395,7 @@ class TestPromotionNotionMirror:
 
         notion_like_storage = MagicMock(spec=FinancialStorage)
         notion_like_storage.create_category.side_effect = (
-            lambda name: {"id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890", "name": name}
+            lambda name, **kwargs: {"id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890", "name": name}
         )
 
         _reach_threshold_and_confirm(db_session, notion_like_storage, user_store, "Ciabatte", "Scarpe")

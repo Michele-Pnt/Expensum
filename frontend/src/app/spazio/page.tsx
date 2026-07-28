@@ -20,7 +20,7 @@ interface Account {
   id: number; name: string; account_type: string | null;
   current_balance: number; opening_balance: number; currency: string;
 }
-interface Category { id: number; name: string; monthly_budget: number | null }
+interface Category { id: number; name: string; monthly_budget: number | null; description?: string | null }
 interface Subscription {
   id: number; name: string; amount: number | null; sub_type: string | null;
   last_billed: string | null; account_id: number | null; account_name: string;
@@ -311,7 +311,7 @@ export default function SpazioPage() {
   function openAdd(entity: EntityType) {
     const defaults: Record<EntityType, Record<string, string | number | null>> = {
       account: { name: "", account_type: "", initial_balance: 0 },
-      category: { name: "", monthly_budget: "" },
+      category: { name: "", monthly_budget: "", description: "" },
       subscription: { name: "", amount: "", sub_type: "", last_billed: "", account_id: "", category_id: "" },
       expense: { name: "", amount: "", date: todayIso(), category: "", category_id: "", account_id: "" },
       income: { name: "", amount: "", date: todayIso(), income_type: "", account_id: "" },
@@ -606,7 +606,7 @@ export default function SpazioPage() {
               </TableRow>
             </TableHead>
             <TableBody>
-              {filteredCats.map(row => {
+              {filteredCats.map((row, catIdx) => {
                 const suggested = suggestions[row.name];
                 const showSuggestion = suggested != null && !dismissed.has(row.name);
                 const delta = suggested != null && row.monthly_budget != null
@@ -642,8 +642,9 @@ export default function SpazioPage() {
                     )}
                     <TableCell sx={CELL_SX}>
                       <RowActions
-                        onEdit={() => openEdit("category", { id: row.id, name: row.name, monthly_budget: row.monthly_budget ?? "" })}
+                        onEdit={() => openEdit("category", { id: row.id, name: row.name, monthly_budget: row.monthly_budget ?? "", description: row.description ?? "" })}
                         onDelete={() => handleDelete("category", row.id)}
+                        editTourAttr={catIdx === 0 ? "category-edit-button" : undefined}
                       />
                     </TableCell>
                   </TableRow>
@@ -1020,6 +1021,12 @@ export default function SpazioPage() {
         <TextField label="Budget mensile (€)" fullWidth size="small" margin="dense" type="number"
           value={data.monthly_budget ?? ""}
           onChange={e => setField("monthly_budget", e.target.value)} />
+        <TextField label="Descrizione (facoltativa)" fullWidth size="small" margin="dense"
+          multiline minRows={2} inputProps={{ maxLength: 500 }}
+          placeholder="Es. spese fatte per uscire fuori a cena o pranzo"
+          helperText="Aiuta l'assistente a categorizzare meglio le spese ambigue"
+          value={data.description ?? ""}
+          onChange={e => setField("description", e.target.value)} />
       </>
     );
 
@@ -1233,7 +1240,13 @@ export default function SpazioPage() {
       </Card>
 
       {/* Dialog add/edit */}
-      <Dialog open={dialog.open} onClose={closeDialog} maxWidth="xs" fullWidth>
+      <Dialog
+        open={dialog.open}
+        onClose={closeDialog}
+        maxWidth="xs"
+        fullWidth
+        slotProps={{ paper: { "data-tour": "entity-dialog" } as Record<string, string> }}
+      >
         <DialogTitle sx={{ fontWeight: 700, fontSize: "1rem", color: PRIMARY }}>
           {dialog.mode === "add" ? "Aggiungi" : "Modifica"} {ENTITY_LABELS[dialog.entity]}
         </DialogTitle>
@@ -1241,7 +1254,7 @@ export default function SpazioPage() {
           {renderDialogFields()}
         </DialogContent>
         <DialogActions sx={{ px: 3, pb: 2 }}>
-          <Button onClick={closeDialog} sx={{ color: "#6B7280", textTransform: "none" }}>
+          <Button onClick={closeDialog} data-tour="entity-dialog-close" sx={{ color: "#6B7280", textTransform: "none" }}>
             Annulla
           </Button>
           <Button
@@ -1299,11 +1312,11 @@ function TabToolbar({
   );
 }
 
-function RowActions({ onEdit, onDelete }: { onEdit: () => void; onDelete: () => void }) {
+function RowActions({ onEdit, onDelete, editTourAttr }: { onEdit: () => void; onDelete: () => void; editTourAttr?: string }) {
   return (
     <Box sx={{ display: "flex", gap: 0.5, justifyContent: "flex-end" }}>
       <Tooltip title="Modifica">
-        <IconButton size="small" onClick={onEdit} sx={{ color: "#6B7280", "&:hover": { color: PRIMARY } }}>
+        <IconButton size="small" onClick={onEdit} data-tour={editTourAttr} sx={{ color: "#6B7280", "&:hover": { color: PRIMARY } }}>
           <Pencil size={14} />
         </IconButton>
       </Tooltip>

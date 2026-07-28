@@ -250,3 +250,48 @@ def test_prompt_byte_identical_when_no_hint_triggers():
         "Categorie disponibili: [Abbonamenti]\n\n"
         "Messaggio dell'utente: \"netflix\""
     )
+
+
+def test_prompt_byte_identical_without_category_descriptions_arg():
+    """Retrocompatibilità esplicita: senza il 4° argomento (category_descriptions),
+    il prompt resta identico a prima anche con più categorie."""
+    when = datetime(2026, 7, 22, 12, 0)
+    prompt = _build_user_prompt("pizza 15 euro", ["Cinema", "Cene/Pranzi"], when)
+    assert "Categorie disponibili: [Cinema, Cene/Pranzi]" in prompt
+
+
+def test_prompt_renders_descriptions_when_provided():
+    """Con category_descriptions, le categorie con descrizione vengono rese come
+    elenco con criterio comportamentale; quelle senza restano solo col nome."""
+    when = datetime(2026, 7, 22, 12, 0)
+    descriptions = {"Cene/Pranzi": "spese per uscire a cena o pranzo fuori casa"}
+    prompt = _build_user_prompt(
+        "pizza 15 euro", ["Cene/Pranzi", "Shopping"], when, descriptions,
+    )
+    assert "- Cene/Pranzi: spese per uscire a cena o pranzo fuori casa" in prompt
+    assert "- Shopping" in prompt
+    assert "[Cene/Pranzi, Shopping]" not in prompt
+
+
+def test_prompt_falls_back_to_bracket_list_when_no_category_has_description():
+    """Se category_descriptions è passato ma vuoto/nessuna voce valorizzata, il
+    formato resta quello attuale (nessuna riga aggiuntiva)."""
+    when = datetime(2026, 7, 22, 12, 0)
+    prompt = _build_user_prompt("netflix", ["Abbonamenti"], when, {})
+    assert prompt == (
+        "Data di oggi: 2026-07-22\n"
+        "Categorie disponibili: [Abbonamenti]\n\n"
+        "Messaggio dell'utente: \"netflix\""
+    )
+
+
+def test_expense_parser_init_accepts_category_descriptions():
+    """ExpenseParser deve accettare category_descriptions restando retrocompatibile
+    (nessun argomento -> comportamento identico a prima)."""
+    parser_no_desc = ExpenseParser(categories=["Fumo"])
+    assert parser_no_desc._category_descriptions == {}
+
+    parser_with_desc = ExpenseParser(
+        categories=["Fumo"], category_descriptions={"Fumo": "sigarette e svapo"},
+    )
+    assert parser_with_desc._category_descriptions == {"Fumo": "sigarette e svapo"}

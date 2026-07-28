@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import date, datetime
 import uuid
 
 from sqlalchemy import (
@@ -10,6 +10,7 @@ from sqlalchemy import (
     DateTime,
     ForeignKey,
     UniqueConstraint,
+    CheckConstraint,
     Index,
     Text,
     JSON,
@@ -109,6 +110,8 @@ class UserCategory(Base):
     user_id = Column(String, ForeignKey("users.chat_id"), nullable=False)
     name = Column(String, nullable=False)
     monthly_budget = Column(Numeric(12, 2), nullable=True)
+    description = Column(Text, nullable=True)
+    description_summary = Column(Text, nullable=True)
 
     __table_args__ = (
         UniqueConstraint("user_id", "name", name="uq_user_categories_user_name"),
@@ -192,6 +195,67 @@ class SavedReport(Base):
     text_content = Column(Text, nullable=False)
     report_data = Column(JSON, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class SavingsGoal(Base):
+    """Obiettivo di risparmio dell'utente (feature Pro, solo backend PostgreSQL).
+
+    `goal_type` determina come viene calcolato il valore corrente in
+    `src/savings_goals_service.py` (mai in questo modello): net_savings,
+    account_balance, net_worth, savings_rate, category_spending_reduction.
+    `current_snapshot` è solo una cache dell'ultimo valore calcolato dal job
+    mensile — il valore "adesso" mostrato in dashboard resta ricalcolato on-read.
+    """
+
+    __tablename__ = "savings_goals"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(String, ForeignKey("users.chat_id"), nullable=False)
+    goal_type = Column(String(30), nullable=False)
+    name = Column(String, nullable=False)
+    target_amount = Column(Numeric(12, 2), nullable=False)
+    current_snapshot = Column(Numeric(12, 2), nullable=True)
+    account_id = Column(Integer, ForeignKey("accounts.id"), nullable=True)
+    category_id = Column(Integer, ForeignKey("user_categories.id"), nullable=True)
+    start_date = Column(Date, nullable=False, default=date.today)
+    target_date = Column(Date, nullable=True)
+    status = Column(String(20), nullable=False, default="active")  # active|completed|paused_downgrade
+    last_evaluated_at = Column(DateTime, nullable=True)
+    completed_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, nullable=True, onupdate=datetime.utcnow)
+
+    __table_args__ = (
+        CheckConstraint("target_amount > 0", name="ck_savings_goals_target_positive"),
+        Index("ix_savings_goals_user_id", "user_id"),
+        Index("ix_savings_goals_user_status", "user_id", "status"),
+    )
+
+
+class SavingsGoalEvaluation(Base):
+    """Storico mensile del voto/ETA calcolato per un obiettivo (solo storico, non stato live).
+
+    Il valore corrente e la percentuale "adesso" restano sempre calcolati on-read
+    (vedi SavingsGoal); questa tabella serve solo a mostrare l'andamento nel tempo
+    del voto/ETA e a fornire dati storici al report mensile e al futuro hook RAG.
+    """
+
+    __tablename__ = "savings_goal_evaluations"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    goal_id = Column(Integer, ForeignKey("savings_goals.id", ondelete="CASCADE"), nullable=False)
+    user_id = Column(String, ForeignKey("users.chat_id"), nullable=False)
+    period_month = Column(Date, nullable=False)  # primo giorno del mese valutato
+    progress_pct = Column(Numeric(5, 2), nullable=False)
+    score_label = Column(String(20), nullable=False)
+    eta_date = Column(Date, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    __table_args__ = (
+        UniqueConstraint("goal_id", "period_month", name="uq_savings_goal_evaluations_goal_period"),
+        Index("ix_savings_goal_evaluations_goal_id", "goal_id"),
+        Index("ix_savings_goal_evaluations_user_id", "user_id"),
+    )
 
 
 class ChatIdReassignmentJob(Base):

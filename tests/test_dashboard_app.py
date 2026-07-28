@@ -1373,6 +1373,93 @@ def test_space_transfers_rejects_same_account(client):
     assert resp.status_code == 400
 
 
+def test_space_categories_create_with_description_synthesizes_summary(client, monkeypatch):
+    """POST /api/space/categories con `description` chiama la sintesi LLM una tantum
+    e salva sia il testo grezzo che la sintesi."""
+    from src.dashboard.app import store
+    from src.mistral_client import MistralClient
+
+    store.add_user(chat_id="chat_catdesc_create", username="catdesc-create", storage_backend="postgres")
+    monkeypatch.setattr(
+        MistralClient, "synthesize_category_description",
+        lambda self, raw: "Spese per uscire a cena o pranzo fuori casa",
+    )
+
+    with client.session_transaction() as sess:
+        sess["user_logged_in"] = True
+        sess["chat_id"] = "chat_catdesc_create"
+        sess["token_version"] = store.get_token_version("chat_catdesc_create")
+
+    csrf_token = client.get("/api/csrf-token").json["csrf_token"]
+
+    resp = client.post(
+        "/api/space/categories",
+        json={"name": "Cene/Pranzi", "description": "spese fatte per uscire fuori a cena o pranzo"},
+        headers={"X-CSRFToken": csrf_token},
+    )
+    assert resp.status_code == 201
+    assert resp.json["description"] == "spese fatte per uscire fuori a cena o pranzo"
+    assert resp.json["description_summary"] == "Spese per uscire a cena o pranzo fuori casa"
+
+    resp = client.get("/api/space/categories")
+    cat = next(c for c in resp.json["categories"] if c["name"] == "Cene/Pranzi")
+    assert cat["description_summary"] == "Spese per uscire a cena o pranzo fuori casa"
+
+
+def test_space_categories_create_rejects_description_too_long(client):
+    """La descrizione oltre il limite (500 caratteri) viene rifiutata con 400."""
+    from src.dashboard.app import store
+
+    store.add_user(chat_id="chat_catdesc_toolong", username="catdesc-toolong", storage_backend="postgres")
+    with client.session_transaction() as sess:
+        sess["user_logged_in"] = True
+        sess["chat_id"] = "chat_catdesc_toolong"
+        sess["token_version"] = store.get_token_version("chat_catdesc_toolong")
+
+    csrf_token = client.get("/api/csrf-token").json["csrf_token"]
+
+    resp = client.post(
+        "/api/space/categories",
+        json={"name": "Shopping", "description": "x" * 501},
+        headers={"X-CSRFToken": csrf_token},
+    )
+    assert resp.status_code == 400
+
+
+def test_space_categories_update_without_description_keeps_existing(client, monkeypatch):
+    """PUT senza `description` nel body non tocca la descrizione già salvata
+    (aggiorna solo monthly_budget, come per name/monthly_budget)."""
+    from src.dashboard.app import store
+    from src.mistral_client import MistralClient
+
+    store.add_user(chat_id="chat_catdesc_update", username="catdesc-update", storage_backend="postgres")
+    monkeypatch.setattr(
+        MistralClient, "synthesize_category_description", lambda self, raw: "Sigarette e svapo",
+    )
+
+    with client.session_transaction() as sess:
+        sess["user_logged_in"] = True
+        sess["chat_id"] = "chat_catdesc_update"
+        sess["token_version"] = store.get_token_version("chat_catdesc_update")
+
+    csrf_token = client.get("/api/csrf-token").json["csrf_token"]
+
+    created = client.post(
+        "/api/space/categories",
+        json={"name": "Fumo", "description": "sigarette, tabacco e liquidi da svapo"},
+        headers={"X-CSRFToken": csrf_token},
+    ).json
+
+    resp = client.put(
+        f"/api/space/categories/{created['id']}",
+        json={"monthly_budget": 50.0},
+        headers={"X-CSRFToken": csrf_token},
+    )
+    assert resp.status_code == 200
+    assert resp.json["monthly_budget"] == 50.0
+    assert resp.json["description_summary"] == "Sigarette e svapo"
+
+
 def _login_chat_user(client, store, chat_id):
     """Sessione autenticata minimale (storage postgres) per gli endpoint /api/chat/*."""
     store.add_user(chat_id=chat_id, username=chat_id, storage_backend="postgres")

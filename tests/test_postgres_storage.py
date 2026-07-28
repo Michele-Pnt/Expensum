@@ -113,6 +113,47 @@ class TestCreateExpense:
         cats = storage.get_category_names()
         assert "Bar" in cats
 
+
+# ---------------------------------------------------------------------------
+# 3. create_category / update_category / get_categories — description
+# ---------------------------------------------------------------------------
+
+class TestCategoryDescription:
+    def test_create_category_with_description(self, storage):
+        result = storage.create_category(
+            "Cene/Pranzi", description="spese per uscire a cena o pranzo",
+            description_summary="Spese per uscire a cena o pranzo fuori casa",
+        )
+        assert result["description"] == "spese per uscire a cena o pranzo"
+        assert result["description_summary"] == "Spese per uscire a cena o pranzo fuori casa"
+
+    def test_create_category_without_description_defaults_to_none(self, storage):
+        result = storage.create_category("Shopping")
+        assert result["description"] is None
+        assert result["description_summary"] is None
+
+    def test_get_categories_includes_description(self, storage):
+        storage.create_category("Fumo", description="sigarette e svapo", description_summary="Sigarette e svapo")
+        cats = storage.get_categories()
+        fumo = next(c for c in cats if c["name"] == "Fumo")
+        assert fumo["description"] == "sigarette e svapo"
+        assert fumo["description_summary"] == "Sigarette e svapo"
+
+    def test_update_category_sets_description_and_summary_together(self, storage):
+        created = storage.create_category("Cinema")
+        updated = storage.update_category(
+            created["id"], description="film e popcorn", description_summary="Film e popcorn al cinema",
+        )
+        assert updated["description"] == "film e popcorn"
+        assert updated["description_summary"] == "Film e popcorn al cinema"
+
+    def test_update_category_without_description_leaves_existing_untouched(self, storage):
+        created = storage.create_category("Vacanze", description="voli e hotel", description_summary="Voli e hotel")
+        updated = storage.update_category(created["id"], monthly_budget=100.0)
+        assert updated["description"] == "voli e hotel"
+        assert updated["description_summary"] == "Voli e hotel"
+        assert updated["monthly_budget"] == 100.0
+
     def test_persists_to_db(self, db_session, storage):
         storage.create_expense(
             expense_date=date(2026, 4, 1),

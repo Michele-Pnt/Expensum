@@ -57,7 +57,8 @@ export default function PrivacyContentIt() {
             Base giuridica: esecuzione del contratto (Art. 6(1)(b)).
           </li>
           <li>
-            <strong>Dati finanziari</strong> (importi, categorie, conti, abbonamenti): inseriti
+            <strong>Dati finanziari</strong> (importi, categorie, conti, abbonamenti, obiettivi
+            di risparmio dichiarati con relativo avanzamento — solo piano Pro): inseriti
             volontariamente per la gestione delle spese personali. Base giuridica: esecuzione
             del contratto (Art. 6(1)(b)). La fornitura è facoltativa nel merito (nessun obbligo
             di inserire ogni spesa), ma necessaria per usufruire delle funzionalità del servizio.

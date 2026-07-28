@@ -12,6 +12,16 @@ interface Rect {
   height: number;
 }
 
+/** True se `el` o un suo antenato ha `position: fixed` (es. un Dialog MUI). */
+function isInsideFixedContainer(el: HTMLElement): boolean {
+  let node: HTMLElement | null = el;
+  while (node) {
+    if (window.getComputedStyle(node).position === "fixed") return true;
+    node = node.parentElement;
+  }
+  return false;
+}
+
 const PADDING = 8;
 const TOOLTIP_WIDTH = 320;
 const TOOLTIP_HEIGHT_FALLBACK = 240; // stima usata solo prima della prima misurazione reale
@@ -167,11 +177,16 @@ export default function TourOverlay() {
     };
   }, [isActive, currentStep, measureTarget, cleanupPrevElement]);
 
-  // Scroll per portare l'elemento nello schermo
+  // Scroll per portare l'elemento nello schermo. Salta gli elementi dentro un
+  // contenitore position:fixed (es. un Dialog MUI, centrato nel viewport e
+  // indipendente dallo scroll della pagina): scrollIntoView su un elemento del
+  // genere sposta comunque lo scroll della pagina sottostante, disallineando
+  // spotlight e tooltip (calcolati con lo scrollY misurato in precedenza) dalla
+  // posizione reale, sempre ferma, del target.
   useEffect(() => {
     if (!targetRect) return;
     const el = document.querySelector(step?.selector ?? "") as HTMLElement | null;
-    if (el) {
+    if (el && !isInsideFixedContainer(el)) {
       el.scrollIntoView({ behavior: "smooth", block: "center" });
     }
   }, [targetRect, step]);

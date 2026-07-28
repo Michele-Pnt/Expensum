@@ -143,6 +143,113 @@ HOBBY_CATEGORIES: dict[str, list[str]] = {
 }
 
 
+# Descrizioni comportamentali statiche per DEFAULT_CATEGORIES + HOBBY_CATEGORIES,
+# usate come `description_summary` nel prompt del parser LLM (vedi
+# `ExpenseParser(category_descriptions=...)`) — nessuna chiamata LLM necessaria,
+# stesso principio di `categories_from_hobbies`: lookup statica invece di un
+# giro AI per un elenco finito e conosciuto in anticipo. L'utente può comunque
+# riscriverle in webapp in qualsiasi momento (sovrascrivono queste).
+CATEGORY_DESCRIPTIONS: dict[str, str] = {
+    # Abitazione
+    "Affitto": "Il canone di affitto mensile della casa",
+    "Mutuo": "La rata mensile del mutuo sulla casa",
+    "Bollette luce": "Spese per la fornitura di energia elettrica di casa",
+    "Bollette gas": "Spese per la fornitura di gas di casa",
+    "Acqua": "Spese per la fornitura idrica di casa",
+    "Condominio": "Spese condominiali della casa",
+    "Casa Vario": "Piccole spese di manutenzione o arredamento della casa",
+    # Alimentari
+    "Supermercato": "Spesa alimentare fatta al supermercato",
+    "Mercato": "Spesa alimentare fatta al mercato rionale",
+    # Ristorazione
+    "Ristorante": "Spese per mangiare fuori al ristorante",
+    "Bar": "Spese al bar per caffè, colazioni o aperitivi veloci",
+    "Food delivery": "Cibo ordinato a domicilio tramite app di delivery",
+    # Trasporti
+    "Carburante": "Spese per il rifornimento di benzina o diesel dell'auto",
+    "Mezzi pubblici": "Biglietti e abbonamenti per bus, treno o metro",
+    "Taxi": "Corse in taxi o servizi tipo Uber",
+    "Parcheggio": "Spese per parcheggi e soste auto",
+    "Auto Vario": "Manutenzione, revisione, bollo e altre spese generiche dell'auto",
+    # Salute
+    "Farmacia": "Acquisti in farmacia (medicinali da banco, prodotti sanitari)",
+    "Medicina": "Visite mediche, esami e cure sanitarie",
+    # Comunicazione
+    "Telefono": "Abbonamento telefonico o ricariche del cellulare",
+    "Internet": "Abbonamento internet/fibra di casa",
+    # Persona
+    "Abbigliamento": "Acquisto di vestiti",
+    "Scarpe": "Acquisto di scarpe",
+    "Parrucchiere": "Spese dal parrucchiere o barbiere",
+    "Igiene personale": "Prodotti per l'igiene personale quotidiana",
+    # Finanza
+    "Assicurazioni": "Polizze assicurative (esclusa auto e viaggio, vedi categorie dedicate)",
+    "Banca": "Commissioni e costi bancari",
+    # Varie
+    "Regali": "Regali fatti ad altre persone",
+    "Altro": "Spese generiche che non rientrano in nessun'altra categoria",
+
+    # Hobby — palestra
+    "Palestra": "Abbonamento o ingressi in palestra",
+    "Abbigliamento sportivo": "Vestiti e scarpe per fare sport",
+    "Integratori": "Integratori alimentari e proteine per l'allenamento",
+    "Attrezzatura sportiva": "Attrezzi e accessori per l'attività sportiva",
+    # Hobby — streaming/gaming
+    "Gaming": "Videogiochi, contenuti e abbonamenti gaming",
+    "Abbonamenti digitali": "Abbonamenti a servizi di streaming video o musica",
+    "E-book": "Acquisto di libri digitali",
+    # Hobby — viaggi
+    "Voli": "Biglietti aerei per viaggi",
+    "Alloggio": "Hotel, B&B o affitti brevi durante un viaggio",
+    "Noleggio auto": "Noleggio di un'auto durante un viaggio",
+    "Escursioni": "Attività ed escursioni fatte durante un viaggio",
+    "Visti e documenti": "Visti, passaporti e documenti necessari per viaggiare",
+    "Assicurazione viaggio": "Polizza assicurativa per un viaggio",
+    "Souvenir": "Souvenir e ricordi acquistati durante un viaggio",
+    # Hobby — cultura
+    "Cinema": "Biglietti del cinema",
+    "Teatro": "Biglietti a spettacoli teatrali",
+    "Concerti": "Biglietti per concerti ed eventi musicali dal vivo",
+    "Musei": "Ingressi a musei e mostre",
+    "Libri": "Acquisto di libri cartacei",
+    "Riviste e podcast": "Abbonamenti a riviste o contenuti podcast a pagamento",
+    # Hobby — tech
+    "Smartphone": "Acquisto o riparazione di uno smartphone",
+    "PC e laptop": "Acquisto o riparazione di un computer",
+    "Accessori tech": "Accessori elettronici (cuffie, caricabatterie, cavi, ecc.)",
+    "Riparazioni tech": "Riparazioni di dispositivi elettronici",
+    "Domotica": "Dispositivi smart home e domotica",
+    # Hobby — animali
+    "Veterinario": "Visite veterinarie per l'animale domestico",
+    "Cibo animali": "Cibo per l'animale domestico",
+    "Farmaci animali": "Farmaci e cure per l'animale domestico",
+    "Toelettatura": "Toelettatura dell'animale domestico",
+    "Accessori animali": "Accessori per l'animale domestico (guinzagli, cucce, giochi)",
+    "Pensione animali": "Pensione o dog-sitting per l'animale domestico",
+    "Assicurazione animali": "Polizza assicurativa per l'animale domestico",
+    # Hobby — cucina
+    "Alcolici": "Acquisto di vino, birra o alcolici",
+    "Attrezzatura cucina": "Utensili ed elettrodomestici da cucina",
+    "Corsi di cucina": "Corsi di cucina",
+    # Hobby — famiglia
+    "Scuola": "Rette e materiale scolastico dei figli",
+    "Asilo nido": "Retta dell'asilo nido",
+    "Rette universitarie": "Tasse e rette universitarie",
+    "Doposcuola": "Attività di doposcuola dei figli",
+    "Sport figli": "Attività sportive dei figli",
+    "Giocattoli": "Giocattoli per i figli",
+    "Abbigliamento bambini": "Vestiti per i figli",
+    "Babysitter": "Servizio di babysitter",
+    "Gite scolastiche": "Gite scolastiche dei figli",
+    "Pediatra": "Visite pediatriche dei figli",
+    # Hobby — moda
+    "Borse e accessori": "Borse e accessori moda",
+    "Estetista": "Trattamenti estetici",
+    "Profumi": "Acquisto di profumi",
+    "Cosmetici": "Acquisto di cosmetici e make-up",
+}
+
+
 def categories_from_hobbies(hobbies: list[str]) -> list[str]:
     """Ritorna categorie deduplicate: DEFAULT_CATEGORIES + extra da hobby selezionati.
 
@@ -246,7 +353,7 @@ def bootstrap_workspace(storage: FinancialStorage) -> BootstrapResult:
             skipped_categories = True
         else:
             for name in DEFAULT_CATEGORIES:
-                storage.create_category(name)
+                storage.create_category(name, description_summary=CATEGORY_DESCRIPTIONS.get(name))
                 categories_created.append(name)
                 logger.info("[Bootstrap] Categoria creata: %s", name)
     except Exception as e:
@@ -314,7 +421,7 @@ def bootstrap_lifestyle_categories(
         existing = {name.lower() for name in storage.get_category_names()}
         for name in selected_categories:
             if name.lower() not in existing:
-                storage.create_category(name)
+                storage.create_category(name, description_summary=CATEGORY_DESCRIPTIONS.get(name))
                 created.append(name)
                 existing.add(name.lower())
                 logger.info("[Bootstrap lifestyle] Categoria creata: %s", name)

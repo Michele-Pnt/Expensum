@@ -2475,6 +2475,7 @@ def _chat_parse_text(
 
     # Carica categorie dal backend corretto
     categories: list[str] = []
+    category_descriptions: dict[str, str] = {}
     try:
         user = _get_user_by_chat_id(chat_id)
         if user.storage_backend == "postgres":
@@ -2486,12 +2487,16 @@ def _chat_parse_text(
             storage = _build_financial_storage(user)
             categories_raw = storage.get_categories()
             categories = [c["name"] for c in categories_raw if c.get("name")]
+        category_descriptions = {
+            c["name"]: c["description_summary"]
+            for c in categories_raw if c.get("name") and c.get("description_summary")
+        }
     except Exception:
         pass
 
     # Parsing LLM (multi-transazione: un messaggio può contenere più spese/entrate)
     try:
-        parser = ExpenseParser(categories=categories)
+        parser = ExpenseParser(categories=categories, category_descriptions=category_descriptions)
         results, usage = parser.parse_multi_with_usage(safe_input, chat_id, when=datetime.now())
     except Exception as e:
         logger.exception("Errore ExpenseParser chat: %s", e)
@@ -4618,6 +4623,22 @@ def _pg_or_401(s, chat_id):
     return PostgresStorage(session=s, user_id=chat_id), None
 
 
+def _pg_pro_or_error(s, chat_id):
+    """Restituisce (PostgresStorage, None) o (None, response) per feature Pro-only.
+
+    Usato dagli endpoint /api/savings-goals*: richiede sia backend PostgreSQL sia
+    piano Pro. Stesso pattern di gating di /api/analytics/budget-status.
+    """
+    plan_type = _get_user_plan_type(chat_id)
+    if plan_type != "pro":
+        return None, (jsonify({"error": "Funzionalità riservata agli utenti Pro", "plan_type": plan_type}), 403)
+    pg, err = _pg_or_401(s, chat_id)
+    if err:
+        body, _status = err
+        return None, (body, 403)
+    return pg, None
+
+
 # ── Accounts ─────────────────────────────────────────────────────────────────
 
 @app.route("/api/space/accounts", methods=["GET"])
@@ -4683,6 +4704,170 @@ def space_accounts_delete(account_id: int):
         if not ok:
             return jsonify({"error": "Conto non trovato"}), 404
         return jsonify({"status": "ok"})
+
+
+# ── Savings goals ────────────────────────────────────────────────────────────
+
+def _goal_view(storage, goal: dict) -> dict:
+    """Arricchisce il dict del goal con progresso/ETA/voto calcolati on-read."""
+    from src.savings_goals_service import compute_goal_progress, compute_monthly_score, explain_score
+
+    progress = compute_goal_progress(storage, goal)
+    score = compute_monthly_score(storage, goal, progress)
+    view = dict(goal)
+    view["progress"] = progress["progress_pct"]
+    view["current_value"] = progress["current"]
+    view["eta_date"] = progress["eta_date"].isoformat() if progress["eta_date"] else None
+    view["score_label"] = score["score_label"]
+    view["explanation"] = explain_score(goal, score, markdown=False)
+    return view
+
+
+@app.route("/api/savings-goals", methods=["GET"])
+@_tg_webapp_auth
+def savings_goals_list():
+    from flask import g
+    with store.Session() as s:
+        pg, err = _pg_pro_or_error(s, g.chat_id)
+        if err:
+            return err
+        goals = pg.fetch_savings_goals(status="active")
+        result = [_goal_view(pg, goal) for goal in goals]
+        return jsonify({"goals": result, "plan_type": "pro"})
+
+
+@app.route("/api/savings-goals", methods=["POST"])
+@_tg_webapp_auth
+def savings_goals_create():
+    from flask import g
+    from src.savings_goals_service import GOAL_TYPES
+
+    data = request.json or {}
+    goal_type = data.get("goal_type")
+    name = (data.get("name") or "").strip()
+    target_amount = data.get("target_amount")
+
+    if goal_type not in GOAL_TYPES:
+        return jsonify({"error": f"goal_type deve essere uno tra {sorted(GOAL_TYPES)}"}), 400
+    if not name:
+        return jsonify({"error": "Il campo 'name' è obbligatorio"}), 400
+    try:
+        target_amount = float(target_amount)
+        if target_amount <= 0:
+            raise ValueError
+    except (TypeError, ValueError):
+        return jsonify({"error": "target_amount deve essere un numero positivo"}), 400
+
+    account_id = data.get("account_id")
+    category_id = data.get("category_id")
+    target_date_str = data.get("target_date")
+    target_date = None
+    if target_date_str:
+        try:
+            target_date = date.fromisoformat(target_date_str)
+        except ValueError:
+            return jsonify({"error": "target_date deve essere in formato YYYY-MM-DD"}), 400
+
+    with store.Session() as s:
+        pg, err = _pg_pro_or_error(s, g.chat_id)
+        if err:
+            return err
+
+        if goal_type == "account_balance":
+            if account_id is None or not any(a["id"] == int(account_id) for a in pg.fetch_accounts()):
+                return jsonify({"error": "account_id non valido o non di tua proprietà"}), 400
+        if goal_type == "category_spending_reduction":
+            if category_id is None or not any(c["id"] == int(category_id) for c in pg.get_categories()):
+                return jsonify({"error": "category_id non valido o non di tua proprietà"}), 400
+
+        result = pg.create_savings_goal(
+            goal_type=goal_type,
+            name=name,
+            target_amount=target_amount,
+            account_id=int(account_id) if account_id is not None else None,
+            category_id=int(category_id) if category_id is not None else None,
+            target_date=target_date,
+        )
+        return jsonify(_goal_view(pg, result)), 201
+
+
+@app.route("/api/savings-goals/<int:goal_id>", methods=["PUT"])
+@_tg_webapp_auth
+def savings_goals_update(goal_id: int):
+    from flask import g
+    data = request.json or {}
+
+    target_date = None
+    if "target_date" in data and data["target_date"]:
+        try:
+            target_date = date.fromisoformat(data["target_date"])
+        except ValueError:
+            return jsonify({"error": "target_date deve essere in formato YYYY-MM-DD"}), 400
+
+    with store.Session() as s:
+        pg, err = _pg_pro_or_error(s, g.chat_id)
+        if err:
+            return err
+        result = pg.update_savings_goal(
+            goal_id,
+            name=data.get("name") or None,
+            target_amount=float(data["target_amount"]) if data.get("target_amount") not in (None, "") else None,
+            target_date=target_date,
+        )
+        if result is None:
+            return jsonify({"error": "Obiettivo non trovato"}), 404
+        return jsonify(_goal_view(pg, result))
+
+
+@app.route("/api/savings-goals/<int:goal_id>", methods=["DELETE"])
+@_tg_webapp_auth
+def savings_goals_delete(goal_id: int):
+    from flask import g
+    with store.Session() as s:
+        pg, err = _pg_pro_or_error(s, g.chat_id)
+        if err:
+            return err
+        ok = pg.delete_savings_goal(goal_id)
+        if not ok:
+            return jsonify({"error": "Obiettivo non trovato"}), 404
+        return jsonify({"status": "ok"})
+
+
+@app.route("/api/savings-goals/<int:goal_id>/history", methods=["GET"])
+@_tg_webapp_auth
+def savings_goals_history(goal_id: int):
+    from flask import g
+    with store.Session() as s:
+        pg, err = _pg_pro_or_error(s, g.chat_id)
+        if err:
+            return err
+        history = pg.fetch_savings_goal_evaluations(goal_id, limit=12)
+        return jsonify({"history": history})
+
+
+@app.route("/api/savings-goals/summary", methods=["GET"])
+@_tg_webapp_auth
+def savings_goals_summary():
+    from flask import g
+    from collections import Counter
+
+    with store.Session() as s:
+        pg, err = _pg_pro_or_error(s, g.chat_id)
+        if err:
+            return err
+        goals = [_goal_view(pg, goal) for goal in pg.fetch_savings_goals(status="active")]
+
+    by_label = Counter(g["score_label"] for g in goals)
+    next_goal = min(
+        (g for g in goals if g.get("target_date")),
+        key=lambda g: g["target_date"],
+        default=None,
+    )
+    return jsonify({
+        "count": len(goals),
+        "by_score_label": dict(by_label),
+        "next_deadline": next_goal,
+    })
 
 
 # ── Transfers ────────────────────────────────────────────────────────────────
@@ -4794,6 +4979,21 @@ def space_categories_accept_suggestion(cat_id: int):
         return jsonify(result)
 
 
+_CATEGORY_DESCRIPTION_MAX_LEN = 500
+
+
+def _synthesize_category_description(raw_description: str) -> str:
+    """Sintesi LLM one-shot della descrizione categoria (vedi
+    `MistralClient.synthesize_category_description`) — chiamata solo quando la
+    descrizione cambia, non ad ogni parsing spesa."""
+    from src.mistral_client import MistralClient
+    try:
+        return MistralClient().synthesize_category_description(raw_description)
+    except Exception as e:
+        logger.warning("Errore sintesi descrizione categoria: %s — uso fallback troncato", e)
+        return raw_description.strip()[:200]
+
+
 @app.route("/api/space/categories", methods=["POST"])
 @_tg_webapp_auth
 def space_categories_create():
@@ -4802,6 +5002,9 @@ def space_categories_create():
     name = (data.get("name") or "").strip()
     if not name:
         return jsonify({"error": "Il campo 'name' è obbligatorio"}), 400
+    description = (data.get("description") or "").strip() or None
+    if description and len(description) > _CATEGORY_DESCRIPTION_MAX_LEN:
+        return jsonify({"error": f"Descrizione troppo lunga (max {_CATEGORY_DESCRIPTION_MAX_LEN} caratteri)"}), 400
     with store.Session() as s:
         pg, err = _pg_or_401(s, g.chat_id)
         if err:
@@ -4810,7 +5013,11 @@ def space_categories_create():
         if name.lower() in existing:
             return jsonify({"error": f"Categoria '{name}' già esistente"}), 409
         monthly_budget = float(data["monthly_budget"]) if data.get("monthly_budget") not in (None, "") else None
-        result = pg.create_category(name, monthly_budget=monthly_budget)
+        description_summary = _synthesize_category_description(description) if description else None
+        result = pg.create_category(
+            name, monthly_budget=monthly_budget,
+            description=description, description_summary=description_summary,
+        )
         return jsonify(result), 201
 
 
@@ -4819,12 +5026,21 @@ def space_categories_create():
 def space_categories_update(cat_id: int):
     from flask import g
     data = request.json or {}
+    description = data.get("description")
+    if description is not None:
+        description = description.strip() or None
+        if description and len(description) > _CATEGORY_DESCRIPTION_MAX_LEN:
+            return jsonify({"error": f"Descrizione troppo lunga (max {_CATEGORY_DESCRIPTION_MAX_LEN} caratteri)"}), 400
     with store.Session() as s:
         pg, err = _pg_or_401(s, g.chat_id)
         if err:
             return err
         monthly_budget = float(data["monthly_budget"]) if data.get("monthly_budget") not in (None, "") else None
-        result = pg.update_category(cat_id, name=data.get("name") or None, monthly_budget=monthly_budget)
+        description_summary = _synthesize_category_description(description) if description else None
+        result = pg.update_category(
+            cat_id, name=data.get("name") or None, monthly_budget=monthly_budget,
+            description=description, description_summary=description_summary,
+        )
         if result is None:
             return jsonify({"error": "Categoria non trovata"}), 404
         return jsonify(result)

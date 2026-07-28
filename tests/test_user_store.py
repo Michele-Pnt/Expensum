@@ -7,7 +7,7 @@ from src.user_store import (
 )
 from src.storage.models import (
     Expense, Income, Account, UserCategory, UserCategoryNotionLink,
-    Subscription, SavedReport,
+    Subscription, SavedReport, SavingsGoal, SavingsGoalEvaluation,
 )
 import src.storage.models  # registra UserCategory e tabelle storage nella Base condivisa
 
@@ -284,6 +284,14 @@ def test_delete_user_completely_removes_all_tables(mock_db_session):
             report_date=date.today(),
             text_content="Report mensile di test",
         ))
+        # SavingsGoal + SavingsGoalEvaluation (goal prima delle FK account/category sopra)
+        goal = SavingsGoal(user_id=chat_id, goal_type="net_savings", name="Fondo emergenza", target_amount=1000)
+        s.add(goal)
+        s.flush()
+        s.add(SavingsGoalEvaluation(
+            goal_id=goal.id, user_id=chat_id, period_month=date.today().replace(day=1),
+            progress_pct=50.0, score_label="In linea",
+        ))
         s.commit()
 
     # Aggiungi una riga in AuditLog (no FK — deve sopravvivere alla cancellazione)
@@ -316,6 +324,8 @@ def test_delete_user_completely_removes_all_tables(mock_db_session):
         (Subscription,            "user_id"),
         (UserCategory,            "user_id"),
         (SavedReport,             "user_id"),
+        (SavingsGoal,             "user_id"),
+        (SavingsGoalEvaluation,   "user_id"),
     ]
 
     with store.Session() as s:
@@ -808,6 +818,48 @@ def test_set_user_plan_clears_is_trial_on_real_upgrade_mid_trial(mock_db_session
     plan = store.get_user_plan("trial3")
     assert plan["plan_type"] == "pro"
     assert plan["is_trial"] is False
+
+
+def test_set_user_plan_downgrade_pauses_active_savings_goals(mock_db_session):
+    """Downgrade a Free: i goal 'active' passano a 'paused_downgrade', mai cancellati."""
+    store = mock_db_session
+    chat_id = "downgrade_goals_user"
+    store.add_user(chat_id=chat_id, storage_backend="postgres")
+    store.set_user_plan(chat_id, "pro")
+
+    with store.Session() as s:
+        s.add(SavingsGoal(user_id=chat_id, goal_type="net_savings", name="G1", target_amount=100, status="active"))
+        s.add(SavingsGoal(user_id=chat_id, goal_type="net_savings", name="G2", target_amount=100, status="completed"))
+        s.commit()
+
+    store.set_user_plan(chat_id, "free")
+
+    with store.Session() as s:
+        goals = {g.name: g.status for g in s.query(SavingsGoal).filter_by(user_id=chat_id).all()}
+        assert goals["G1"] == "paused_downgrade"
+        assert goals["G2"] == "completed"  # non tocca goal già completati
+
+
+def test_set_user_plan_upgrade_resumes_paused_savings_goals(mock_db_session):
+    """Upgrade a Pro dopo un downgrade: i goal 'paused_downgrade' tornano 'active'."""
+    store = mock_db_session
+    chat_id = "upgrade_goals_user"
+    store.add_user(chat_id=chat_id, storage_backend="postgres")
+    store.set_user_plan(chat_id, "pro")
+
+    with store.Session() as s:
+        s.add(SavingsGoal(
+            user_id=chat_id, goal_type="net_savings", name="G1", target_amount=100,
+            status="paused_downgrade",
+        ))
+        s.commit()
+
+    store.set_user_plan(chat_id, "free")  # assicura old_plan == "free" al prossimo upgrade
+    store.set_user_plan(chat_id, "pro")
+
+    with store.Session() as s:
+        goal = s.query(SavingsGoal).filter_by(user_id=chat_id, name="G1").first()
+        assert goal.status == "active"
 
 
 def test_get_expired_trials(mock_db_session):

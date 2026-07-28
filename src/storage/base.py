@@ -65,8 +65,16 @@ class FinancialStorage(ABC):
         ...
 
     @abstractmethod
-    def create_category(self, name: str) -> dict:
-        """Crea una nuova categoria. Restituisce dict con almeno 'id' e 'name'."""
+    def create_category(
+        self, name: str, monthly_budget: float | None = None,
+        description: str | None = None, description_summary: str | None = None,
+    ) -> dict:
+        """Crea una nuova categoria. Restituisce dict con almeno 'id' e 'name'.
+
+        `description`/`description_summary` sono supportati solo dal backend
+        Postgres (usati dal parser LLM per contestualizzare la categorizzazione,
+        vedi `ExpenseParser`); i backend che non li supportano (Notion) li ignorano.
+        """
         ...
 
     @abstractmethod
@@ -139,4 +147,48 @@ class FinancialStorage(ABC):
 
     def get_reports_for_user(self, user_id: str, limit: int = 24) -> list[dict]:
         """Lista report dell'utente, ordinati per data decrescente."""
+        return []
+
+    # ------------------------------------------------------------------ savings goals
+    # Feature Pro, supportata solo da PostgresStorage. Default: non supportato,
+    # cosi' NotionStorage non deve implementare nulla di questi metodi.
+
+    def create_savings_goal(
+        self,
+        goal_type: str,
+        name: str,
+        target_amount: float,
+        account_id: int | None = None,
+        category_id: int | None = None,
+        start_date: date | None = None,
+        target_date: date | None = None,
+    ) -> dict:
+        """Crea un obiettivo di risparmio. Non supportato su Notion."""
+        raise NotImplementedError("Gli obiettivi di risparmio richiedono il backend PostgreSQL")
+
+    def fetch_savings_goals(self, status: str | None = None) -> list[dict]:
+        """Restituisce gli obiettivi dell'utente, opzionalmente filtrati per stato."""
+        return []
+
+    def update_savings_goal(self, goal_id: int, **fields) -> dict | None:
+        """Aggiorna un obiettivo esistente. None se non trovato."""
+        return None
+
+    def delete_savings_goal(self, goal_id: int) -> bool:
+        """Elimina un obiettivo (e lo storico evaluation collegato)."""
+        return False
+
+    def save_savings_goal_evaluation(
+        self,
+        goal_id: int,
+        period_month: date,
+        progress_pct: float,
+        score_label: str,
+        eta_date: date | None,
+    ) -> None:
+        """Salva/aggiorna la valutazione mensile (voto + ETA) di un obiettivo."""
+        return None
+
+    def fetch_savings_goal_evaluations(self, goal_id: int, limit: int = 12) -> list[dict]:
+        """Restituisce lo storico delle valutazioni mensili di un obiettivo."""
         return []

@@ -111,6 +111,31 @@ export const TOUR_STEPS: TourStep[] = [
     },
   },
   {
+    id: "spazio-categoria-dettaglio",
+    page: "/spazio",
+    selector: '[data-tour="entity-dialog"]',
+    title: "La scheda di una categoria",
+    description: (
+      <>
+        <strong>Nome</strong> e <strong>budget mensile</strong> li conosci già. La{" "}
+        <strong>descrizione</strong> è facoltativa ma preziosa: spiega con parole tue quando usare
+        questa categoria (es. &quot;spese per uscire fuori a cena o pranzo&quot;) e aiuta
+        l&apos;assistente a categorizzare correttamente anche le spese più ambigue.
+      </>
+    ),
+    position: "right",
+    setup: () => {
+      // Riapre la tab Categorie (per sicurezza se si torna indietro nel tour) e
+      // apre la scheda della prima categoria per mostrare il form con il campo descrizione.
+      const tabs = document.querySelectorAll('[data-tour="spazio-tabs"] [role="tab"]');
+      (tabs[1] as HTMLElement | undefined)?.click();
+      window.setTimeout(() => {
+        const editBtn = document.querySelector('[data-tour="category-edit-button"]') as HTMLElement | null;
+        editBtn?.click();
+      }, 50);
+    },
+  },
+  {
     id: "sidebar-nav",
     page: "/spazio",
     selector: '[data-tour="sidebar-nav"]',
@@ -119,6 +144,10 @@ export const TOUR_STEPS: TourStep[] = [
       "Puoi tornare in qualsiasi sezione in qualsiasi momento dalla barra laterale.",
     position: "bottom",
     setup: () => {
+      // Chiude la scheda categoria aperta dallo step precedente, se ancora aperta.
+      const closeBtn = document.querySelector('[data-tour="entity-dialog-close"]') as HTMLElement | null;
+      closeBtn?.click();
+
       // Su mobile il drawer è chiuso: lo apriamo prima di cercare il target
       const nav = document.querySelector('[data-tour="sidebar-nav"]') as HTMLElement | null;
       const isHidden = !nav || nav.getBoundingClientRect().width === 0;

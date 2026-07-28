@@ -10,6 +10,7 @@ from typing import Optional
 from sqlalchemy.orm import Session
 
 from src.user_store import User, ChatMessage, LlmUsageEvent
+from src.storage import rls
 from src.storage.postgres_storage import PostgresStorage
 
 PRIVACY_RIGHTS_NOTICE_IT = (
@@ -50,13 +51,21 @@ def build_export_json(session: Session, user: User) -> dict:
     }
 
     if user.storage_backend == "postgres":
+        # `user` è stato risolto con una query sulla stessa sessione: quella query ha
+        # già aperto una transazione senza `app.user_id` impostato (fail-closed RLS).
+        # rebind_user chiude quella transazione e lega lo user_id prima che le query
+        # finanziarie sotto ne aprano una nuova — altrimenti la prima di queste
+        # (fetch_all_transactions) legge 0 righe. Vedi rls.rebind_user.
+        rls.rebind_user(session, chat_id)
         storage = PostgresStorage(session=session, user_id=chat_id)
         start = user.created_at.date() if user.created_at else date(2020, 1, 1)
         today = date.today()
         financial_data = {
             "expenses": storage.fetch_all_transactions(start, today),
             "incomes": storage.fetch_income(start, today),
+            "transfers": storage.fetch_transfers(start, today),
             "accounts": storage.fetch_accounts(),
+            "categories": storage.get_categories(),
             "subscriptions": storage.fetch_subscriptions(),
             "monthly_balances": storage.fetch_monthly_balances(start, today),
         }
@@ -104,6 +113,10 @@ def build_csv_rows(session: Session, user: User) -> Optional[list[tuple]]:
         return None
 
     chat_id = user.chat_id
+    # Vedi commento in build_export_json: rebind necessario perché `user` è già
+    # stato risolto su questa sessione, lasciando una transazione aperta senza
+    # `app.user_id` impostato.
+    rls.rebind_user(session, chat_id)
     storage = PostgresStorage(session=session, user_id=chat_id)
     start = user.created_at.date() if user.created_at else date(2020, 1, 1)
     today = date.today()
@@ -116,6 +129,9 @@ def build_csv_rows(session: Session, user: User) -> Optional[list[tuple]]:
     for i in storage.fetch_income(start, today):
         rows.append(("income", i["date"], i["amount"], i["name"], i.get("income_type") or "",
                      accounts_by_id.get(i["account_id"], "")))
+    for t in storage.fetch_transfers(start, today):
+        rows.append(("transfer", t["date"], t["amount"], t["name"], "",
+                     accounts_by_id.get(t["from_account_id"], "")))
     for sub in storage.fetch_subscriptions():
         rows.append(("subscription", sub.get("last_billed") or "", sub["amount"], sub["name"], "",
                      accounts_by_id.get(sub.get("account_id"), "")))

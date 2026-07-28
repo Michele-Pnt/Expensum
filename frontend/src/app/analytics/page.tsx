@@ -13,6 +13,7 @@ import {
   CartesianGrid, ComposedChart,
 } from "recharts";
 import { formatDateIt } from "@/lib/date";
+import SavingsGoalsProgress from "@/components/SavingsGoalsProgress";
 
 // ---------------------------------------------------------------------------
 // Tipi
@@ -721,16 +722,21 @@ function BudgetGaugeList({ data }: { data: BudgetStatusData }) {
       />
       <CardContent sx={{ pt: 0 }}>
         {data.budget_status.map((item) => {
+          // Resta sulla palette di brand ovunque tranne che per "Sforato": quello e' l'unico
+          // stato che merita di rompere il brand kit con un vero colore di allarme (rosso),
+          // perche' segnala un budget gia' superato. "Quasi finito" resta un colore di brand
+          // (oro scuro), ma di una famiglia diversa dal blu normale e dagli altri oro usati
+          // altrove nel grafico, cosi' i tre stati restano distinguibili a colpo d'occhio.
           const isOver = item.percentage >= 100;
           const isWarning = item.percentage >= 85 && item.percentage < 100;
-          const barColor = isOver ? "#C5A059" : isWarning ? "#D4B47A" : "#1A3673";
+          const barColor = isOver ? "#d03b3b" : isWarning ? "#A8853C" : "#1A3673";
           return (
             <Box key={item.category} sx={{ mb: 1.5 }}>
               <Box sx={{ display: "flex", justifyContent: "space-between", mb: 0.5 }}>
                 <Typography variant="body2" fontWeight={600} component="div">
                   {item.category}
-                  {isOver && <Chip label="Sforato" size="small" sx={{ ml: 1, bgcolor: "#C5A059", color: "#fff", fontSize: "0.65rem", height: 18 }} />}
-                  {isWarning && <Chip label="Quasi finito" size="small" sx={{ ml: 1, bgcolor: "#D4B47A", color: "#fff", fontSize: "0.65rem", height: 18 }} />}
+                  {isOver && <Chip label="Sforato" size="small" sx={{ ml: 1, bgcolor: "#d03b3b", color: "#fff", fontSize: "0.65rem", height: 18 }} />}
+                  {isWarning && <Chip label="Quasi finito" size="small" sx={{ ml: 1, bgcolor: "#A8853C", color: "#fff", fontSize: "0.65rem", height: 18 }} />}
                 </Typography>
                 <Typography variant="body2" color="text.secondary">
                   €{item.spent.toFixed(2)} / €{item.budget.toFixed(2)}
@@ -1110,13 +1116,16 @@ export default function AnalyticsPage() {
 
           {/* Tab 4: Budget (Pro) */}
           {tab === 4 && (
-            isPro && budgetStatus ? (
-              <BudgetGaugeList data={budgetStatus} />
-            ) : (
-              <PremiumGate isPro={false} featureName="Stato Budget">
-                <BudgetGaugeList data={{ budget_status: [], month: "", total_income: 0, total_spent: 0, plan_type: "free", error: "Pro required" }} />
-              </PremiumGate>
-            )
+            <>
+              {isPro && <SavingsGoalsProgress />}
+              {isPro && budgetStatus ? (
+                <BudgetGaugeList data={budgetStatus} />
+              ) : (
+                <PremiumGate isPro={false} featureName="Stato Budget">
+                  <BudgetGaugeList data={{ budget_status: [], month: "", total_income: 0, total_spent: 0, plan_type: "free", error: "Pro required" }} />
+                </PremiumGate>
+              )}
+            </>
           )}
         </>
       )}
