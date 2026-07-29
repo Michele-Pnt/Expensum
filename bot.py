@@ -39,6 +39,7 @@ from src.privacy_export import build_export_json, build_csv_rows, CSV_HEADER
 from telegram import BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, InputFile, Update, WebAppInfo
 from telegram.constants import ParseMode
 from telegram.request import HTTPXRequest
+from telegram.error import NetworkError
 from google.genai import types
 from telegram.ext import (
     Application,
@@ -2903,7 +2904,9 @@ async def handle_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> No
     Logga l'errore con contesto (update_id, chat_id) senza dati sensibili
     e notifica l'utente con un messaggio generico.
     """
-    logger.error(
+    log_level = logging.WARNING if isinstance(context.error, NetworkError) else logging.ERROR
+    logger.log(
+        log_level,
         "Eccezione durante la gestione di un update",
         exc_info=context.error,
         extra={
