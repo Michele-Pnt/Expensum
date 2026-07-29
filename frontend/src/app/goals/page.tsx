@@ -235,7 +235,7 @@ export default function GoalsPage() {
 
   return (
     <Box sx={{ maxWidth: 720, mx: "auto", p: 2 }}>
-      <Box sx={{ display: "flex", justifyContent: "space-between", alignItems: "center", mb: 2 }}>
+      <Box data-tour="goals-header" sx={{ display: "flex", justifyContent: "space-between", alignItems: "center", mb: 2 }}>
         <Typography variant="h5" fontWeight={700}>🎯 Obiettivi di risparmio</Typography>
         <Button variant="contained" onClick={openCreateDialog}>Nuovo obiettivo</Button>
       </Box>

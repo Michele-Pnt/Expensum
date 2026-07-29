@@ -75,6 +75,21 @@ export const TOUR_STEPS: TourStep[] = [
     position: "bottom",
   },
   {
+    id: "goals-header",
+    page: "/goals",
+    selector: '[data-tour="goals-header"]',
+    title: "🎯 Obiettivi di risparmio",
+    description: (
+      <>
+        Fissa un obiettivo — risparmio netto, saldo di un conto, capitale totale o riduzione di
+        una spesa — ed Expensum ne traccia l&apos;avanzamento automaticamente, stimando anche
+        quando lo raggiungerai. Disponibile con il piano{" "}
+        <span style={{ color: "#C5A059", fontWeight: 700 }}>Pro</span>.
+      </>
+    ),
+    position: "bottom",
+  },
+  {
     id: "reports-list",
     page: "/reports",
     selector: '[data-tour="reports-list"]',
