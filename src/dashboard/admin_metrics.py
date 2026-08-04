@@ -301,15 +301,26 @@ def get_token_usage_per_user(s: Session) -> list[dict[str, Any]]:
         func.count().label("req_count"),
         func.sum(LlmUsageEvent.total_tokens).label("total_tokens"),
         func.sum(func.coalesce(LlmUsageEvent.estimated_cost_amount, 0)).label("cost"),
-        func.max(LlmUsageEvent.occurred_at).label("last_seen"),
     ).outerjoin(
         User, User.chat_id == LlmUsageEvent.chat_id
     ).group_by(
         LlmUsageEvent.chat_id, User.username
     ).order_by(func.sum(LlmUsageEvent.total_tokens).desc()).all()
 
+    # "Ultima Attività" reale = ultimo messaggio inviato dall'utente (role="user"),
+    # non l'ultimo LlmUsageEvent: quello viene scritto anche da job schedulati
+    # (es. weekly_plan_job) che chiamano l'LLM per conto dell'utente senza che lui
+    # abbia fatto nulla, producendo timestamp identici per tutti gli utenti attivi.
+    last_user_msg = dict(
+        s.query(ChatMessage.chat_id, func.max(ChatMessage.created_at))
+        .filter(ChatMessage.role == "user")
+        .group_by(ChatMessage.chat_id)
+        .all()
+    )
+
     out = []
-    for chat_id, username, req_count, total_tokens, cost, last_seen in rows:
+    for chat_id, username, req_count, total_tokens, cost in rows:
+        last_seen = last_user_msg.get(chat_id)
         out.append({
             "chat_id": chat_id,
             "username": username or chat_id,
@@ -1224,8 +1235,11 @@ def get_user_detail(s: Session, chat_id: str) -> dict[str, Any] | None:
     cost_total = _f(s.query(
         func.coalesce(func.sum(LlmUsageEvent.estimated_cost_amount), 0.0)
     ).filter(LlmUsageEvent.chat_id == chat_id).scalar(), 6)
-    last_active = s.query(func.max(LlmUsageEvent.occurred_at)).filter(
-        LlmUsageEvent.chat_id == chat_id
+    # "Ultima Attività" reale = ultimo messaggio inviato dall'utente (role="user"),
+    # non l'ultimo LlmUsageEvent (vedi commento gemello in get_token_usage_per_user).
+    last_active = s.query(func.max(ChatMessage.created_at)).filter(
+        ChatMessage.chat_id == chat_id,
+        ChatMessage.role == "user",
     ).scalar()
 
     feedback_count = s.query(Feedback).filter(Feedback.chat_id == chat_id).count()
