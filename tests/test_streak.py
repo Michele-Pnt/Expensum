@@ -179,7 +179,31 @@ def test_record_tx_event_returns_streak_result_only_for_expense_and_income(mock_
     store.record_tx_event("s8", "expense", "text", "confirmed", "telegram")
     result = store.record_tx_event("s8", "income", "text", "confirmed", "telegram")
 
-    assert result == {"cycle_completed_days": 14, "next_target_days": 28}
+    # Il contratto si è esteso in modo additivo con l'arrivo della gamification:
+    # le chiavi della streak restano identiche, si aggiunge `achievements`. I
+    # chiamanti devono testare `result.get("cycle_completed_days")`, non il dict.
+    assert result["cycle_completed_days"] == 14
+    assert result["next_target_days"] == 28
+    assert "achievements" in result
+
+
+def test_record_tx_event_unlocks_streak_achievements_on_cycle_completion(mock_db_session):
+    """Completare un ciclo sblocca gli achievement di streak, oltre al reward Pro."""
+    store = mock_db_session
+    store.add_user(chat_id="s8b")
+    yesterday = date.today() - timedelta(days=1)
+    _prep_streak(
+        store, "s8b",
+        current_streak_days=13, streak_target_days=14,
+        last_qualifying_date=yesterday, cycle_state="counting",
+    )
+
+    store.record_tx_event("s8b", "expense", "text", "confirmed", "telegram")
+    result = store.record_tx_event("s8b", "income", "text", "confirmed", "telegram")
+
+    codes = {a["code"] for a in result["achievements"]}
+    assert "streak_cycle_1" in codes
+    assert "streak_days_14" in codes
 
 
 def test_get_user_streak_default_when_no_row(mock_db_session):

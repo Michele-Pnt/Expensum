@@ -82,8 +82,9 @@ export default function InvitaPage() {
           Invita amici
         </Typography>
         <Typography color="text.secondary">
-          Condividi il tuo link personale: chi si iscrive tramite il tuo invito riceve 2 mesi di Pro
-          gratis, e tu ricevi lo stesso premio (una volta sola, indipendentemente da quante persone inviti).
+          Condividi il tuo link personale: chi si iscrive tramite il tuo invito riceve 14 giorni di
+          Pro gratis, e tu ricevi gli stessi 14 giorni per ciascuno dei tuoi primi 3 inviti — fino a
+          42 giorni.
         </Typography>
       </Box>
 
@@ -164,9 +165,9 @@ export default function InvitaPage() {
               )}
 
               <Typography variant="caption" color="text.secondary" sx={{ display: "block", mt: 2 }}>
-                Il premio Pro (2 mesi) è unico e fisso: raggiunti i 3 inviti hai ottenuto tutto quello
-                che questo link può darti (premio + accesso garantito a Lifetime Founder). Da qui in
-                poi il link non genera più premi, né per te né per chi lo usa.
+                Raggiunti i 3 inviti hai ottenuto il massimo per te: 42 giorni di Pro e l&apos;accesso
+                garantito a Lifetime Founder. Il link però non scade mai — puoi continuare a
+                condividerlo e chi lo usa riceve sempre i suoi 14 giorni.
               </Typography>
             </CardContent>
           </Card>

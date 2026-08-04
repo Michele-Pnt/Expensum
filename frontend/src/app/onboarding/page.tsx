@@ -360,8 +360,9 @@ function InviteStep({ onContinue }: { onContinue: () => void }) {
         Fatto! 🎉
       </Typography>
       <Typography variant="body1" sx={{ mb: 3, color: "var(--color-text-2)" }}>
-        Invita 3 amici con il tuo link personale: ognuno di voi riceve 2 mesi di Pro
-        gratis, e tu sblocchi un posto garantito nell&apos;offerta Lifetime Founder.
+        Invita 3 amici con il tuo link personale: ognuno riceve 14 giorni di Pro gratis e
+        tu altrettanti per ciascun invito, fino a 42 giorni. Ai 3 inviti sblocchi anche un
+        posto garantito nell&apos;offerta Lifetime Founder.
       </Typography>
 
       {loading ? (

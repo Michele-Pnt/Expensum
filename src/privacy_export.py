@@ -65,7 +65,8 @@ def build_export_json(session: Session, user: User) -> dict:
             "incomes": storage.fetch_income(start, today),
             "transfers": storage.fetch_transfers(start, today),
             "accounts": storage.fetch_accounts(),
-            "categories": storage.get_categories(),
+            # Export GDPR: deve contenere tutto, archiviate comprese.
+            "categories": storage.get_categories(include_archived=True),
             "subscriptions": storage.fetch_subscriptions(),
             "monthly_balances": storage.fetch_monthly_balances(start, today),
         }

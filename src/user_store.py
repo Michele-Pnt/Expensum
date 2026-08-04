@@ -39,7 +39,10 @@ from sqlalchemy import (
     text,
     types,
 )
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import declarative_base, sessionmaker
+
+from config import Config
 
 
 def _get_fernet() -> Fernet:
@@ -53,9 +56,29 @@ def _get_fernet() -> Fernet:
 # Report di riconciliazione categorie (cache Postgres ↔ Notion)
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# Regole del referral
+# ---------------------------------------------------------------------------
+
+#: Giorni di Pro per ogni invito andato a buon fine, sia a chi invita sia a chi
+#: viene invitato.
+REFERRAL_REWARD_DAYS = 14
+
+#: Quanti inviti vengono premiati a chi invita. Oltre questa soglia il link resta
+#: pienamente funzionante — chi viene invitato riceve sempre i suoi giorni — ma il
+#: referrer non accumula altri bonus.
+REFERRER_MAX_REWARDED_REFERRALS = 3
+
+#: Inviti necessari per l'accesso garantito all'offerta Lifetime Founder. È una
+#: promessa da onorare a mano quando l'offerta verrà aperta, non giorni di Pro.
+LIFETIME_FOUNDER_REFERRALS = 3
+
+
 # Nome della categoria di fallback su cui riassegnare spese/abbonamenti quando
-# una categoria con record dipendenti viene rimossa da Notion.
-FALLBACK_CATEGORY_NAME = "Altro"
+# una categoria con record dipendenti viene rimossa da Notion. Letto dal Config
+# (env `CATEGORY_FALLBACK_NAME`) e non più hardcoded: con due valori distinti la
+# riconciliazione e il matcher avrebbero puntato a categorie diverse.
+FALLBACK_CATEGORY_NAME = Config.CATEGORY_FALLBACK_NAME
 
 
 @dataclass
@@ -310,6 +333,11 @@ class UserPlan(Base):
     trial_started_at = Column(DateTime, nullable=True)
     trial_ends_at = Column(DateTime, nullable=True)
 
+    # Giorni di Pro maturati (referral, streak) mentre l'utente era già Pro senza
+    # scadenza: applicarli subito lo declasserebbe a trial. Restano in credito e
+    # vengono consumati da `consume_pending_pro_days` quando il Pro finisce.
+    pending_pro_days = Column(Integer, default=0, nullable=False)
+
 
 class PlanChange(Base):
     """Storico cambi piano utente. Usato per metriche upgrade/churn."""
@@ -505,9 +533,12 @@ class TallyLead(Base):
 
 
 class ReferralReward(Base):
-    """Reward Pro (60gg) da un referral: uno per il 'referred', uno (a occorrenza
-    singola) per il 'referrer' — il tetto massimo per il referrer è fisso a
-    days_granted indipendentemente dal numero di persone invitate.
+    """Giorni di Pro maturati da un referral: uno per il 'referred', uno per il 'referrer'.
+
+    Ogni invito andato a buon fine vale `REFERRAL_REWARD_DAYS` giorni a testa. Chi
+    invita accumula un reward per ciascuno dei primi `REFERRER_MAX_REWARDED_REFERRALS`
+    inviti; chi viene invitato riceve sempre i suoi giorni, senza tetto e senza
+    scadenza del link.
     """
     __tablename__ = "referral_rewards"
 
@@ -515,7 +546,7 @@ class ReferralReward(Base):
     beneficiary_email    = Column(String, nullable=False, index=True)
     beneficiary_chat_id  = Column(String, nullable=True)
     role                 = Column(String, nullable=False)  # 'referrer' | 'referred'
-    days_granted         = Column(Integer, nullable=False, default=60)
+    days_granted         = Column(Integer, nullable=False, default=REFERRAL_REWARD_DAYS)
     source_tally_lead_id = Column(Integer, ForeignKey("tally_leads.id"), nullable=True)
     status               = Column(String, nullable=False, default="pending")  # 'pending'|'applied'
     created_at           = Column(DateTime, default=datetime.utcnow)
@@ -599,6 +630,109 @@ class UserStreak(Base):
     today_count = Column(Integer, default=0, nullable=False)
     today_date = Column(Date, nullable=True)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+
+
+# ---------------------------------------------------------------------------
+# Gamification: contatori, achievement, XP
+#
+# Tabelle di sistema come `tx_events` e `user_streaks`: nessuna policy RLS,
+# l'isolamento è applicativo (filtro su chat_id dietro `@_tg_webapp_auth`).
+# Proprio perché manca la rete di sicurezza del database, qui dentro possono
+# stare SOLO codici, contatori interi e timestamp — mai importi, nomi categoria,
+# merchant o testo libero dell'utente.
+# ---------------------------------------------------------------------------
+
+class UserMetricCounter(Base):
+    """Contatori aggregati per utente: la sorgente delle soglie achievement.
+
+    Chiave/valore stretta: aggiungere una metrica nuova non richiede una migration.
+    I contatori sono materializzati anziché ricalcolati a ogni lettura perché
+    `tx_events` è recente e non copre lo storico dei beta, e perché l'API di
+    gamification altrimenti richiederebbe una manciata di COUNT aggregati a ogni
+    caricamento. `recompute_metrics()` li riallinea di notte dalle sorgenti di
+    verità, rendendo il sistema auto-riparante.
+    """
+    __tablename__ = "user_metric_counters"
+
+    chat_id = Column(String, ForeignKey("users.chat_id"), primary_key=True)
+    metric = Column(String(48), primary_key=True)
+    value = Column(Integer, default=0, nullable=False)
+    value_date = Column(Date, nullable=True)   # ultimo periodo applicato (metriche mensili)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+
+    __table_args__ = (
+        Index("ix_user_metric_counters_metric", "metric"),
+    )
+
+
+class UserAchievement(Base):
+    """Istanza sbloccata di un achievement.
+
+    Tabella append-only: `seen_at` e `notified_telegram` sono gli unici campi che
+    cambiano dopo l'inserimento. Un achievement non viene mai revocato — rompere
+    una catena azzera il contatore, non toglie un badge già ottenuto.
+
+    L'idempotenza è delegata allo unique constraint: il motore prova a inserire e
+    tratta l'IntegrityError come "già sbloccato", quindi nessun doppio XP anche in
+    caso di eventi duplicati o backfill rieseguito. `dedup_key` è vuoto per gli
+    achievement singoli e valorizzato per i ripetibili (es. "goal:12").
+    """
+    __tablename__ = "user_achievements"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    chat_id = Column(String, ForeignKey("users.chat_id"), nullable=False, index=True)
+    code = Column(String(64), nullable=False)
+    dedup_key = Column(String(64), default="", nullable=False)
+    xp_awarded = Column(Integer, default=0, nullable=False)
+    progress_value = Column(Integer, nullable=True)   # valore della metrica allo sblocco
+    unlocked_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    source = Column(String(12), default="live", nullable=False)  # 'live'|'backfill'|'reconcile'
+    notified_telegram = Column(Boolean, default=False, nullable=False)
+    seen_at = Column(DateTime, nullable=True)
+
+    __table_args__ = (
+        UniqueConstraint("chat_id", "code", "dedup_key", name="uq_user_achievements_chat_code_key"),
+        Index("ix_user_achievements_chat_unlocked", "chat_id", "unlocked_at"),
+    )
+
+
+class UserGamificationProfile(Base):
+    """XP totale e livello denormalizzato: una riga per utente."""
+    __tablename__ = "user_gamification_profiles"
+
+    chat_id = Column(String, ForeignKey("users.chat_id"), primary_key=True)
+    total_xp = Column(Integer, default=0, nullable=False)
+    level = Column(Integer, default=1, nullable=False)
+    last_level_up_at = Column(DateTime, nullable=True)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+
+
+class ReportEvent(Base):
+    """Generazione e apertura di un report, tracciate lato server.
+
+    Separata da `saved_reports` di proposito: quella vive nel dominio storage (con
+    RLS, e inesistente sul backend Notion), mentre qui serve un tracking che
+    funzioni su entrambi i backend senza toccare la pipeline dei report.
+
+    Lo unique constraint neutralizza il fatto che `save_report` sia un upsert:
+    rigenerare lo stesso report non gonfia il contatore, e i refresh di pagina non
+    contano come aperture multiple. È anche l'unica fonte affidabile di "report
+    aperto": l'evento PostHog lato frontend dipende dal consenso cookie.
+    """
+    __tablename__ = "report_events"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    chat_id = Column(String, ForeignKey("users.chat_id"), nullable=False, index=True)
+    share_token = Column(String(36), nullable=True)
+    report_type = Column(String(20), nullable=False)   # 'weekly'|'monthly'
+    event_type = Column(String(12), nullable=False)    # 'generated'|'opened'
+    source = Column(String(12), nullable=False)        # 'telegram'|'webapp'|'job'|'api'
+    occurred_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint("chat_id", "share_token", "event_type", name="uq_report_events_token_type"),
+        Index("ix_report_events_chat_type", "chat_id", "event_type"),
+    )
 
 
 # 5. IL MANAGER DEL DATABASE
@@ -1516,6 +1650,14 @@ class UserStore:
             session.commit()
             logger.info(f"[User {chat_id}] Salvato nuovo feedback.")
 
+        # L'hook sta qui e non nei chiamanti, così vale per il comando Telegram e
+        # per qualunque endpoint futuro. Import locale: evita il ciclo di import.
+        try:
+            from src.gamification import engine
+            engine.record_event(self, chat_id, "feedback_sent")
+        except Exception as exc:  # noqa: BLE001 — il feedback è già salvato
+            logger.warning("[Gamification] Hook feedback fallito per %s: %s", chat_id, exc)
+
     # --- METODI OAUTH (Fase 2) ---
     def generate_secure_token(self, length=12) -> str:
         """Genera un token alfanumerico casuale (es: RT-Hkd83L)."""
@@ -1614,6 +1756,11 @@ class UserStore:
                 User.storage_backend == "postgres",
                 User.setup_status.in_(["DONE", "COMPLETED"]),
             ).all()
+
+    def get_all_active_users(self) -> list[User]:
+        """Tutti gli utenti attivi. Usato dai job che devono passare su tutti."""
+        with self.Session() as session:
+            return session.query(User).filter(User.is_active == True).all()  # noqa: E712
 
     def get_pro_users(self) -> list[User]:
         """Ritorna tutti gli utenti attivi con piano PRO."""
@@ -1839,28 +1986,43 @@ class UserStore:
             session.flush()
         return row
 
-    def get_user_category_names(self, user_id: str) -> list[str]:
-        """Ritorna i nomi delle categorie dell'utente."""
+    # Frammento SQL costante (mai interpolato con input utente) per escludere le
+    # categorie archiviate dalle letture che servono a *scegliere* una categoria.
+    _ACTIVE_CATEGORY_CLAUSE = " AND archived_at IS NULL"
+
+    def get_user_category_names(self, user_id: str, include_archived: bool = False) -> list[str]:
+        """Nomi delle categorie dell'utente, archiviate escluse per default."""
         user_id = str(user_id)
+        clause = "" if include_archived else self._ACTIVE_CATEGORY_CLAUSE
         with self._user_session(user_id) as session:
             rows = session.execute(
-                text("SELECT name FROM user_categories WHERE user_id = :uid ORDER BY name"),
+                text(
+                    "SELECT name FROM user_categories "
+                    f"WHERE user_id = :uid{clause} ORDER BY name"
+                ),
                 {"uid": user_id},
             ).fetchall()
             return [r[0] for r in rows]
 
-    def get_user_categories_with_descriptions(self, user_id: str) -> list[dict]:
+    def get_user_categories_with_descriptions(
+        self, user_id: str, include_archived: bool = False
+    ) -> list[dict]:
         """Ritorna [{"name": ..., "description_summary": ...}, ...] per il parser LLM.
+
+        Le categorie archiviate sono escluse: alimentano l'`enum` del JSON Schema di
+        `ExpenseParser`, quindi includerle farebbe proporre all'LLM categorie che
+        l'utente ha esplicitamente messo da parte.
 
         `description_summary` è `None` per le categorie senza descrizione (comportamento
         odierno, solo nome) — vedi `ExpenseParser(category_descriptions=...)`.
         """
         user_id = str(user_id)
+        clause = "" if include_archived else self._ACTIVE_CATEGORY_CLAUSE
         with self._user_session(user_id) as session:
             rows = session.execute(
                 text(
                     "SELECT name, description_summary FROM user_categories "
-                    "WHERE user_id = :uid ORDER BY name"
+                    f"WHERE user_id = :uid{clause} ORDER BY name"
                 ),
                 {"uid": user_id},
             ).fetchall()
@@ -1961,20 +2123,26 @@ class UserStore:
                 user.pinned_dashboard_msg_id = msg_id
                 session.commit()
 
-    def get_user_categories_with_budget(self, user_id: str) -> list[dict]:
+    def get_user_categories_with_budget(
+        self, user_id: str, include_archived: bool = False
+    ) -> list[dict]:
         """Ritorna nome, budget mensile e average storica per ogni categoria dell'utente.
+
+        Archiviate escluse per default: un budget su una categoria messa da parte non
+        ha significato e non deve generare alert.
 
         Funziona per entrambi i backend (Notion e Postgres): i dati sono sempre
         nel DB locale (user_categories + user_category_notion_links).
         """
         user_id = str(user_id)
+        clause = "" if include_archived else " AND uc.archived_at IS NULL"
         with self._user_session(user_id) as session:
             rows = session.execute(
                 text(
                     "SELECT uc.name, uc.monthly_budget, ucnl.average "
                     "FROM user_categories uc "
                     "LEFT JOIN user_category_notion_links ucnl ON ucnl.category_id = uc.id "
-                    "WHERE uc.user_id = :uid ORDER BY uc.name"
+                    f"WHERE uc.user_id = :uid{clause} ORDER BY uc.name"
                 ),
                 {"uid": user_id},
             ).fetchall()
@@ -1983,19 +2151,22 @@ class UserStore:
                 for r in rows
             ]
 
-    def get_user_categories_with_averages(self, user_id: str) -> list[dict]:
+    def get_user_categories_with_averages(
+        self, user_id: str, include_archived: bool = False
+    ) -> list[dict]:
         """Ritorna nome e media storica di ogni categoria dell'utente.
 
         `average` viene da `user_category_notion_links` (None per categorie senza link Notion).
         """
         user_id = str(user_id)
+        clause = "" if include_archived else " AND uc.archived_at IS NULL"
         with self._user_session(user_id) as session:
             rows = session.execute(
                 text(
                     "SELECT uc.name, ucnl.average "
                     "FROM user_categories uc "
                     "LEFT JOIN user_category_notion_links ucnl ON ucnl.category_id = uc.id "
-                    "WHERE uc.user_id = :uid ORDER BY uc.name"
+                    f"WHERE uc.user_id = :uid{clause} ORDER BY uc.name"
                 ),
                 {"uid": user_id},
             ).fetchall()
@@ -2161,7 +2332,12 @@ class UserStore:
             return query.order_by(DataBreach.detected_at.desc()).all()
 
     def get_users_for_breach_notification(self) -> list[tuple[str, Optional[str]]]:
-        """Ritorna (chat_id, email) di tutti gli utenti attivi da avvisare (Art. 34)."""
+        """Ritorna (chat_id, email) di tutti gli utenti attivi da avvisare (Art. 34).
+
+        Nessun filtro su `notifications_enabled`: la notifica di data breach è un
+        obbligo di legge, non una comunicazione commerciale. Per gli annunci di
+        prodotto usare `get_users_for_product_announcement`.
+        """
         with self.Session() as session:
             rows = (
                 session.query(User.chat_id, User.email)
@@ -2169,6 +2345,37 @@ class UserStore:
                 .all()
             )
             return [(row[0], row[1]) for row in rows]
+
+    def get_users_for_product_announcement(
+        self,
+        plan_type: Optional[str] = None,
+        storage_backend: Optional[str] = None,
+    ) -> list[tuple[str, Optional[str]]]:
+        """Destinatari di un annuncio di prodotto: (chat_id, email).
+
+        A differenza di `get_users_for_breach_notification` rispetta l'opt-out
+        (`notifications_enabled`, GDPR Art. 21) — un annuncio di feature è una
+        comunicazione facoltativa. Filtra anche gli utenti che non possono usare
+        la feature annunciata, per non promettere qualcosa di inaccessibile.
+
+        Args:
+            plan_type: se valorizzato, tiene solo gli utenti con quel piano.
+            storage_backend: se valorizzato, tiene solo quel backend (es. le feature
+                Postgres-only non vanno annunciate a chi è ancora su Notion).
+        """
+        with self.Session() as session:
+            query = (
+                session.query(User.chat_id, User.email)
+                .filter(User.is_active == True)  # noqa: E712
+                .filter(User.notifications_enabled == True)  # noqa: E712
+            )
+            if storage_backend:
+                query = query.filter(User.storage_backend == storage_backend)
+            if plan_type:
+                query = query.join(UserPlan, UserPlan.chat_id == User.chat_id).filter(
+                    UserPlan.plan_type == plan_type
+                )
+            return [(row[0], row[1]) for row in query.all()]
 
     def save_tally_lead(
         self,
@@ -2216,17 +2423,28 @@ class UserStore:
     def create_referral_rewards(
         self, lead: "TallyLead", referrer_lead: "TallyLead"
     ) -> dict:
-        """Crea i ReferralReward per un nuovo lead 'referred' e, se non ne ha già
-        uno, per il referrer. Il referrer riceve un solo reward in assoluto
-        (tetto fisso, non additivo per numero di referral). Al 3° referral andato
-        a buon fine, marca il referrer come 'lifetime_founder_guaranteed' — e da lì
-        in poi il link smette di generare reward: i referral oltre il 3° vengono
-        comunque registrati (referred_by_code resta valorizzato, per tracciamento),
-        ma non creano più alcun ReferralReward, né per il referrer né per l'invitato.
+        """Crea i ReferralReward per un invito andato a buon fine.
+
+        Regole:
+
+        - **Chi viene invitato** riceve sempre `REFERRAL_REWARD_DAYS` giorni. Il link
+          non scade mai: anche il decimo invitato ottiene il suo bonus.
+        - **Chi invita** accumula `REFERRAL_REWARD_DAYS` giorni per ciascuno dei primi
+          `REFERRER_MAX_REWARDED_REFERRALS` inviti. Oltre quella soglia continua a
+          poter invitare, ma senza ulteriori giorni per sé.
+        - Al raggiungimento di `LIFETIME_FOUNDER_REFERRALS` inviti il referrer viene
+          marcato `lifetime_founder_guaranteed`: è una promessa di accesso all'offerta
+          Lifetime Founder, da onorare a mano, non giorni di Pro.
+
+        Auto-invito: chi usa il proprio codice non prende nulla. Il confronto è sulle
+        **email**, non sugli id dei lead — la stessa persona può compilare il form due
+        volte e ritrovarsi con due lead distinti, che una guardia sugli id non
+        riconoscerebbe come la stessa identità.
 
         Ritorna {'referrer_first_reward': bool, 'lifetime_founder_unlocked': bool,
         'reward_cap_reached': bool} per permettere al chiamante di decidere quali
-        email inviare.
+        email inviare. `reward_cap_reached` indica che il referrer ha esaurito i propri
+        bonus, non che l'invitato sia rimasto a mani vuote.
         """
         result = {
             "referrer_first_reward": False,
@@ -2236,48 +2454,57 @@ class UserStore:
         if not lead.email or not referrer_lead.email:
             return result
 
+        if lead.email.strip().lower() == referrer_lead.email.strip().lower():
+            logger.info(
+                "[Referral] Auto-invito ignorato",
+                extra={"domain": "dashboard", "event": "referral_self_invite_blocked",
+                       "meta": {"lead_id": lead.id, "referrer_lead_id": referrer_lead.id}},
+            )
+            return result
+
         with self.Session() as session:
             referred_count = (
                 session.query(TallyLead)
                 .filter(TallyLead.referred_by_code == referrer_lead.referral_code)
                 .count()
             )
-            if referred_count > 3:
-                result["reward_cap_reached"] = True
-                return result
 
+            # L'invitato prende sempre i suoi giorni: il link non si esaurisce.
             session.add(ReferralReward(
                 beneficiary_email=lead.email,
                 role="referred",
-                days_granted=60,
+                days_granted=REFERRAL_REWARD_DAYS,
                 source_tally_lead_id=lead.id,
                 status="pending",
             ))
 
-            existing_referrer_reward = (
+            referrer_rewards = (
                 session.query(ReferralReward)
                 .filter(
                     ReferralReward.role == "referrer",
                     ReferralReward.beneficiary_email == referrer_lead.email,
                 )
-                .first()
+                .count()
             )
-            if not existing_referrer_reward:
+            if referrer_rewards < REFERRER_MAX_REWARDED_REFERRALS:
                 session.add(ReferralReward(
                     beneficiary_email=referrer_lead.email,
                     role="referrer",
-                    days_granted=60,
+                    days_granted=REFERRAL_REWARD_DAYS,
                     source_tally_lead_id=lead.id,
                     status="pending",
                 ))
-                result["referrer_first_reward"] = True
+                result["referrer_first_reward"] = referrer_rewards == 0
+            else:
+                result["reward_cap_reached"] = True
 
             referrer_row = (
                 session.query(TallyLead)
                 .filter(TallyLead.id == referrer_lead.id)
                 .first()
             )
-            if referred_count >= 3 and referrer_row and not referrer_row.lifetime_founder_guaranteed:
+            if (referred_count >= LIFETIME_FOUNDER_REFERRALS and referrer_row
+                    and not referrer_row.lifetime_founder_guaranteed):
                 referrer_row.lifetime_founder_guaranteed = True
                 referrer_row.lifetime_founder_guaranteed_at = datetime.utcnow()
                 result["lifetime_founder_unlocked"] = True
@@ -2566,6 +2793,24 @@ class UserStore:
             session.query(Feedback).filter(Feedback.chat_id == chat_id).delete()
             session.query(DatabaseSchema).filter(DatabaseSchema.chat_id == chat_id).delete()
             session.query(OAuthSession).filter(OAuthSession.chat_id == chat_id).delete()
+            # Telemetria d'uso e gamification: hanno tutte una FK su users.chat_id,
+            # quindi senza queste righe la DELETE finale dell'utente fallisce con una
+            # violazione di vincolo su Postgres (GDPR Art. 17).
+            session.query(TxEvent).filter(TxEvent.chat_id == chat_id).delete()
+            session.query(UserStreak).filter(UserStreak.chat_id == chat_id).delete()
+            session.query(UserMetricCounter).filter(
+                UserMetricCounter.chat_id == chat_id
+            ).delete()
+            session.query(UserAchievement).filter(
+                UserAchievement.chat_id == chat_id
+            ).delete()
+            session.query(UserGamificationProfile).filter(
+                UserGamificationProfile.chat_id == chat_id
+            ).delete()
+            session.query(ReportEvent).filter(ReportEvent.chat_id == chat_id).delete()
+            session.query(TrialLifecycleEvent).filter(
+                TrialLifecycleEvent.chat_id == chat_id
+            ).delete()
             session.delete(user)
             session.commit()
 
@@ -2750,6 +2995,20 @@ class UserStore:
                 chat_id, old_plan.upper(), plan_type.upper(), payment_reference or "N/A",
             )
 
+        # Fine del Pro: è il momento in cui i giorni maturati mentre l'utente era
+        # già Pro (referral, streak) diventano spendibili. Senza questa chiamata un
+        # beta a Pro permanente accumulerebbe credito per sempre senza vederlo mai,
+        # perché non passa mai da `get_expired_trials`.
+        # La condizione è il passaggio pro → free e non `change_type`, che vale
+        # "trial_expired" proprio nel caso più frequente.
+        if old_plan == "pro" and plan_type == "free":
+            granted = self.consume_pending_pro_days(chat_id)
+            if granted:
+                logger.info(
+                    "[User %s] Downgrade: applicati %d giorni di Pro in credito.",
+                    chat_id, granted,
+                )
+
     def start_trial(self, chat_id: str, days: int = 30) -> None:
         """Concede un trial Pro di N giorni (grant amministrativo manuale, beta).
 
@@ -2792,12 +3051,16 @@ class UserStore:
     ) -> datetime:
         """Estende (additivamente) il Pro dell'utente di N giorni — reward referral/streak/ecc.
 
-        Se un trial è già attivo e non ancora scaduto, i giorni si sommano alla
-        scadenza esistente invece di sovrascriverla (altrimenti reward multipli
-        si cancellerebbero a vicenda). Se non c'è trial attivo (piano free, o Pro
-        permanente beta senza scadenza), parte da ora. Applicato anche agli account
-        Pro permanenti (beta_default): li trasforma in un Pro con scadenza — scelta
-        esplicita del reward, non un effetto collaterale.
+        Tre casi, a seconda dello stato del piano:
+
+        1. **Trial attivo**: i giorni si sommano alla scadenza esistente invece di
+           sovrascriverla, altrimenti reward multipli si cancellerebbero a vicenda.
+        2. **Piano free**: parte un trial Pro da adesso.
+        3. **Pro senza scadenza** (beta permanente o abbonato pagante): il piano
+           **non viene toccato**. Impostare `is_trial=True` con una scadenza sarebbe
+           un declassamento — l'utente passerebbe da Pro illimitato a 60 giorni. I
+           giorni maturano in `pending_pro_days` e verranno applicati quando il Pro
+           finisce (vedi `consume_pending_pro_days`).
 
         Args:
             change_type: valore loggato in `PlanChange.change_type` (es. "referral_reward",
@@ -2805,8 +3068,10 @@ class UserStore:
             reason: valore loggato in `PlanChange.reason`.
 
         Returns:
-            La nuova `trial_ends_at` (UTC), utile ai chiamanti che devono sapere
-            esattamente quando il reward termina (es. la streak per calcolare la pausa).
+            La data in cui il reward termina (UTC). Per il caso 3 il piano resta
+            invariato ma si restituisce comunque `now + days`, perché i chiamanti
+            la usano come durata logica del reward (la streak ci calcola la pausa
+            del ciclo) e non come scadenza del piano.
         """
         chat_id = str(chat_id)
         now = datetime.utcnow()
@@ -2818,14 +3083,22 @@ class UserStore:
                 plan = session.query(UserPlan).filter_by(chat_id=chat_id).first()
 
             old_plan = plan.plan_type
-            base = plan.trial_ends_at if (plan.trial_ends_at and plan.trial_ends_at > now) else now
+            is_permanent_pro = plan.plan_type == "pro" and not plan.is_trial
 
-            plan.plan_type = "pro"
-            plan.is_trial = True
-            plan.trial_started_at = plan.trial_started_at or now
-            plan.trial_ends_at = base + timedelta(days=days)
-            plan.tokens_total = 3000000
+            if is_permanent_pro:
+                plan.pending_pro_days = (plan.pending_pro_days or 0) + days
+                reward_ends_at = now + timedelta(days=days)
+            else:
+                base = plan.trial_ends_at if (plan.trial_ends_at and plan.trial_ends_at > now) else now
+                plan.plan_type = "pro"
+                plan.is_trial = True
+                plan.trial_started_at = plan.trial_started_at or now
+                plan.trial_ends_at = base + timedelta(days=days)
+                plan.tokens_total = 3000000
+                reward_ends_at = plan.trial_ends_at
 
+            # Il PlanChange viene registrato in ogni caso: il reward è maturato e
+            # deve restare tracciabile anche quando non altera il piano.
             session.add(PlanChange(
                 chat_id=chat_id,
                 from_plan=old_plan,
@@ -2836,11 +3109,53 @@ class UserStore:
             ))
 
             session.commit()
-            logger.info(
-                "[User %s] Pro esteso di %d giorni (%s), nuova scadenza %s.",
-                chat_id, days, change_type, plan.trial_ends_at.isoformat(),
-            )
-            return plan.trial_ends_at
+            if is_permanent_pro:
+                logger.info(
+                    "[User %s] Pro già attivo senza scadenza: %d giorni (%s) messi in credito "
+                    "(totale %d).", chat_id, days, change_type, plan.pending_pro_days,
+                )
+            else:
+                logger.info(
+                    "[User %s] Pro esteso di %d giorni (%s), nuova scadenza %s.",
+                    chat_id, days, change_type, plan.trial_ends_at.isoformat(),
+                )
+            return reward_ends_at
+
+    def get_pending_pro_days(self, chat_id: str) -> int:
+        """Giorni di Pro maturati e non ancora applicati (0 se nessuno)."""
+        with self.Session() as session:
+            plan = session.query(UserPlan).filter_by(chat_id=str(chat_id)).first()
+            return (plan.pending_pro_days or 0) if plan else 0
+
+    def consume_pending_pro_days(self, chat_id: str) -> int:
+        """Applica i giorni di Pro in credito, azzerando il contatore.
+
+        Va chiamata quando il Pro dell'utente sta per finire (scadenza trial o
+        disdetta abbonamento): è il momento in cui i giorni maturati mentre era
+        già Pro diventano finalmente spendibili.
+
+        Returns:
+            I giorni applicati (0 se non ce n'erano).
+        """
+        chat_id = str(chat_id)
+        with self.Session() as session:
+            plan = session.query(UserPlan).filter_by(chat_id=chat_id).first()
+            days = (plan.pending_pro_days or 0) if plan else 0
+            if not days:
+                return 0
+            if plan.plan_type == "pro" and not plan.is_trial:
+                # Il Pro senza scadenza è ancora attivo: consumare ora i giorni li
+                # butterebbe via (extend_trial_days li rimetterebbe in credito).
+                return 0
+            plan.pending_pro_days = 0
+            session.commit()
+
+        self.extend_trial_days(
+            chat_id, days=days,
+            change_type="pending_pro_days_applied", reason="pending_pro_days_applied",
+        )
+        logger.info("[User %s] Applicati %d giorni di Pro in credito.", chat_id, days)
+        return days
 
     def get_expired_trials(self, reference_time: datetime | None = None) -> list["User"]:
         """Utenti con trial attivo la cui scadenza è già passata (o oggi)."""
@@ -3149,6 +3464,36 @@ class UserStore:
             logger.info("[Cleanup] Rimossi %d category_candidates stagnanti più vecchi di %d giorni.", deleted, days)
         return deleted
 
+    def cleanup_stale_subscription_candidates(self, days: int = 120) -> int:
+        """Rimuove i pattern di abbonamento rilevati mai confermati né rifiutati,
+        più vecchi di `days` giorni (chiamata dal job notturno di retention).
+
+        Finestra più larga di `cleanup_stale_category_candidates` (120gg contro
+        90) perché le cadenze rilevate arrivano fino al trimestrale/annuale: un
+        candidate trimestrale ha `last_seen_at` naturalmente più distante nel
+        tempo, cancellarlo a 90gg lo farebbe sparire prima che l'utente veda
+        anche solo la seconda occorrenza. Non tocca `confirmed` (audit trail
+        degli abbonamenti reali creati) né `awaiting_confirm` (decisione
+        dell'utente ancora pendente) né `dismissed` (già una decisione finale,
+        ma serve a non riproporre lo stesso pattern — vedi
+        `src/subscription_detector.dismiss_candidate`).
+        """
+        from src.storage.models import SubscriptionCandidate
+
+        cutoff = datetime.utcnow() - timedelta(days=days)
+        with self.Session() as session:
+            deleted = session.query(SubscriptionCandidate).filter(
+                SubscriptionCandidate.status == "pending",
+                SubscriptionCandidate.last_seen_at < cutoff,
+            ).delete(synchronize_session=False)
+            session.commit()
+        if deleted:
+            logger.info(
+                "[Cleanup] Rimossi %d subscription_candidates stagnanti più vecchi di %d giorni.",
+                deleted, days,
+            )
+        return deleted
+
     def cleanup_old_job_runs(self, days: int = 90) -> int:
         """Rimuove le esecuzioni job più vecchie di `days` giorni.
 
@@ -3216,8 +3561,13 @@ class UserStore:
         sostituisce quell'invio, lo rispecchia in Postgres per la dashboard admin.
         Non solleva mai: il tracking non deve poter interrompere il salvataggio.
 
-        Ritorna il dict di `record_streak_activity` (ciclo streak completato) quando
-        `outcome='confirmed'` e `tx_type` è spesa/entrata, altrimenti None.
+        Ritorna None quando non c'è nulla da festeggiare. Altrimenti un dict con:
+        - `cycle_completed_days` / `next_target_days`: presenti solo se in questa
+          chiamata si è completato un ciclo di streak (chiave storica, invariata);
+        - `achievements`: lista di achievement appena sbloccati (può essere vuota).
+
+        I chiamanti che guardano solo la streak devono testare
+        `result.get("cycle_completed_days")`, non la verità del dict.
         """
         try:
             with self.Session() as session:
@@ -3233,9 +3583,94 @@ class UserStore:
         except Exception as exc:  # noqa: BLE001 — tracking best-effort
             logger.warning("[TxEvent] Impossibile registrare l'evento per %s: %s", chat_id, exc)
 
-        if outcome == "confirmed" and tx_type in ("expense", "income"):
-            return self.record_streak_activity(chat_id)
-        return None
+        if outcome != "confirmed" or tx_type not in ("expense", "income"):
+            return None
+
+        streak_result = self.record_streak_activity(chat_id)
+
+        achievements = []
+        try:
+            # Import locale: `src.gamification.engine` importa i modelli da questo
+            # modulo, quindi a livello globale sarebbe un ciclo.
+            from src.gamification import engine
+
+            if tx_type == "expense":
+                achievements += engine.record_event(
+                    self, chat_id, f"expense_confirmed:{input_method or 'text'}"
+                )
+            if streak_result:
+                completed = streak_result["cycle_completed_days"]
+                achievements += engine.record_event(
+                    self, chat_id, "streak_cycle_completed",
+                    extra_absolute={"streak_max_days": completed},
+                )
+        except Exception as exc:  # noqa: BLE001 — la gamification non deve mai propagare
+            logger.warning(
+                "[Gamification] Aggiornamento achievement fallito per %s: %s", chat_id, exc,
+                extra={"domain": "gamification", "event": "tx_hook_failed",
+                       "meta": {"chat_id": chat_id}},
+            )
+            achievements = []
+
+        if not streak_result and not achievements:
+            return None
+        result = dict(streak_result or {})
+        result["achievements"] = [u.as_dict() for u in achievements]
+        return result
+
+    def record_report_event(
+        self,
+        chat_id: str,
+        share_token: str | None,
+        report_type: str,
+        event_type: str,
+        source: str = "job",
+    ) -> list[dict]:
+        """Registra la generazione o l'apertura di un report (best-effort).
+
+        Lo unique constraint `(chat_id, share_token, event_type)` fa il lavoro:
+        `save_report` è un upsert, quindi rigenerare lo stesso report non gonfia il
+        contatore, e i refresh di pagina non contano come aperture multiple. Solo
+        quando la riga è davvero nuova l'evento arriva al motore achievement.
+
+        Non solleva mai: il tracking non deve poter far fallire un report.
+
+        Returns:
+            Gli achievement appena sbloccati (lista vuota nel caso normale).
+        """
+        chat_id = str(chat_id)
+        try:
+            with self.Session() as session:
+                session.add(ReportEvent(
+                    chat_id=chat_id,
+                    share_token=share_token,
+                    report_type=report_type,
+                    event_type=event_type,
+                    source=source,
+                ))
+                session.commit()
+        except IntegrityError:
+            # Già registrato: rigenerazione o refresh della pagina.
+            return []
+        except Exception as exc:  # noqa: BLE001 — tracking best-effort
+            logger.warning(
+                "[ReportEvent] Impossibile registrare l'evento per %s: %s", chat_id, exc,
+            )
+            return []
+
+        try:
+            from src.gamification import engine
+
+            event = "report_generated" if event_type == "generated" else "report_opened"
+            return [u.as_dict() for u in engine.record_event(self, chat_id, event)]
+        except Exception as exc:  # noqa: BLE001 — la gamification non deve mai propagare
+            logger.warning(
+                "[Gamification] Aggiornamento achievement report fallito per %s: %s",
+                chat_id, exc,
+                extra={"domain": "gamification", "event": "report_hook_failed",
+                       "meta": {"chat_id": chat_id}},
+            )
+            return []
 
     def get_user_streak(self, chat_id: str) -> dict:
         """Stato corrente della streak per l'utente (get-or-default, non crea la riga)."""

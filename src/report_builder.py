@@ -354,7 +354,7 @@ class WeeklyPlanBuilder:
         # 4. Conti, abbonamenti, categorie
         accounts = storage.fetch_accounts()
         subscriptions = storage.fetch_subscriptions()
-        categories = storage.get_categories()
+        categories = storage.get_categories(include_archived=True)
 
         # Speso nella settimana scorsa (lun-dom)
         monday_last_week = monday_this_week - timedelta(weeks=1)
@@ -713,7 +713,7 @@ class MonthlyPlanBuilder:
         # 3. Conti, abbonamenti, categorie
         accounts = storage.fetch_accounts()
         subscriptions = storage.fetch_subscriptions()
-        categories = storage.get_categories()
+        categories = storage.get_categories(include_archived=True)
 
         # --- Analisi ---
         pattern_stats = MonthlyPatternAnalyzer().compute(transactions_history)

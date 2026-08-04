@@ -8,6 +8,7 @@ from datetime import datetime, timedelta
 import pytest
 
 from src.dashboard import admin_metrics as m
+from src.storage.models import SubscriptionCandidate
 from src.user_store import (
     ChatMessage,
     Feedback,
@@ -246,7 +247,8 @@ def test_funnel_revenue(mock_db_session, monkeypatch):
     monkeypatch.setattr(m, "PRO_PRICE_EUR", 5.0)
     _seed(mock_db_session)
     with mock_db_session.Session() as s:
-        f = m.get_funnel_revenue(s)
+        # `now` ancorato a NOW: le finestre a 30/90 giorni sono rolling.
+        f = m.get_funnel_revenue(s, now=NOW)
     assert f["pro_count"] == 1
     assert f["paying_pro"] == 1
     assert f["mrr_eur"] == 5.0
@@ -271,7 +273,8 @@ def test_funnel_revenue_excludes_beta_grants_from_mrr(mock_db_session, monkeypat
                          change_type="upgrade", changed_at=NOW, reason="stripe_evt_123"))
         s.commit()
     with mock_db_session.Session() as s:
-        f = m.get_funnel_revenue(s)
+        # `now` ancorato a NOW: le finestre a 30/90 giorni sono rolling.
+        f = m.get_funnel_revenue(s, now=NOW)
 
     assert f["pro_count"] == 2
     assert f["beta_grant_pro"] == 1
@@ -291,7 +294,9 @@ def test_engagement_acquisition(mock_db_session):
 def test_monthly_token_usage(mock_db_session):
     _seed(mock_db_session)
     with mock_db_session.Session() as s:
-        mt = m.get_monthly_token_usage(s)
+        # `now` ancorato a NOW come in test_retention: i bucket mensili sono relativi
+        # al mese corrente, quindi col tempo reale il test si rompe al cambio di mese.
+        mt = m.get_monthly_token_usage(s, now=NOW)
     assert mt["per_user"][0]["chat_id"] == "u1"  # u1 consuma di più
     assert mt["current_month_stats"]["active_users"] >= 1
 
@@ -325,6 +330,41 @@ def test_jobs_status_states(mock_db_session):
     assert states["weekly_plan_job"] == "not_scheduled"
     assert states["monthly_plan_job"] == "not_scheduled"
     assert res["has_alerts"] is True
+
+
+def test_subscription_candidate_funnel(mock_db_session):
+    from datetime import date as _date
+
+    with mock_db_session.Session() as s:
+        s.add(User(chat_id="u1", username="Alice", created_at=NOW))
+        common = dict(user_id="u1", category_name="Abbonamenti",
+                      first_occurrence_date=_date(2026, 1, 1), last_occurrence_date=_date(2026, 1, 31))
+        s.add(SubscriptionCandidate(amount=9.99, display_name="Netflix", occurrences=1,
+                                    status="pending", created_at=NOW, **common))
+        s.add(SubscriptionCandidate(amount=15.99, display_name="Spotify", occurrences=2,
+                                    status="awaiting_confirm", created_at=NOW, **common))
+        s.add(SubscriptionCandidate(amount=39.90, display_name="Palestra", occurrences=2,
+                                    status="confirmed", created_at=NOW, **common))
+        s.add(SubscriptionCandidate(amount=4.99, display_name="Coincidenza", occurrences=2,
+                                    status="dismissed", created_at=NOW, **common))
+        s.commit()
+
+    with mock_db_session.Session() as s:
+        funnel = m.get_subscription_candidate_funnel(s, days=90)
+
+    assert funnel["total_detected"] == 4
+    assert funnel["pending"] == 1
+    assert funnel["awaiting_confirm"] == 1
+    assert funnel["confirmed"] == 1
+    assert funnel["dismissed"] == 1
+    assert funnel["satisfaction_pct"] == 50.0
+
+
+def test_subscription_candidate_funnel_no_decisions_yet(mock_db_session):
+    with mock_db_session.Session() as s:
+        funnel = m.get_subscription_candidate_funnel(s, days=90)
+    assert funnel["total_detected"] == 0
+    assert funnel["satisfaction_pct"] is None
 
 
 def test_record_and_cleanup_job_runs(mock_db_session):

@@ -276,7 +276,7 @@ async def run_agent(
 
         # Fetch budget per categoria (per evidenziazione sforamenti nel report)
         try:
-            categories_data = storage.get_categories()
+            categories_data = storage.get_categories(include_archived=True)
             budget_by_cat: dict[str, float] = {
                 c["name"]: float(c["monthly_budget"])
                 for c in categories_data
@@ -531,6 +531,7 @@ async def run_agent(
 
     if report_share_token and chat_id:
         notify_webapp_report(_save_store, chat_id, "monthly", report.current_month.label, report_share_token)
+        _save_store.record_report_event(chat_id, report_share_token, "monthly", "generated", "job")
 
     # Cleanup delle immagini temporanee
     for path in chart_paths:

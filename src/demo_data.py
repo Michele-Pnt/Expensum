@@ -72,7 +72,7 @@ _REQUIRED_CATEGORIES = list(_EXPENSE_TEMPLATES.keys())
 
 def _ensure_categories(storage: FinancialStorage) -> None:
     """Crea le categorie necessarie se non esistono già."""
-    existing = set(storage.get_category_names())
+    existing = set(storage.get_category_names(include_archived=True))
     for cat in _REQUIRED_CATEGORIES:
         if cat not in existing:
             storage.create_category(cat)

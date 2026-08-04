@@ -102,6 +102,13 @@ class UserCategory(Base):
 
     I metadati specifici di Notion vengono salvati nella tabella separata
     `user_category_notion_links`.
+
+    `archived_at` è l'alternativa non distruttiva alla cancellazione: la categoria
+    sparisce da ogni punto in cui se ne *sceglie* una (parser LLM, menù, obiettivi,
+    suggerimenti budget) ma resta intatta nello storico, così i report già emessi
+    non cambiano. Le letture aggregate la includono passando `include_archived=True`.
+    Lo unique constraint resta attivo anche sulle archiviate: registrare una spesa
+    col nome di una categoria archiviata la riattiva invece di crearne un duplicato.
     """
 
     __tablename__ = "user_categories"
@@ -112,6 +119,8 @@ class UserCategory(Base):
     monthly_budget = Column(Numeric(12, 2), nullable=True)
     description = Column(Text, nullable=True)
     description_summary = Column(Text, nullable=True)
+    archived_at = Column(DateTime, nullable=True)
+    budget_suggestion_dismissed_at = Column(DateTime, nullable=True)
 
     __table_args__ = (
         UniqueConstraint("user_id", "name", name="uq_user_categories_user_name"),
@@ -180,6 +189,47 @@ class Subscription(Base):
     account_id = Column(Integer, ForeignKey("accounts.id"), nullable=True)
     category_id = Column(Integer, ForeignKey("user_categories.id"), nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class SubscriptionCandidate(Base):
+    """Pattern di spesa ricorrenti non ancora promossi ad abbonamento tracciato.
+
+    Popolata sia in tempo reale (hook a ogni nuova spesa, vedi
+    `src/subscription_detector.py`) sia dal backfill una tantum sullo storico
+    esistente (`scripts/backfill_subscription_candidates.py`). Il gruppo è
+    identificato da `(user_id, category_name, amount)` con tolleranza applicativa,
+    mai da matching sul nome libero della spesa — `category_name` (non l'id) per
+    restare backend-agnostico (Notion non ha category_id interi, vedi CLAUDE.md).
+
+    Superate `occurrences` occorrenze alla stessa cadenza, il candidate passa ad
+    `awaiting_confirm` e l'utente viene interpellato (Sì/No). Alla conferma diventa
+    un `Subscription` reale tramite `FinancialStorage.create_subscription`; al
+    rifiuto passa a `dismissed` e non viene più riproposto (a differenza dei
+    `CategoryCandidate` rifiutati, qui non si azzera per richiedere di nuovo: un
+    "No" è una decisione definitiva dell'utente sui suoi soldi).
+    """
+
+    __tablename__ = "subscription_candidates"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(String, ForeignKey("users.chat_id"), nullable=False)
+    category_name = Column(String, nullable=False)
+    amount = Column(Numeric(12, 2), nullable=False)
+    cadence = Column(String(20), nullable=True)  # weekly|monthly|quarterly|yearly, noto solo dalla 2a occorrenza
+    display_name = Column(String, nullable=False)
+    occurrences = Column(Integer, nullable=False, default=1)
+    first_occurrence_date = Column(Date, nullable=False)
+    last_occurrence_date = Column(Date, nullable=False)
+    last_seen_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    status = Column(String(20), nullable=False, default="pending")
+    promoted_subscription_id = Column(Integer, ForeignKey("subscriptions.id"), nullable=True)
+    promoted_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    __table_args__ = (
+        Index("ix_subscription_candidates_user_id", "user_id"),
+        Index("ix_subscription_candidates_status", "status"),
+    )
 
 
 class SavedReport(Base):

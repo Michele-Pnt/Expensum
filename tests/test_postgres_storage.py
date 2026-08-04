@@ -115,6 +115,41 @@ class TestCreateExpense:
 
 
 # ---------------------------------------------------------------------------
+# 2b. create_subscription — risolve category_name → category_id (usato da
+#     src/subscription_detector.py, che non conosce id interni del backend)
+# ---------------------------------------------------------------------------
+
+class TestCreateSubscription:
+    def test_resolves_category_name_to_id(self, db_session, storage):
+        db_session.add(UserCategory(user_id="test_user_1", name="Abbonamenti"))
+        db_session.commit()
+        cat = db_session.query(UserCategory).filter_by(user_id="test_user_1").first()
+
+        result = storage.create_subscription(
+            "Netflix", amount=9.99, sub_type="monthly", category_name="Abbonamenti",
+        )
+        assert result["category_id"] == cat.id
+        assert result["amount"] == 9.99
+        assert result["sub_type"] == "monthly"
+
+    def test_explicit_category_id_wins_over_category_name(self, db_session, storage):
+        db_session.add(UserCategory(user_id="test_user_1", name="Abbonamenti"))
+        db_session.commit()
+
+        result = storage.create_subscription(
+            "Netflix", category_id=999, category_name="Abbonamenti",
+        )
+        assert result["category_id"] == 999
+
+    def test_unknown_category_name_gets_created_on_the_fly(self, storage):
+        """Stesso comportamento di create_expense: _resolve_category_id crea la
+        categoria al volo se non esiste, non lascia mai un riferimento a vuoto."""
+        result = storage.create_subscription("Netflix", category_name="Categoria Fantasma")
+        assert result["category_id"] is not None
+        assert "Categoria Fantasma" in storage.get_category_names()
+
+
+# ---------------------------------------------------------------------------
 # 3. create_category / update_category / get_categories — description
 # ---------------------------------------------------------------------------
 

@@ -23,6 +23,8 @@ from calendar import monthrange
 from datetime import date
 from math import ceil
 
+from src.wealth import build_wealth_series
+
 GOAL_TYPES = {
     "net_savings",
     "account_balance",
@@ -135,62 +137,15 @@ def _account_balance_current(storage, goal: dict) -> float | None:
 
 
 def _wealth_monthly_series(storage, today: date, account_id: int | None = None) -> list[float]:
-    """Serie mensile del capitale (un conto o tutti) ricostruita come in
-    /api/analytics/capital-trend: opening_balance + entrate - uscite cumulate mese su mese.
+    """Serie mensile del capitale (un conto o tutti), ultimi mesi utili per l'ETA.
+
+    Delega a `src.wealth.build_wealth_series`, sorgente unica di verità condivisa
+    con /api/analytics/capital-trend.
     """
-    accounts = storage.fetch_accounts()
-    target_accounts = [a for a in accounts if account_id is None or a["id"] == account_id]
-    if not target_accounts:
+    series = build_wealth_series(storage, today, account_id=account_id)
+    if not series.points:
         return []
-
-    incomes = storage.fetch_income(date(2000, 1, 1), today)
-    expenses = storage.fetch_all_transactions(date(2000, 1, 1), today)
-    transfers = storage.fetch_transfers(date(2000, 1, 1), today)
-
-    running = {a["id"]: (a.get("opening_balance") or 0.0) for a in target_accounts}
-    target_ids = set(running.keys())
-
-    monthly_income: dict[tuple[int, int], float] = {}
-    monthly_expense: dict[tuple[int, int], float] = {}
-    monthly_transfer_net: dict[tuple[int, int], float] = {}
-    for inc in incomes:
-        if inc.get("account_id") not in target_ids:
-            continue
-        key = (inc["date"].year, inc["date"].month)
-        monthly_income[key] = monthly_income.get(key, 0.0) + inc["amount"]
-    for exp in expenses:
-        if exp.get("account_id") not in target_ids:
-            continue
-        key = (exp["date"].year, exp["date"].month)
-        monthly_expense[key] = monthly_expense.get(key, 0.0) + exp["amount"]
-    # I trasferimenti contano per un singolo conto target (account_balance); per
-    # net_worth (tutti i conti target) un trasferimento tra due conti propri si
-    # somma e sottrae nello stesso mese, quindi si annulla correttamente da solo.
-    for tr in transfers:
-        key = (tr["date"].year, tr["date"].month)
-        if tr.get("to_account_id") in target_ids:
-            monthly_transfer_net[key] = monthly_transfer_net.get(key, 0.0) + tr["amount"]
-        if tr.get("from_account_id") in target_ids:
-            monthly_transfer_net[key] = monthly_transfer_net.get(key, 0.0) - tr["amount"]
-
-    all_keys = sorted(set(monthly_income) | set(monthly_expense) | set(monthly_transfer_net))
-    if not all_keys:
-        return [sum(running.values())]
-
-    # Le mappe sono già aggregate su tutti i conti target insieme: la variazione
-    # totale del mese non dipende da come viene ripartita tra i singoli conti,
-    # quindi la si applica cumulativamente a un unico totale invece di tenere
-    # un saldo per-conto separato.
-    total_running = sum(running.values())
-    series = []
-    for key in all_keys:
-        total_running += (
-            monthly_income.get(key, 0.0)
-            - monthly_expense.get(key, 0.0)
-            + monthly_transfer_net.get(key, 0.0)
-        )
-        series.append(total_running)
-    return series[-(ETA_HISTORY_MONTHS + 1):]
+    return series.totals[-(ETA_HISTORY_MONTHS + 1):]
 
 
 def _net_worth_current(storage) -> float:
@@ -478,3 +433,60 @@ def get_savings_goals_context(storage) -> dict:
         "active_goals": [_summarize(g) for g in active],
         "completed_goals": [{"id": g["id"], "name": g["name"]} for g in completed],
     }
+
+
+# ---------------------------------------------------------------------------
+# Rilevamento del raggiungimento, in tempo reale
+# ---------------------------------------------------------------------------
+
+def is_goal_reached(storage, goal: dict, today: date | None = None) -> bool:
+    """True se l'obiettivo è già raggiunto, calcolato senza le serie storiche.
+
+    Variante leggera di `compute_goal_progress`: salta la ricostruzione mensile
+    necessaria all'ETA e calcola solo il valore corrente. Serve a rilevare il
+    traguardo subito dopo una transazione, invece di aspettare il job del 1° del
+    mese, senza appesantire il salvataggio della spesa.
+
+    `savings_rate` è escluso di proposito: è un obiettivo ricorrente mese per mese,
+    non si "completa" mai — stessa regola del job mensile.
+    """
+    today = today or date.today()
+    goal_type = goal["goal_type"]
+    target = float(goal["target_amount"])
+    if target <= 0 or goal_type == "savings_rate":
+        return False
+
+    if goal_type == "net_savings":
+        return _net_savings_current(storage, goal, today) >= target
+    if goal_type == "account_balance":
+        current = _account_balance_current(storage, goal)
+        return current is not None and current >= target
+    if goal_type == "net_worth":
+        return _net_worth_current(storage) >= target
+    if goal_type == "category_spending_reduction":
+        # Obiettivo di contenimento: "raggiunto" significa aver chiuso il mese
+        # sotto soglia, cosa che si può dire solo a mese finito. In corsa non si
+        # completa mai: resta al job mensile.
+        return False
+    return False
+
+
+def detect_completed_goals(storage, today: date | None = None) -> list[dict]:
+    """Obiettivi attivi che risultano raggiunti adesso.
+
+    Pensata per essere chiamata dopo una transazione confermata: non solleva mai,
+    perché un errore qui non deve poter far fallire il salvataggio della spesa.
+    """
+    try:
+        goals = storage.fetch_savings_goals(status="active")
+    except Exception:  # noqa: BLE001 — backend senza obiettivi o errore transitorio
+        return []
+
+    reached = []
+    for goal in goals:
+        try:
+            if is_goal_reached(storage, goal, today):
+                reached.append(goal)
+        except Exception:  # noqa: BLE001 — un goal malformato non blocca gli altri
+            continue
+    return reached

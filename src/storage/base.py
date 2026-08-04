@@ -10,8 +10,12 @@ class FinancialStorage(ABC):
       senza sapere quale backend c'è sotto.
     """
     @abstractmethod
-    def get_category_names(self) -> list[str]:
-        """Restituisce i nomi di tutte le categorie dell'utente."""
+    def get_category_names(self, include_archived: bool = False) -> list[str]:
+        """Nomi delle categorie dell'utente, archiviate escluse per default.
+
+        L'archiviazione è un concetto specifico del backend Postgres: i backend che
+        non la supportano ignorano il parametro e restituiscono tutte le categorie.
+        """
         ...
 
     @abstractmethod
@@ -95,8 +99,22 @@ class FinancialStorage(ABC):
         ...
 
     @abstractmethod
-    def create_subscription(self, name: str) -> dict:
-        """Crea un nuovo abbonamento. Restituisce dict con almeno 'id' e 'name'."""
+    def create_subscription(
+        self,
+        name: str,
+        amount: float | None = None,
+        last_billed: str | None = None,
+        sub_type: str | None = None,
+        account_id: str | None = None,
+        category_id: str | None = None,
+        category_name: str | None = None,
+    ) -> dict:
+        """Crea un nuovo abbonamento. Restituisce dict con almeno 'id' e 'name'.
+
+        `category_name` è l'alternativa backend-agnostica a `category_id`, per i
+        chiamanti (es. `src/subscription_detector.py`) che non conoscono gli id
+        interni del backend.
+        """
         ...
 
     @abstractmethod
@@ -111,7 +129,7 @@ class FinancialStorage(ABC):
         """Aggiorna i dati di un abbonamento. Per ora supportiamo solo last_billed."""
         return False
 
-    def get_categories(self) -> list[dict]:
+    def get_categories(self, include_archived: bool = False) -> list[dict]:
         """Restituisce id, nome, budget mensile e average di tutte le categorie.
 
         Implementazione di default: ritorna lista vuota. I backend che supportano

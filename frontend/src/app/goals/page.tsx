@@ -134,8 +134,14 @@ export default function GoalsPage() {
         fetch("/api/space/accounts", { headers }),
         fetch("/api/space/categories", { headers }),
       ]);
-      if (accRes.ok) setAccounts(await accRes.json());
-      if (catRes.ok) setCategories(await catRes.json());
+      // Gli endpoint incapsulano la lista: {"accounts": [...]} / {"categories": [...]}.
+      // Assegnare l'oggetto intero lasciava i select vuoti.
+      if (accRes.ok) setAccounts((await accRes.json()).accounts ?? []);
+      if (catRes.ok) {
+        const { categories } = await catRes.json();
+        // Le archiviate non sono selezionabili per un obiettivo nuovo.
+        setCategories((categories ?? []).filter((c: { archived?: boolean }) => !c.archived));
+      }
     } catch {
       // opzioni non critiche: se falliscono, i select restano vuoti ma la pagina resta usabile
     }

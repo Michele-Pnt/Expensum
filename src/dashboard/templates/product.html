@@ -177,4 +177,22 @@
         </tbody>
     </table>
 </div>
+
+<!-- RILEVAMENTO ABBONAMENTI -->
+<h3 style="margin-top: 2rem; margin-bottom: 1rem; color: var(--text-main);">Rilevamento abbonamenti — ultimi {{ subscription_funnel.days }}gg {{ ui.info("Feature 100% Free: individua ricorrenze nelle spese (categoria+importo+cadenza) e propone Sì/No prima di creare un abbonamento tracciato. Fonte: subscription_candidates, popolata sia dall'hook live (bot.py, ad ogni spesa confermata) sia dal backfill storico una tantum.") }}</h3>
+<div class="stats-grid">
+    <div class="stat-card glass-panel" style="border-left: 4px solid var(--accent-primary)">
+        <div class="stat-label">Candidati rilevati {{ ui.info("Pattern ricorrenti individuati nel periodo, in qualunque stato (in osservazione, in attesa di conferma, confermati o rifiutati).") }}</div>
+        <div class="stat-value">{{ subscription_funnel.total_detected }}</div>
+    </div>
+    <div class="stat-card glass-panel" style="border-left: 4px solid var(--warning)">
+        <div class="stat-label">In attesa di conferma {{ ui.info("Candidati che hanno superato la soglia di occorrenze e aspettano la risposta Sì/No dell'utente (mostrati anche con /scova_abbonamenti).") }}</div>
+        <div class="stat-value" style="color: var(--warning)">{{ subscription_funnel.awaiting_confirm }}</div>
+    </div>
+    <div class="stat-card glass-panel" style="border-left: 4px solid var(--success)">
+        <div class="stat-label">Soddisfazione {{ ui.info("% di candidati confermati sul totale di quelli con una decisione presa (confermati + rifiutati). È il segnale di successo della feature: se scende, i falsi positivi stanno costando fiducia, non solo un tap.") }}</div>
+        <div class="stat-value" style="color: var(--success)">{{ subscription_funnel.satisfaction_pct ~ '%' if subscription_funnel.satisfaction_pct is not none else 'n/d' }}</div>
+        <span class="stat-label" style="text-transform:none; margin-top:5px">{{ subscription_funnel.confirmed }} confermati · {{ subscription_funnel.dismissed }} rifiutati</span>
+    </div>
+</div>
 {% endblock %}

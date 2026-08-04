@@ -7,7 +7,7 @@ from src.user_store import (
 )
 from src.storage.models import (
     Expense, Income, Account, UserCategory, UserCategoryNotionLink,
-    Subscription, SavedReport, SavingsGoal, SavingsGoalEvaluation,
+    Subscription, SavedReport, SavingsGoal, SavingsGoalEvaluation, SubscriptionCandidate,
 )
 import src.storage.models  # registra UserCategory e tabelle storage nella Base condivisa
 
@@ -352,6 +352,60 @@ def test_delete_user_completely_removes_all_tables(mock_db_session):
             f"AuditLog non deve essere cancellato da delete_user_completely "
             f"(GDPR Art. 30 accountability): trovati {audit_count} record"
         )
+
+
+def test_delete_user_completely_removes_telemetry_and_gamification(mock_db_session):
+    """Le tabelle di telemetria e gamification hanno FK su users.chat_id.
+
+    Senza cancellarle la DELETE finale dell'utente fallisce con una violazione di
+    vincolo su Postgres: la cancellazione GDPR (Art. 17) sarebbe rotta per qualunque
+    utente che abbia mai registrato una spesa. Il test abilita l'enforcement delle
+    FK anche su SQLite, che di default le ignora e quindi nasconderebbe il problema.
+    """
+    from sqlalchemy import event
+
+    from src.user_store import (
+        ReportEvent, TrialLifecycleEvent, TxEvent, UserAchievement,
+        UserGamificationProfile, UserMetricCounter, UserStreak,
+    )
+
+    store = mock_db_session
+    chat_id = "gdpr_gamification"
+
+    @event.listens_for(store.engine, "connect")
+    def _enable_fk(dbapi_conn, _):
+        dbapi_conn.execute("PRAGMA foreign_keys=ON")
+
+    store.add_user(chat_id=chat_id, username="delete-me", storage_backend="postgres")
+
+    with store.Session() as s:
+        s.add(TxEvent(chat_id=chat_id, tx_type="expense", input_method="text",
+                      outcome="confirmed", source="telegram"))
+        s.add(UserStreak(chat_id=chat_id, current_streak_days=3))
+        s.add(UserMetricCounter(chat_id=chat_id, metric="expenses_total", value=42))
+        s.add(UserAchievement(chat_id=chat_id, code="volume_expenses_25", xp_awarded=25))
+        s.add(UserGamificationProfile(chat_id=chat_id, total_xp=25, level=1))
+        s.add(ReportEvent(chat_id=chat_id, share_token="tok", report_type="monthly",
+                          event_type="generated", source="job"))
+        s.add(TrialLifecycleEvent(chat_id=chat_id, step="D7", channel="email"))
+        s.commit()
+
+    assert store.delete_user_completely(chat_id) == "postgres"
+
+    with store.Session() as s:
+        for model, column in (
+            (TxEvent, TxEvent.chat_id), (UserStreak, UserStreak.chat_id),
+            (UserMetricCounter, UserMetricCounter.chat_id),
+            (UserAchievement, UserAchievement.chat_id),
+            (UserGamificationProfile, UserGamificationProfile.chat_id),
+            (ReportEvent, ReportEvent.chat_id),
+            (TrialLifecycleEvent, TrialLifecycleEvent.chat_id),
+        ):
+            residui = s.query(model).filter(column == chat_id).count()
+            assert residui == 0, (
+                f"GDPR gap: {model.__tablename__} contiene ancora {residui} record"
+            )
+        assert s.query(User).filter(User.chat_id == chat_id).count() == 0
 
 
 def test_delete_user_completely_revokes_notion_token(mock_db_session, mocker):
@@ -940,9 +994,10 @@ def test_extend_trial_days_is_additive_on_active_trial(mock_db_session):
     assert delta in (59, 60)
 
 
-def test_extend_trial_days_on_permanent_beta_pro(mock_db_session):
-    """Applicato anche a un Pro permanente beta_default: scelta esplicita del reward
-    referral, lo trasforma in Pro con scadenza (vedi extend_trial_days docstring).
+def test_extend_trial_days_on_permanent_beta_pro_does_not_downgrade(mock_db_session):
+    """Un Pro permanente non deve diventare un trial a scadenza: sarebbe un declassamento.
+
+    I giorni maturano in `pending_pro_days` e restano spendibili più avanti.
     """
     store = mock_db_session
     store.add_user(chat_id="ref_beta")
@@ -955,8 +1010,78 @@ def test_extend_trial_days_on_permanent_beta_pro(mock_db_session):
     store.extend_trial_days("ref_beta", days=60)
 
     plan_after = store.get_user_plan("ref_beta")
-    assert plan_after["is_trial"] is True
-    assert plan_after["trial_ends_at"] is not None
+    assert plan_after["is_trial"] is False, "il Pro illimitato non è stato toccato"
+    assert plan_after["trial_ends_at"] is None
+    assert store.get_pending_pro_days("ref_beta") == 60
+
+
+def test_extend_trial_days_accumulates_credit_on_permanent_pro(mock_db_session):
+    """Reward multipli si sommano in credito invece di sovrascriversi."""
+    store = mock_db_session
+    store.add_user(chat_id="ref_beta2")
+    store.set_user_plan("ref_beta2", "pro", payment_reference="beta_default")
+
+    store.extend_trial_days("ref_beta2", days=60)
+    store.extend_trial_days("ref_beta2", days=14, change_type="streak_reward")
+
+    assert store.get_pending_pro_days("ref_beta2") == 74
+
+
+def test_pending_pro_days_not_consumed_while_pro_still_active(mock_db_session):
+    """Consumarli mentre il Pro illimitato è attivo li butterebbe via."""
+    store = mock_db_session
+    store.add_user(chat_id="ref_beta3")
+    store.set_user_plan("ref_beta3", "pro", payment_reference="beta_default")
+    store.extend_trial_days("ref_beta3", days=60)
+
+    assert store.consume_pending_pro_days("ref_beta3") == 0
+    assert store.get_pending_pro_days("ref_beta3") == 60
+
+
+def test_pending_pro_days_applied_when_plan_drops_to_free(mock_db_session):
+    """Alla fine del Pro il credito diventa finalmente un trial vero.
+
+    `set_up_user_plan` lo fa da sé al downgrade: senza, un beta a Pro permanente
+    non passerebbe mai da `get_expired_trials` e accumulerebbe credito per sempre.
+    """
+    store = mock_db_session
+    store.add_user(chat_id="ref_beta4")
+    store.set_user_plan("ref_beta4", "pro", payment_reference="beta_default")
+    store.extend_trial_days("ref_beta4", days=60)
+
+    store.set_user_plan("ref_beta4", "free", payment_reference="trial_expired")
+
+    plan = store.get_user_plan("ref_beta4")
+    assert plan["plan_type"] == "pro", "il credito lo ha riportato Pro"
+    assert plan["is_trial"] is True
+    assert plan["trial_ends_at"] is not None
+    assert store.get_pending_pro_days("ref_beta4") == 0
+
+
+def test_downgrade_without_credit_stays_free(mock_db_session):
+    """Senza giorni in credito il downgrade resta un downgrade."""
+    store = mock_db_session
+    store.add_user(chat_id="ref_beta5")
+    store.set_user_plan("ref_beta5", "pro", payment_reference="beta_default")
+
+    store.set_user_plan("ref_beta5", "free", payment_reference="trial_expired")
+
+    assert store.get_user_plan("ref_beta5")["plan_type"] == "free"
+
+
+def test_extend_trial_days_still_extends_an_active_trial(mock_db_session):
+    """Regressione: il caso normale (trial attivo) resta additivo."""
+    store = mock_db_session
+    store.add_user(chat_id="ref_trial")
+    store.start_trial("ref_trial", days=10)
+    first_end = store.get_user_plan("ref_trial")["trial_ends_at"]
+
+    store.extend_trial_days("ref_trial", days=60)
+
+    plan = store.get_user_plan("ref_trial")
+    assert plan["is_trial"] is True
+    assert (plan["trial_ends_at"] - first_end).days == 60
+    assert store.get_pending_pro_days("ref_trial") == 0
 
 
 def _make_lead(store, submission_id, email, referral_code=None, referred_by_code=None):
@@ -987,30 +1112,39 @@ def test_create_referral_rewards_first_referral(mock_db_session):
             ("referred", "friend1@example.com"),
             ("referrer", "referrer@example.com"),
         ]
-        assert all(r.days_granted == 60 and r.status == "pending" for r in rewards)
+        assert all(r.days_granted == 14 and r.status == "pending" for r in rewards)
 
 
-def test_create_referral_rewards_caps_referrer_at_one_reward(mock_db_session):
-    """Il tetto è fisso a 60gg totali: il referrer non riceve un secondo reward
-    anche se porta più persone (spec: 1, 2 o 3 inviti danno sempre 60gg, mai di più)."""
+def test_create_referral_rewards_caps_referrer_at_three_rewards(mock_db_session):
+    """Il referrer accumula 14gg per invito, ma solo per i primi 3 (42gg totali).
+
+    Dal 4° in poi il link resta pienamente funzionante: chi viene invitato riceve
+    sempre i suoi giorni, è solo chi invita a non guadagnarci più nulla.
+    """
     store = mock_db_session
     referrer = _make_lead(store, "sub_referrer2", "referrer2@example.com", referral_code="REFCODE2")
-    referred1 = _make_lead(store, "sub_r2_1", "friend_a@example.com", referred_by_code="REFCODE2")
-    referred2 = _make_lead(store, "sub_r2_2", "friend_b@example.com", referred_by_code="REFCODE2")
 
-    result1 = store.create_referral_rewards(referred1, referrer)
-    result2 = store.create_referral_rewards(referred2, referrer)
+    results = []
+    for i in range(1, 6):
+        referred = _make_lead(
+            store, f"sub_r2_{i}", f"friend_{i}@example.com", referred_by_code="REFCODE2",
+        )
+        results.append(store.create_referral_rewards(referred, referrer))
 
-    assert result1["referrer_first_reward"] is True
-    assert result2["referrer_first_reward"] is False
+    assert results[0]["referrer_first_reward"] is True
+    assert results[1]["referrer_first_reward"] is False
+    assert results[3]["reward_cap_reached"] is True, "dal 4° il referrer non guadagna più"
 
     with store.Session() as s:
         referrer_rewards = s.query(ReferralReward).filter_by(
             role="referrer", beneficiary_email="referrer2@example.com"
-        ).count()
-        assert referrer_rewards == 1
-        referred_rewards = s.query(ReferralReward).filter_by(role="referred").count()
-        assert referred_rewards == 2
+        ).all()
+        assert len(referrer_rewards) == 3
+        assert sum(r.days_granted for r in referrer_rewards) == 42
+
+        referred_rewards = s.query(ReferralReward).filter_by(role="referred").all()
+        assert len(referred_rewards) == 5, "tutti e cinque gli invitati sono premiati"
+        assert all(r.days_granted == 14 for r in referred_rewards)
 
 
 def test_create_referral_rewards_unlocks_lifetime_founder_on_third(mock_db_session):
@@ -1028,16 +1162,18 @@ def test_create_referral_rewards_unlocks_lifetime_founder_on_third(mock_db_sessi
         assert lead.lifetime_founder_guaranteed is True
         assert lead.lifetime_founder_guaranteed_at is not None
 
-    # Un 4° referral non ri-attiva né duplica lo sblocco: il link smette di
-    # generare reward dopo il 3°, sia per il referrer sia per il nuovo invitato.
+    # Un 4° referral non ri-attiva né duplica lo sblocco, e il referrer ha esaurito
+    # i suoi bonus — ma il nuovo invitato riceve comunque i propri giorni.
     referred4 = _make_lead(store, "sub_r3_4", "friend4@example.com", referred_by_code="REFCODE3")
     result4 = store.create_referral_rewards(referred4, referrer)
     assert result4["lifetime_founder_unlocked"] is False
     assert result4["reward_cap_reached"] is True
 
     with store.Session() as s:
-        reward_for_friend4 = s.query(ReferralReward).filter_by(beneficiary_email="friend4@example.com").first()
-        assert reward_for_friend4 is None
+        reward_for_friend4 = s.query(ReferralReward).filter_by(
+            beneficiary_email="friend4@example.com"
+        ).one()
+        assert reward_for_friend4.days_granted == 14
 
 
 def test_apply_pending_referral_rewards(mock_db_session):
@@ -1110,3 +1246,86 @@ def test_get_referral_status(mock_db_session):
     assert status["referral_code"] == "REFSTATUS"
     assert status["referred_count"] == 2
     assert status["lifetime_founder_guaranteed"] is False
+
+
+# ---------------------------------------------------------------------------
+# Destinatari degli annunci di prodotto (GDPR Art. 21)
+# ---------------------------------------------------------------------------
+
+def _announcement_user(store, chat_id, *, plan="pro", backend="postgres", notifications=True):
+    store.add_user(chat_id=chat_id, email=f"{chat_id}@test.it",
+                   storage_backend=backend, notifications_enabled=notifications)
+    store.set_user_plan(chat_id, plan, payment_reference="beta_default")
+
+
+def test_product_announcement_respects_notification_opt_out(mock_db_session):
+    """Un annuncio di feature è facoltativo: chi ha disattivato le notifiche è escluso."""
+    store = mock_db_session
+    _announcement_user(store, "u_yes")
+    _announcement_user(store, "u_no", notifications=False)
+
+    recipients = {c for c, _ in store.get_users_for_product_announcement()}
+    assert recipients == {"u_yes"}
+
+
+def test_product_announcement_filters_by_plan_and_backend(mock_db_session):
+    """Una feature Pro+Postgres non va annunciata a chi non può usarla."""
+    store = mock_db_session
+    _announcement_user(store, "u_pro_pg")
+    _announcement_user(store, "u_free_pg", plan="free")
+    _announcement_user(store, "u_pro_notion", backend="notion")
+
+    recipients = {
+        c for c, _ in store.get_users_for_product_announcement(
+            plan_type="pro", storage_backend="postgres",
+        )
+    }
+    assert recipients == {"u_pro_pg"}
+
+
+def test_breach_notification_ignores_opt_out(mock_db_session):
+    """La notifica di data breach è un obbligo di legge: l'opt-out non si applica."""
+    store = mock_db_session
+    _announcement_user(store, "u_no", notifications=False)
+
+    recipients = {c for c, _ in store.get_users_for_breach_notification()}
+    assert "u_no" in recipients
+
+
+def test_cleanup_stale_subscription_candidates(mock_db_session):
+    """Solo i 'pending' stagnanti vanno rimossi: awaiting_confirm, confirmed e
+    dismissed sopravvivono (decisione dell'utente pendente o già presa)."""
+    store = mock_db_session
+    now = datetime.utcnow()
+    old = now - timedelta(days=200)
+    with store.Session() as s:
+        s.add(User(chat_id="u1", username="Alice", is_active=True))
+        s.add(SubscriptionCandidate(
+            user_id="u1", category_name="Abbonamenti", amount=9.99,
+            display_name="Netflix", occurrences=1,
+            first_occurrence_date=date(2026, 1, 1), last_occurrence_date=date(2026, 1, 1),
+            last_seen_at=old, status="pending",
+        ))
+        s.add(SubscriptionCandidate(
+            user_id="u1", category_name="Abbonamenti", amount=15.99,
+            display_name="Spotify", occurrences=2,
+            first_occurrence_date=date(2026, 1, 1), last_occurrence_date=date(2026, 1, 31),
+            last_seen_at=old, status="awaiting_confirm",
+        ))
+        s.add(SubscriptionCandidate(
+            user_id="u1", category_name="Palestra", amount=39.90,
+            display_name="Palestra", occurrences=1,
+            first_occurrence_date=date(2026, 1, 1), last_occurrence_date=date(2026, 1, 1),
+            last_seen_at=now, status="pending",
+        ))
+        s.commit()
+
+    deleted = store.cleanup_stale_subscription_candidates(days=120)
+    assert deleted == 1
+
+    with store.Session() as s:
+        remaining_statuses = {c.status for c in s.query(SubscriptionCandidate).all()}
+    assert remaining_statuses == {"awaiting_confirm", "pending"}
+    with store.Session() as s:
+        remaining_names = {c.display_name for c in s.query(SubscriptionCandidate).all()}
+    assert "Netflix" not in remaining_names

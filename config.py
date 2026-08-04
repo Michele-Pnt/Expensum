@@ -199,6 +199,22 @@ class Config:
     # Categoria di fallback usata finché un pattern resta "pending".
     CATEGORY_FALLBACK_NAME: str = os.getenv("CATEGORY_FALLBACK_NAME", "Altro")
 
+    # --- RILEVAMENTO ABBONAMENTI (src/subscription_detector.py) ---
+    # Occorrenze alla stessa cadenza prima di chiedere conferma Sì/No all'utente.
+    # Basso (2) perché il rischio di falsi positivi è già ridotto a monte dal
+    # filtro sulle categorie subscription-prone e dalla cadenza regolare richiesta:
+    # un "No" costa solo un tap, non c'è bisogno di aspettare una terza conferma.
+    SUBSCRIPTION_CANDIDATE_THRESHOLD: int = int(os.getenv("SUBSCRIPTION_CANDIDATE_THRESHOLD", "2"))
+    # Tolleranza sull'importo per considerare due spese "la stessa ricorrenza"
+    # (percentuale + minimo assoluto, così un abbonamento da pochi euro non ha
+    # una banda troppo stretta per centesimi di arrotondamento).
+    SUBSCRIPTION_AMOUNT_TOLERANCE_PCT: float = float(os.getenv("SUBSCRIPTION_AMOUNT_TOLERANCE_PCT", "0.03"))
+    SUBSCRIPTION_AMOUNT_TOLERANCE_MIN: float = float(os.getenv("SUBSCRIPTION_AMOUNT_TOLERANCE_MIN", "0.50"))
+    # Lookback per il backfill storico e per il comando on-demand: prova prima la
+    # finestra più larga (serve per confermare la periodicità), ripiega su quelle
+    # più corte se l'utente ha meno storico.
+    SUBSCRIPTION_LOOKBACK_DAYS_CASCADE: tuple = (90, 60, 30)
+
     # --- LOGGING ---
     LOG_DIR: Path = Path(__file__).parent / "logs"
     # Default INFO in produzione: DEBUG va abilitato esplicitamente in dev via .env

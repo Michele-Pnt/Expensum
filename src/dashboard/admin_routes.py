@@ -167,6 +167,7 @@ def product_metrics():
         engagement = admin_metrics.get_engagement_acquisition(s)
         tx_success = admin_metrics.get_tx_success_by_type_method(s)
         tour = admin_metrics.get_tour_funnel(s)
+        subscription_funnel = admin_metrics.get_subscription_candidate_funnel(s)
     return render_template(
         "product.html",
         retention=retention,
@@ -175,6 +176,7 @@ def product_metrics():
         engagement=engagement,
         tx_success=tx_success,
         tour=tour,
+        subscription_funnel=subscription_funnel,
     )
 
 

@@ -18,10 +18,11 @@ import uuid
 
 from src.storage.base import FinancialStorage
 from src.storage.models import (
-    Account, UserCategory, UserCategoryNotionLink, Expense, Income, Subscription, SavedReport, Transfer,
-    SavingsGoal, SavingsGoalEvaluation,
+    Account, UserCategory, UserCategoryNotionLink, CategoryCandidate, Expense, Income,
+    Subscription, SavedReport, Transfer, SavingsGoal, SavingsGoalEvaluation,
 )
 from src.storage import rls  # registra il listener RLS e fornisce bind_user
+from config import Config
 
 
 def _d(v) -> float:
@@ -62,14 +63,21 @@ class PostgresStorage(FinancialStorage):
     def _resolve_category_id(self, category_name: str) -> int | None:
         """Risolve category_name -> category_id per l'utente corrente.
 
-        Se la categoria non esiste localmente, la crea al volo (per retrocompatibilità
-        con flussi che ancora passano il nome stringa).
+        Se la categoria esiste ma è archiviata la **riattiva**: creare un duplicato
+        violerebbe `uq_user_categories_user_name` e farebbe fallire il salvataggio
+        della spesa. Semanticamente è anche la cosa giusta — se l'utente registra di
+        nuovo una spesa lì, quella categoria è tornata in uso.
+
+        Se non esiste affatto, la crea al volo (retrocompatibilità con i flussi che
+        passano ancora il nome come stringa).
         """
         cat = self._session.query(UserCategory).filter(
             UserCategory.user_id == self._user_id,
             func.lower(UserCategory.name) == (category_name or "").lower(),
         ).first()
         if cat:
+            if cat.archived_at is not None:
+                cat.archived_at = None
             return cat.id
         # Crea la categoria al volo per non perdere la spesa
         new_cat = UserCategory(user_id=self._user_id, name=category_name)
@@ -122,12 +130,23 @@ class PostgresStorage(FinancialStorage):
 
     # ------------------------------------------------------------------ categories
 
-    def get_category_names(self) -> list[str]:
-        """Ritorna i nomi di tutte le categorie dell'utente."""
-        rows = self._session.query(UserCategory).filter(
+    def _categories_query(self, include_archived: bool = False):
+        """Query base sulle categorie dell'utente, archiviate escluse per default.
+
+        Default fail-safe: chi sceglie una categoria per una nuova spesa non deve
+        vedere le archiviate; chi legge storico o aggregati passa esplicitamente
+        `include_archived=True`.
+        """
+        query = self._session.query(UserCategory).filter(
             UserCategory.user_id == self._user_id
-        ).all()
-        names = [r.name for r in rows]
+        )
+        if not include_archived:
+            query = query.filter(UserCategory.archived_at.is_(None))
+        return query
+
+    def get_category_names(self, include_archived: bool = False) -> list[str]:
+        """Ritorna i nomi delle categorie dell'utente (archiviate escluse per default)."""
+        names = [r.name for r in self._categories_query(include_archived).all()]
         self._commit()
         return names
 
@@ -147,14 +166,16 @@ class PostgresStorage(FinancialStorage):
             "description": category.description, "description_summary": category.description_summary,
         }
 
-    def get_categories(self) -> list[dict]:
-        """Restituisce id, nome, budget mensile, descrizione e average di tutte le categorie dell'utente."""
-        rows = self._session.query(UserCategory, UserCategoryNotionLink).outerjoin(
+    def get_categories(self, include_archived: bool = False) -> list[dict]:
+        """id, nome, budget, descrizione e average delle categorie (archiviate escluse per default)."""
+        query = self._session.query(UserCategory, UserCategoryNotionLink).outerjoin(
             UserCategoryNotionLink,
             UserCategoryNotionLink.category_id == UserCategory.id,
         ).filter(
             UserCategory.user_id == self._user_id
-        ).all()
+        )
+        if not include_archived:
+            query = query.filter(UserCategory.archived_at.is_(None))
         result = [
             {
                 "id": cat.id,
@@ -163,8 +184,9 @@ class PostgresStorage(FinancialStorage):
                 "description": cat.description,
                 "description_summary": cat.description_summary,
                 "average": _d(link.average) if link else 0.0,
+                "archived": cat.archived_at is not None,
             }
-            for cat, link in rows
+            for cat, link in query.all()
         ]
         self._commit()
         return result
@@ -194,22 +216,146 @@ class PostgresStorage(FinancialStorage):
             "description": row.description, "description_summary": row.description_summary,
         }
 
-    def delete_category(self, cat_id: int) -> bool:
-        """Elimina una categoria (e il relativo link Notion se presente)."""
-        row = self._session.query(UserCategory).filter(
+    def _get_own_category(self, cat_id: int) -> UserCategory | None:
+        return self._session.query(UserCategory).filter(
             UserCategory.id == cat_id,
             UserCategory.user_id == self._user_id,
         ).first()
+
+    def get_dismissed_budget_suggestions(self) -> set[int]:
+        """Categorie per cui l'utente ha già rifiutato il suggerimento di budget."""
+        rows = self._categories_query(include_archived=True).filter(
+            UserCategory.budget_suggestion_dismissed_at.isnot(None)
+        ).all()
+        ids = {r.id for r in rows}
+        self._commit()
+        return ids
+
+    def dismiss_budget_suggestion(self, cat_id: int) -> bool:
+        """Marca il suggerimento di budget come rifiutato. False se la categoria non esiste."""
+        row = self._get_own_category(cat_id)
         if not row:
             self._commit()
             return False
-        # Elimina link Notion se presente
+        row.budget_suggestion_dismissed_at = datetime.utcnow()
+        self._commit()
+        return True
+
+    def get_category_usage(self, cat_id: int) -> dict[str, int] | None:
+        """Conteggio dei record che dipendono dalla categoria.
+
+        Serve alla UI per chiedere conferma informata ("questa categoria ha 42
+        spese, verranno spostate su «Altro»") prima di cancellare. None se la
+        categoria non esiste o non è dell'utente.
+        """
+        if not self._get_own_category(cat_id):
+            self._commit()
+            return None
+        usage = {
+            "expenses": self._session.query(Expense).filter(
+                Expense.user_id == self._user_id, Expense.category_id == cat_id,
+            ).count(),
+            "subscriptions": self._session.query(Subscription).filter(
+                Subscription.user_id == self._user_id, Subscription.category_id == cat_id,
+            ).count(),
+            "goals": self._session.query(SavingsGoal).filter(
+                SavingsGoal.user_id == self._user_id, SavingsGoal.category_id == cat_id,
+            ).count(),
+        }
+        self._commit()
+        return usage
+
+    def set_category_archived(self, cat_id: int, archived: bool) -> dict | None:
+        """Archivia o ripristina una categoria. None se non esiste."""
+        row = self._get_own_category(cat_id)
+        if not row:
+            self._commit()
+            return None
+        row.archived_at = datetime.utcnow() if archived else None
+        self._commit()
+        return {"id": row.id, "name": row.name, "archived": row.archived_at is not None}
+
+    def delete_category(self, cat_id: int, reassign_to: int | None = None) -> dict | None:
+        """Elimina una categoria riassegnando i record dipendenti.
+
+        Le foreign key verso `user_categories` sono RESTRICT: senza riassegnare i
+        dipendenti il commit fallisce con ForeignKeyViolation. Tutto avviene in una
+        sola transazione — o si riassegna e si cancella, o rollback totale.
+
+        Args:
+            cat_id: categoria da eliminare.
+            reassign_to: categoria di destinazione. Se None i dipendenti vengono
+                spostati sulla categoria di fallback ("Altro"), creata se assente.
+
+        Returns:
+            Il conteggio dei record riassegnati, o None se la categoria non esiste.
+
+        Raises:
+            ValueError: se `reassign_to` coincide con `cat_id` o non appartiene
+                all'utente.
+        """
+        row = self._get_own_category(cat_id)
+        if not row:
+            self._commit()
+            return None
+
+        if reassign_to is not None:
+            if reassign_to == cat_id:
+                raise ValueError("La categoria di destinazione non può essere quella da eliminare")
+            target = self._get_own_category(reassign_to)
+            if not target:
+                raise ValueError("Categoria di destinazione inesistente")
+        else:
+            target = self._ensure_fallback_category(exclude_id=cat_id)
+
+        reassigned = {
+            "expenses": self._session.query(Expense).filter(
+                Expense.user_id == self._user_id, Expense.category_id == cat_id,
+            ).update({"category_id": target.id, "category_name": target.name},
+                     synchronize_session=False),
+            "subscriptions": self._session.query(Subscription).filter(
+                Subscription.user_id == self._user_id, Subscription.category_id == cat_id,
+            ).update({"category_id": target.id}, synchronize_session=False),
+            "goals": self._session.query(SavingsGoal).filter(
+                SavingsGoal.user_id == self._user_id, SavingsGoal.category_id == cat_id,
+            ).update({"category_id": target.id}, synchronize_session=False),
+        }
+        # I candidati non sono dati dell'utente ma stato interno del matcher: si
+        # riassegnano al fallback, non si conteggiano nella risposta.
+        self._session.query(CategoryCandidate).filter(
+            CategoryCandidate.user_id == self._user_id,
+            CategoryCandidate.fallback_category_id == cat_id,
+        ).update({"fallback_category_id": target.id}, synchronize_session=False)
+        self._session.query(CategoryCandidate).filter(
+            CategoryCandidate.user_id == self._user_id,
+            CategoryCandidate.promoted_category_id == cat_id,
+        ).update({"promoted_category_id": target.id}, synchronize_session=False)
+
         link = self._session.query(UserCategoryNotionLink).filter_by(category_id=cat_id).first()
         if link:
             self._session.delete(link)
         self._session.delete(row)
         self._commit()
-        return True
+        return reassigned
+
+    def _ensure_fallback_category(self, exclude_id: int | None = None) -> UserCategory:
+        """Categoria di fallback ("Altro"), creata se non esiste. Mai archiviata."""
+        fallback_name = Config.CATEGORY_FALLBACK_NAME
+        row = self._session.query(UserCategory).filter(
+            UserCategory.user_id == self._user_id,
+            func.lower(UserCategory.name) == fallback_name.lower(),
+        ).first()
+        if row and row.id != exclude_id:
+            if row.archived_at is not None:
+                row.archived_at = None
+            return row
+        # Il fallback stesso è la categoria in cancellazione (o non esiste): ne serve
+        # una nuova con un nome che non collida con lo unique constraint.
+        name = fallback_name if not row else f"{fallback_name} (ripristinata)"
+        created = UserCategory(user_id=self._user_id, name=name)
+        self._session.add(created)
+        self._session.flush()
+        return created
 
     # ------------------------------------------------------------------ expenses
 
@@ -563,11 +709,20 @@ class PostgresStorage(FinancialStorage):
         sub_type: str | None = None,
         account_id: int | None = None,
         category_id: int | None = None,
+        category_name: str | None = None,
     ) -> dict:
-        """Crea un abbonamento."""
+        """Crea un abbonamento.
+
+        `category_name` è l'alternativa backend-agnostica a `category_id` (usata
+        da `src/subscription_detector.py`, che non conosce id interni del backend):
+        se entrambi sono passati vince `category_id` esplicito.
+        """
         parsed_date = None
         if last_billed:
             parsed_date = datetime.strptime(last_billed, "%Y-%m-%d").date()
+        resolved_category_id = category_id
+        if resolved_category_id is None and category_name:
+            resolved_category_id = self._resolve_category_id(category_name)
         subscription = Subscription(
             user_id=self._user_id,
             name=name,
@@ -575,7 +730,7 @@ class PostgresStorage(FinancialStorage):
             last_billed=parsed_date,
             sub_type=sub_type,
             account_id=account_id,
-            category_id=category_id,
+            category_id=resolved_category_id,
         )
         self._session.add(subscription)
         self._commit()
@@ -840,43 +995,15 @@ class PostgresStorage(FinancialStorage):
             s["account_name"] = acc_map.get(s.get("account_id"), "") or ""
         return subs
 
-    def get_budget_suggestions(self) -> dict[str, float]:
-        """Calcola spesa media mensile per categoria sugli ultimi 3 mesi come suggerimento budget."""
-        from datetime import date as _date
-        import calendar
 
-        today = _date.today()
-        three_months_ago = _date(today.year, today.month, 1)
-        # vai indietro di 3 mesi
-        m = today.month - 3
-        y = today.year
-        if m <= 0:
-            m += 12
-            y -= 1
-        three_months_ago = _date(y, m, 1)
+    def fetch_categories_full(self, include_archived: bool = True) -> list[dict]:
+        """Categorie con id, name, monthly_budget (float) e descrizione.
 
-        rows = self._session.query(Expense, UserCategory).outerjoin(
-            UserCategory, UserCategory.id == Expense.category_id
-        ).filter(
-            Expense.user_id == self._user_id,
-            Expense.expense_date >= three_months_ago,
-            Expense.expense_date <= today,
-        ).all()
-
-        totals: dict[str, float] = {}
-        for exp, cat in rows:
-            name = cat.name if cat else (exp.category_name or "Altro")
-            totals[name] = totals.get(name, 0.0) + float(exp.amount)
-
-        result = {name: round(total / 3, 2) for name, total in totals.items()}
-        self._commit()
-        return result
-
-    def fetch_categories_full(self) -> list[dict]:
-        """Restituisce categorie con id, name, monthly_budget (float) e descrizione."""
-        rows = self._session.query(UserCategory).filter(
-            UserCategory.user_id == self._user_id
-        ).all()
+        Alimenta la schermata di gestione categorie, che mostra anche le archiviate
+        (in una sezione separata, con l'azione di ripristino): qui il default è
+        quindi `True`, al contrario delle letture usate per *scegliere* una categoria.
+        """
+        rows = self._categories_query(include_archived).all()
         result = [
             {
                 "id": r.id,
@@ -884,6 +1011,8 @@ class PostgresStorage(FinancialStorage):
                 "monthly_budget": float(r.monthly_budget) if r.monthly_budget is not None else None,
                 "description": r.description,
                 "description_summary": r.description_summary,
+                "archived": r.archived_at is not None,
+                "archived_at": r.archived_at.isoformat() if r.archived_at else None,
             }
             for r in rows
         ]

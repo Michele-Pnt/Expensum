@@ -23,6 +23,7 @@ import psutil
 from datetime import date, datetime, timedelta
 import requests
 from sqlalchemy import func
+from sqlalchemy.exc import IntegrityError
 from notion_client import Client as NotionClient
 
 ROOT_DIR = Path(__file__).resolve().parents[2]
@@ -79,6 +80,27 @@ app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(days=30)
 app.config['SESSION_REFRESH_EACH_REQUEST'] = True
 csrf = CSRFProtect(app)
 limiter = Limiter(app=app, key_func=get_remote_address, default_limits=[])
+
+
+@app.errorhandler(IntegrityError)
+def _handle_integrity_error(exc: IntegrityError):
+    """Violazione di vincolo DB → 409 con un messaggio utile, non un 500 opaco.
+
+    Il caso tipico è la cancellazione di una categoria ancora referenziata da spese
+    (foreign key RESTRICT): senza questo handler il client riceveva un 500 e la
+    webapp mostrava "Errore sconosciuto". Il dettaglio del vincolo resta nei log,
+    fuori dalla risposta: contiene nomi di tabella e valori non destinati al client.
+    """
+    logger.warning(
+        "Violazione di vincolo su %s %s: %s",
+        request.method, request.path, exc.orig,
+        extra={"domain": "app", "event": "integrity_error",
+               "meta": {"path": request.path, "method": request.method}},
+    )
+    return jsonify({
+        "error": "Operazione in conflitto con dati esistenti",
+        "detail": "Il record è ancora collegato ad altri dati oppure viola un vincolo di unicità.",
+    }), 409
 
 # Timeout condiviso per le chiamate verso Telegram/Notion: con solo 2 worker
 # gunicorn, una richiesta senza timeout che si blocca satura il servizio per
@@ -395,7 +417,14 @@ def webhook_tally():
     # applicarli alla creazione dell'account beta.
     if is_new and ref:
         referrer_lead = store.get_tally_lead_by_referral_code(ref)
-        if referrer_lead and referrer_lead.id != lead.id:
+        # Il confronto sulle email è la guardia vera contro l'auto-invito: due submit
+        # della stessa persona producono lead con id diversi. `create_referral_rewards`
+        # ricontrolla comunque, questa è solo la prima linea.
+        same_person = (
+            referrer_lead is not None
+            and (referrer_lead.email or "").strip().lower() == (email or "").strip().lower()
+        )
+        if referrer_lead and referrer_lead.id != lead.id and not same_person:
             try:
                 result = store.create_referral_rewards(lead, referrer_lead)
                 unlocked_email = referrer_lead.email if result.get("lifetime_founder_unlocked") else None
@@ -1740,7 +1769,7 @@ def api_setup_complete():
             created_count = 0
 
             # 1. Categorie — deduplicazione contro esistenti e contro il payload stesso
-            existing_cat_names = {n.lower() for n in pg_storage.get_category_names()}
+            existing_cat_names = {n.lower() for n in pg_storage.get_category_names(include_archived=True)}
             seen_cats: set[str] = set()
             for item in items_data.get("categories", []):
                 name = (item.get("name") or "").strip()
@@ -2072,8 +2101,18 @@ def api_manage_add():
             if user.storage_backend == "postgres":
                 pg = PostgresStorage(session=s, user_id=user.chat_id)
                 if entity_type == "category":
-                    existing = {n.lower() for n in pg.get_category_names()}
-                    if name.lower() in existing:
+                    # Lo unique constraint (user_id, name) vale anche sulle archiviate:
+                    # senza includerle il pre-check passerebbe e il commit fallirebbe
+                    # con un 409 generico che non spiega nulla all'utente.
+                    for cat in pg.fetch_categories_full(include_archived=True):
+                        if cat["name"].lower() != name.lower():
+                            continue
+                        if cat.get("archived"):
+                            return jsonify({
+                                "error": f"Categoria '{name}' esiste ed è archiviata",
+                                "archived_category_id": cat["id"],
+                                "can_restore": True,
+                            }), 409
                         return jsonify({"error": f"Categoria '{name}' già esistente"}), 409
                     monthly_budget = float(data["monthly_budget"]) if data.get("monthly_budget") not in (None, "") else None
                     result = pg.create_category(name, monthly_budget=monthly_budget)
@@ -2182,7 +2221,17 @@ def api_manage_remove():
             if user.storage_backend == "postgres":
                 pg = PostgresStorage(session=s, user_id=user.chat_id)
                 if entity_type == "category":
-                    ok = pg.delete_category(int(entity_id))
+                    # Stessa guardia dell'endpoint dedicato: senza, cancellare
+                    # «Altro» ne farebbe ricreare una col nome alterato, e il
+                    # conteggio dei mesi puliti smetterebbe di riconoscerla.
+                    if _is_fallback_category(pg, int(entity_id)):
+                        return jsonify({
+                            "error": (
+                                f"La categoria «{Config.CATEGORY_FALLBACK_NAME}» "
+                                "non può essere eliminata"
+                            )
+                        }), 400
+                    ok = pg.delete_category(int(entity_id)) is not None
                 elif entity_type == "account":
                     ok = pg.delete_account(int(entity_id))
                 elif entity_type == "subscription":
@@ -2874,16 +2923,23 @@ def api_chat_confirm():
             "transaction_type": parsed_type,
             "platform": "web",
         })
-        streak_result = store.record_tx_event(chat_id, parsed_type, input_method, "confirmed", "webapp")
-        if streak_result:
+        rewards = store.record_tx_event(
+            chat_id, parsed_type, input_method, "confirmed", "webapp"
+        ) or {}
+        # Le chiavi della streak ci sono solo a ciclo completato; gli achievement
+        # non si notificano da qui, li mostra la webapp leggendo `unseen_unlocks`.
+        if rewards.get("cycle_completed_days"):
             try:
                 asyncio.run(TelegramClient(chat_id).send_report(
-                    f"🎉 Hai completato {streak_result['cycle_completed_days']} giorni di streak!\n"
+                    f"🎉 Hai completato {rewards['cycle_completed_days']} giorni di streak!\n"
                     f"Ti abbiamo regalato 2 settimane di Pro.\n"
-                    f"La prossima streak sarà di {streak_result['next_target_days']} giorni."
+                    f"La prossima streak sarà di {rewards['next_target_days']} giorni."
                 ))
             except Exception as _se:
                 logger.warning("Errore invio messaggio streak per %s: %s", chat_id, _se)
+        # Obiettivi raggiunti: rilevati subito, non al 1° del mese. Gli sblocchi
+        # arrivano al client dal prossimo /api/gamification/summary.
+        _complete_reached_goals_safe(chat_id)
         if _is_first_expense:
             analytics.track(chat_id, "first_expense_tracked", {"input_method": input_method, "platform": "web"})
     else:
@@ -3904,7 +3960,9 @@ def analytics_categories_expense():
     with store.Session() as s:
         storage = PostgresStorage(session=s, user_id=g.chat_id)
         transactions = storage.fetch_all_transactions(start, end)
-        categories = storage.get_categories()
+        # Archiviate incluse: una categoria messa da parte a metà periodo ha comunque
+        # speso, e la sua riga non deve sparire dal consuntivo.
+        categories = storage.get_categories(include_archived=True)
 
     budget_map = {c["name"]: c.get("monthly_budget") for c in categories}
 
@@ -4011,12 +4069,16 @@ def analytics_wealth():
 @_tg_webapp_auth
 def analytics_capital_trend():
     """Ritorna lo storico del capitale (somma saldi conti) mese per mese.
-    
-    Calcola per ogni mese il saldo aggregato di tutti i conti:
-    opening_balance + sum(income fino a quel mese) - sum(expenses fino a quel mese).
+
+    Il calcolo è delegato a `src.wealth.build_wealth_series`, la stessa funzione
+    usata dagli obiettivi di risparmio: l'ultimo punto della serie coincide quindi
+    sempre con la somma dei saldi mostrati in "Il mio spazio".
     """
     from flask import g
     from datetime import date
+
+    from src.wealth import build_wealth_series
+
     end = date.today()
 
     plan_type = _get_user_plan_type(g.chat_id)
@@ -4027,87 +4089,26 @@ def analytics_capital_trend():
     with store.Session() as s:
         storage = PostgresStorage(session=s, user_id=g.chat_id)
         accounts = storage.fetch_accounts()
-        # Fetch ALL data to calculate running balance correctly
-        transactions = storage.fetch_all_transactions(date(2000, 1, 1), end)
-        incomes = storage.fetch_income(date(2000, 1, 1), end)
-
-    # Mappe di utilità
-    acc_id_to_name = {a["id"]: a["name"] for a in accounts}
-    acc_id_to_opening = {a["id"]: (a.get("opening_balance", 0.0) or 0.0) for a in accounts}
-    
-    # Aggrega entrate e uscite per (anno, mese) e per ID conto
-    # Usiamo None come chiave per le transazioni senza conto ("Altro")
-    monthly_income: dict[tuple, dict[int | None, float]] = defaultdict(lambda: defaultdict(float))
-    monthly_expense: dict[tuple, dict[int | None, float]] = defaultdict(lambda: defaultdict(float))
-
-    for inc in incomes:
-        d = inc["date"]
-        key = (d.year, d.month)
-        aid = inc.get("account_id")
-        monthly_income[key][aid] += inc["amount"]
-
-    for t in transactions:
-        d = t["date"]
-        key = (d.year, d.month)
-        aid = t.get("account_id")
-        monthly_expense[key][aid] += t["amount"]
-
-    # Inizializza i saldi correnti
-    running_totals: dict[int | None, float] = {aid: opening for aid, opening in acc_id_to_opening.items()}
-    running_totals[None] = 0.0 # Per transazioni senza conto associato
-    
-    # Determina il mese di partenza (il primo con attività o view_start)
-    all_keys_with_activity = sorted(set(monthly_income.keys()) | set(monthly_expense.keys()))
-    if not all_keys_with_activity:
-        first_y, first_m = view_start.year, view_start.month
-    else:
-        first_y, first_m = all_keys_with_activity[0]
-        if date(first_y, first_m, 1) > view_start:
-            first_y, first_m = view_start.year, view_start.month
+        series = build_wealth_series(storage, end, since=view_start)
 
     capital_trend = []
-    
-    curr_y, curr_m = first_y, first_m
-    while date(curr_y, curr_m, 1) <= end:
-        m_key = (curr_y, curr_m)
-        
-        # Aggiorna i saldi di TUTTI i conti (inclusi quelli con ID None)
-        # 1. Incomes
-        for aid, amount in monthly_income.get(m_key, {}).items():
-            running_totals[aid] = running_totals.get(aid, 0.0) + amount
-        # 2. Expenses
-        for aid, amount in monthly_expense.get(m_key, {}).items():
-            running_totals[aid] = running_totals.get(aid, 0.0) - amount
-        
-        # Se siamo nel range di visualizzazione, aggiungi ai risultati
-        if date(curr_y, curr_m, 1) >= view_start:
-            total_balance = sum(running_totals.values())
-            entry = {
-                "month": _month_label(curr_y, curr_m),
-                "total": round(total_balance, 2)
-            }
-            # Se Pro, aggiungiamo i dettagli per account (mappando ID -> Nome)
-            if plan_type == "pro":
-                for aid, bal in running_totals.items():
-                    if aid is not None:
-                        name = acc_id_to_name.get(aid, f"Conto {aid}")
-                        entry[name] = round(bal, 2)
-                    elif abs(bal) > 0.01:
-                        # Mostra "Altro" solo se ha un saldo significativo
-                        entry["Altro"] = round(bal, 2)
-            
-            capital_trend.append(entry)
-            
-        # Avanza al mese successivo
-        curr_m += 1
-        if curr_m > 12:
-            curr_m = 1
-            curr_y += 1
+    for point in series.points:
+        entry = {"month": _month_label(point.year, point.month), "total": point.total}
+        # Solo ai Pro mostriamo la scomposizione per singolo conto.
+        if plan_type == "pro":
+            for acc_id, balance in point.by_account.items():
+                entry[series.account_names.get(acc_id, f"Conto {acc_id}")] = balance
+        capital_trend.append(entry)
 
     return jsonify({
         "capital_trend": capital_trend,
         "plan_type": plan_type,
-        "accounts": [a["name"] for a in accounts] if plan_type == "pro" else []
+        "accounts": [a["name"] for a in accounts] if plan_type == "pro" else [],
+        # Spese non attribuite ad alcun conto: escluse dal capitale (non sono
+        # imputabili a nessun saldo), ma esposte perché la UI possa spiegare la
+        # differenza e invitare l'utente ad assegnare un conto.
+        "unassigned_expenses": series.unassigned_expenses,
+        "unassigned_incomes": series.unassigned_incomes,
     })
 
 
@@ -4150,7 +4151,9 @@ def analytics_budget_status():
         storage = PostgresStorage(session=s, user_id=g.chat_id)
         transactions = storage.fetch_all_transactions(month_start, month_end)
         incomes = storage.fetch_income(month_start, month_end)
-        categories = storage.get_categories()
+        # Archiviate incluse: il consuntivo di un mese passato non deve cambiare
+        # perché nel frattempo l'utente ha archiviato una categoria.
+        categories = storage.get_categories(include_archived=True)
 
     # Budget impostati
     budget_map = {c["name"]: (c.get("monthly_budget") or 0.0) for c in categories}
@@ -4515,6 +4518,13 @@ def api_get_report_by_token(share_token: str):
     report["plan_type"] = plan_info["plan_type"]
     report["locked"] = _is_report_locked(plan_info["plan_type"], signup, report.get("report_date"))
     report.pop("user_id", None)
+
+    # Tracking server-side dell'apertura: è la sorgente affidabile per gli
+    # achievement, al contrario dell'evento PostHog che dipende dal consenso cookie.
+    # Lo unique constraint fa sì che i refresh non contino come aperture multiple.
+    store.record_report_event(
+        g.chat_id, share_token, report.get("report_type") or "monthly", "opened", "webapp",
+    )
     return jsonify(report)
 
 
@@ -4870,6 +4880,117 @@ def savings_goals_summary():
     })
 
 
+# ── Gamification ─────────────────────────────────────────────────────────────
+#
+# Nessun gating Pro: achievement e XP sono per tutti. Le famiglie non ottenibili
+# con il backend/piano dell'utente non spariscono dal payload, vengono marcate
+# `unavailable` — così la UI futura può usarle come teaser invece di nasconderle.
+
+def _complete_reached_goals_safe(chat_id: str) -> list[dict]:
+    """Chiude gli obiettivi raggiunti dopo una transazione dalla webapp.
+
+    Usa `is_goal_reached`, che calcola solo il valore corrente senza ricostruire le
+    serie mensili dell'ETA: il costo resta contenuto anche sul percorso di
+    salvataggio. Non solleva mai — un errore qui non deve far fallire la spesa.
+
+    Il job mensile resta la rete di sicurezza e continua a produrre voti e storico
+    per il report, che non cambia.
+    """
+    from src.gamification import engine as gamification
+
+    try:
+        from src.savings_goals_service import detect_completed_goals
+
+        unlocks: list[dict] = []
+        with store.Session() as s:
+            pg, err = _pg_or_401(s, chat_id)
+            if err:
+                return []
+            for goal in detect_completed_goals(pg):
+                pg.update_savings_goal(
+                    goal["id"], status="completed", completed_at=datetime.utcnow(),
+                )
+                unlocks += [
+                    u.as_dict() for u in gamification.record_event(
+                        store, chat_id, "savings_goal_completed",
+                        dedup_key=f"goal:{goal['id']}",
+                    )
+                ]
+        return unlocks
+    except Exception as exc:  # noqa: BLE001 — la gamification non deve mai propagare
+        logger.warning(
+            "Rilevamento obiettivi fallito per %s: %s", chat_id, exc,
+            extra={"domain": "gamification", "event": "goal_realtime_check_failed",
+                   "meta": {"chat_id": str(chat_id)}},
+        )
+        return []
+
+
+def _gamification_context(chat_id: str) -> tuple[str, str]:
+    """Backend e piano dell'utente, che decidono quali famiglie sono ottenibili."""
+    from src.user_store import User
+
+    backend = "postgres"
+    try:
+        with store.Session() as s:
+            user = s.query(User).filter_by(chat_id=chat_id).first()
+            backend = (user.storage_backend if user else None) or "postgres"
+    except Exception:  # noqa: BLE001 — il default non impedisce di rispondere
+        pass
+    return backend, _get_user_plan_type(chat_id)
+
+
+def _requested_locale() -> str:
+    locale = (request.args.get("locale") or "it").lower()
+    return locale if locale in ("it", "en") else "it"
+
+
+@app.route("/api/gamification/achievements", methods=["GET"])
+@_tg_webapp_auth
+def gamification_achievements():
+    """Catalogo completo con stato e progresso dell'utente."""
+    from flask import g
+
+    from src.gamification import engine as gamification
+
+    backend, plan_type = _gamification_context(g.chat_id)
+    return jsonify(gamification.get_user_state(
+        store, g.chat_id,
+        locale=_requested_locale(), backend=backend, plan_type=plan_type,
+    ))
+
+
+@app.route("/api/gamification/summary", methods=["GET"])
+@_tg_webapp_auth
+def gamification_summary():
+    """Versione compatta: profilo, prossimi traguardi e sblocchi non ancora visti."""
+    from flask import g
+
+    from src.gamification import engine as gamification
+
+    backend, plan_type = _gamification_context(g.chat_id)
+    return jsonify(gamification.get_summary(
+        store, g.chat_id,
+        locale=_requested_locale(), backend=backend, plan_type=plan_type,
+    ))
+
+
+@app.route("/api/gamification/seen", methods=["POST"])
+@_tg_webapp_auth
+def gamification_mark_seen():
+    """Marca come visti gli sblocchi indicati (tutti se `codes` è assente o null)."""
+    from flask import g
+
+    from src.gamification import engine as gamification
+
+    data = request.json or {}
+    codes = data.get("codes")
+    if codes is not None and not isinstance(codes, list):
+        return jsonify({"error": "codes deve essere una lista di stringhe o null"}), 400
+    updated = gamification.mark_seen(store, g.chat_id, codes)
+    return jsonify({"status": "ok", "updated": updated})
+
+
 # ── Transfers ────────────────────────────────────────────────────────────────
 
 @app.route("/api/space/transfers", methods=["GET"])
@@ -4953,12 +5074,31 @@ def space_categories_list():
 @app.route("/api/space/categories/suggestions", methods=["GET"])
 @_tg_webapp_auth
 def space_categories_suggestions():
+    """Piano di budget mensile costruito a partire dal reddito e dall'obiettivo.
+
+    Sostituisce la vecchia media delle spese: la risposta contiene anche reddito
+    stimato, risparmio target, costi fissi e quota distribuibile, così la UI può
+    spiegare *perché* propone quei numeri invece di mostrarli e basta.
+    """
     from flask import g
+
+    from src.budget_planner import build_budget_plan
+
     with store.Session() as s:
         pg, err = _pg_or_401(s, g.chat_id)
         if err:
             return err
-        return jsonify({"suggestions": pg.get_budget_suggestions()})
+        plan = build_budget_plan(pg)
+        dismissed = pg.get_dismissed_budget_suggestions()
+
+    payload = plan.to_dict()
+    payload["categories"] = [
+        c for c in payload["categories"] if c["category_id"] not in dismissed
+    ]
+    # `suggestions` resta per compatibilità con il client attuale, che si aspetta
+    # una mappa nome → importo.
+    payload["suggestions"] = {c["name"]: c["proposed_budget"] for c in payload["categories"]}
+    return jsonify(payload)
 
 
 @app.route("/api/space/categories/<int:cat_id>/accept-suggestion", methods=["POST"])
@@ -4969,14 +5109,38 @@ def space_categories_accept_suggestion(cat_id: int):
     suggested = data.get("suggested_budget")
     if suggested is None:
         return jsonify({"error": "suggested_budget obbligatorio"}), 400
+    try:
+        budget = float(suggested)
+    except (TypeError, ValueError):
+        return jsonify({"error": "suggested_budget deve essere un numero"}), 400
+    if budget < 0:
+        return jsonify({"error": "suggested_budget non può essere negativo"}), 400
     with store.Session() as s:
         pg, err = _pg_or_401(s, g.chat_id)
         if err:
             return err
-        result = pg.update_category(cat_id, monthly_budget=float(suggested))
+        result = pg.update_category(cat_id, monthly_budget=budget)
         if result is None:
             return jsonify({"error": "Categoria non trovata"}), 404
         return jsonify(result)
+
+
+@app.route("/api/space/categories/<int:cat_id>/dismiss-suggestion", methods=["POST"])
+@_tg_webapp_auth
+def space_categories_dismiss_suggestion(cat_id: int):
+    """Rifiuta un suggerimento in modo persistente.
+
+    Prima il rifiuto viveva solo nello stato React e il suggerimento ricompariva
+    al reload della pagina.
+    """
+    from flask import g
+    with store.Session() as s:
+        pg, err = _pg_or_401(s, g.chat_id)
+        if err:
+            return err
+        if not pg.dismiss_budget_suggestion(cat_id):
+            return jsonify({"error": "Categoria non trovata"}), 404
+        return jsonify({"status": "ok"})
 
 
 _CATEGORY_DESCRIPTION_MAX_LEN = 500
@@ -5009,8 +5173,18 @@ def space_categories_create():
         pg, err = _pg_or_401(s, g.chat_id)
         if err:
             return err
-        existing = {n.lower() for n in pg.get_category_names()}
-        if name.lower() in existing:
+        # Lo unique constraint (user_id, name) vale anche sulle archiviate: se il nome
+        # collide con una categoria archiviata, la risposta indica che si può
+        # ripristinare invece di lasciare l'utente davanti a un 409 inspiegabile.
+        for cat in pg.fetch_categories_full(include_archived=True):
+            if cat["name"].lower() != name.lower():
+                continue
+            if cat.get("archived"):
+                return jsonify({
+                    "error": f"Categoria '{name}' esiste ed è archiviata",
+                    "archived_category_id": cat["id"],
+                    "can_restore": True,
+                }), 409
             return jsonify({"error": f"Categoria '{name}' già esistente"}), 409
         monthly_budget = float(data["monthly_budget"]) if data.get("monthly_budget") not in (None, "") else None
         description_summary = _synthesize_category_description(description) if description else None
@@ -5046,18 +5220,96 @@ def space_categories_update(cat_id: int):
         return jsonify(result)
 
 
-@app.route("/api/space/categories/<int:cat_id>", methods=["DELETE"])
+def _is_fallback_category(pg, cat_id: int) -> bool:
+    """La categoria di fallback ("Altro") non è né archiviabile né cancellabile.
+
+    È la destinazione di ogni riassegnazione e il ripiego del matcher: senza di lei
+    il salvataggio di una spesa non categorizzabile non avrebbe dove atterrare.
+    """
+    for cat in pg.fetch_categories_full(include_archived=True):
+        if cat["id"] == cat_id:
+            return cat["name"].lower() == Config.CATEGORY_FALLBACK_NAME.lower()
+    return False
+
+
+@app.route("/api/space/categories/<int:cat_id>/usage")
 @_tg_webapp_auth
-def space_categories_delete(cat_id: int):
+def space_categories_usage(cat_id: int):
+    """Conteggio dei record collegati, per una conferma informata prima di cancellare."""
     from flask import g
     with store.Session() as s:
         pg, err = _pg_or_401(s, g.chat_id)
         if err:
             return err
-        ok = pg.delete_category(cat_id)
-        if not ok:
+        usage = pg.get_category_usage(cat_id)
+        if usage is None:
             return jsonify({"error": "Categoria non trovata"}), 404
-        return jsonify({"status": "ok"})
+        return jsonify({
+            "usage": usage,
+            "total": sum(usage.values()),
+            "is_fallback": _is_fallback_category(pg, cat_id),
+        })
+
+
+@app.route("/api/space/categories/<int:cat_id>/archive", methods=["POST"])
+@_tg_webapp_auth
+def space_categories_archive(cat_id: int):
+    """Archivia una categoria: sparisce dalle scelte future, lo storico resta intatto."""
+    from flask import g
+    with store.Session() as s:
+        pg, err = _pg_or_401(s, g.chat_id)
+        if err:
+            return err
+        if _is_fallback_category(pg, cat_id):
+            return jsonify({
+                "error": f"La categoria «{Config.CATEGORY_FALLBACK_NAME}» non può essere archiviata"
+            }), 400
+        result = pg.set_category_archived(cat_id, True)
+        if result is None:
+            return jsonify({"error": "Categoria non trovata"}), 404
+        return jsonify(result)
+
+
+@app.route("/api/space/categories/<int:cat_id>/unarchive", methods=["POST"])
+@_tg_webapp_auth
+def space_categories_unarchive(cat_id: int):
+    """Ripristina una categoria archiviata."""
+    from flask import g
+    with store.Session() as s:
+        pg, err = _pg_or_401(s, g.chat_id)
+        if err:
+            return err
+        result = pg.set_category_archived(cat_id, False)
+        if result is None:
+            return jsonify({"error": "Categoria non trovata"}), 404
+        return jsonify(result)
+
+
+@app.route("/api/space/categories/<int:cat_id>", methods=["DELETE"])
+@_tg_webapp_auth
+def space_categories_delete(cat_id: int):
+    """Elimina una categoria riassegnando spese, abbonamenti e obiettivi collegati.
+
+    `?reassign_to=<id>` sceglie la destinazione; senza parametro i record finiscono
+    sulla categoria di fallback. Per non perdere nulla si preferisca l'archiviazione.
+    """
+    from flask import g
+    reassign_to = request.args.get("reassign_to", type=int)
+    with store.Session() as s:
+        pg, err = _pg_or_401(s, g.chat_id)
+        if err:
+            return err
+        if _is_fallback_category(pg, cat_id):
+            return jsonify({
+                "error": f"La categoria «{Config.CATEGORY_FALLBACK_NAME}» non può essere eliminata"
+            }), 400
+        try:
+            reassigned = pg.delete_category(cat_id, reassign_to=reassign_to)
+        except ValueError as exc:
+            return jsonify({"error": str(exc)}), 400
+        if reassigned is None:
+            return jsonify({"error": "Categoria non trovata"}), 404
+        return jsonify({"status": "ok", "reassigned": reassigned})
 
 
 # ── Subscriptions ─────────────────────────────────────────────────────────────

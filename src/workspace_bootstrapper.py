@@ -345,7 +345,7 @@ def bootstrap_workspace(storage: FinancialStorage) -> BootstrapResult:
 
     # --- Categorie ---
     try:
-        existing_categories = storage.get_category_names()
+        existing_categories = storage.get_category_names(include_archived=True)
         if existing_categories:
             logger.info(
                 "[Bootstrap] Categorie già presenti (%d), skip.", len(existing_categories)
@@ -418,7 +418,7 @@ def bootstrap_lifestyle_categories(
     """
     created: list[str] = []
     try:
-        existing = {name.lower() for name in storage.get_category_names()}
+        existing = {name.lower() for name in storage.get_category_names(include_archived=True)}
         for name in selected_categories:
             if name.lower() not in existing:
                 storage.create_category(name, description_summary=CATEGORY_DESCRIPTIONS.get(name))

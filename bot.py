@@ -57,6 +57,7 @@ import tempfile
 from config import Config, setup_logging
 from src.expense_parser import ExpenseParser
 from src import category_matcher
+from src import subscription_detector
 from src.notion_client import NotionFinanceClient
 from src.storage.base import FinancialStorage
 from src.storage.notion_storage import NotionStorage                                                                                                         
@@ -75,6 +76,8 @@ from src.report_notify import display_name, notify_webapp_report
 from src import analytics
 from src import brevo_client
 from src.unsubscribe_token import make_unsubscribe_token
+from src.gamification import engine as gamification
+from src.gamification.notifications import build_messages as build_achievement_messages
 from src.trial_lifecycle import (
     compute_days_since_trial_start,
     steps_pending,
@@ -602,6 +605,7 @@ async def _build_and_send_weekly_plan(
         )
         if share_token:
             _notify_webapp_report(chat_id, "weekly", week_label, share_token)
+            _user_store.record_report_event(chat_id, share_token, "weekly", "generated", "job")
     except Exception as e:
         logger.warning(f"[User {chat_id}] Salvataggio report settimanale fallito: {e}")
 
@@ -738,6 +742,7 @@ async def _build_and_send_monthly_plan(
         )
         if share_token:
             _notify_webapp_report(chat_id, "monthly", month_label, share_token)
+            _user_store.record_report_event(chat_id, share_token, "monthly", "generated", "job")
     except Exception as e:
         logger.warning(f"[User {chat_id}] Salvataggio report mensile fallito: {e}")
 
@@ -1191,6 +1196,52 @@ async def cmd_obiettivi(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     )
 
 
+async def cmd_scova_abbonamenti(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Mostra gli abbonamenti ricorrenti rilevati dalle spese, in attesa di conferma.
+
+    Feature 100% Free. Il rilevamento vero e proprio è incrementale (hook a ogni
+    spesa confermata, vedi src/subscription_detector.py); questo comando serve a
+    rivedere a piacere i candidati già pronti, inclusi quelli popolati dal
+    backfill storico (che non manda notifiche proattive, vedi
+    scripts/backfill_subscription_candidates.py).
+    """
+    chat_id = str(update.effective_chat.id)
+    if not _is_authorized(update):
+        await update.message.reply_text("Devi prima registrarti con /registrati.")
+        return
+
+    with _user_store.Session() as sub_session:
+        candidates = subscription_detector.get_awaiting_confirmation_candidates(sub_session, chat_id)
+        # Snapshot dei campi prima di chiudere la sessione: gli oggetti ORM non
+        # vanno riusati fuori dal blocco `with`.
+        candidates_data = [
+            (c.id, c.display_name, float(c.amount), c.category_name, c.cadence)
+            for c in candidates
+        ]
+
+    if not candidates_data:
+        await update.message.reply_text(
+            "🔎 Nessun abbonamento ricorrente in attesa di conferma al momento.\n"
+            "Continuo a osservare le tue spese: appena riconosco un pattern ricorrente "
+            "te lo segnalo qui."
+        )
+        return
+
+    for candidate_id, display_name, amount, category_name, cadence in candidates_data:
+        cadence_label = subscription_detector.cadence_label_it(cadence)
+        keyboard = InlineKeyboardMarkup([[
+            InlineKeyboardButton("✅ Sì", callback_data=f"subpromote_yes:{candidate_id}"),
+            InlineKeyboardButton("❌ No", callback_data=f"subpromote_no:{candidate_id}"),
+        ]])
+        await update.message.reply_text(
+            f"🔎 Ho notato che paghi ricorrentemente *{display_name}* "
+            f"(~€{amount:.2f} {cadence_label}) in *{category_name}* — "
+            "vuoi che lo aggiunga ai tuoi abbonamenti tracciati?",
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=keyboard,
+        )
+
+
 _SOCIAL_KEYBOARD = InlineKeyboardMarkup([
     [InlineKeyboardButton("🌐 Sito", url="https://expensum.it")],
     [
@@ -1254,6 +1305,8 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         # con lo stesso link entro la scadenza (15 minuti).
         _user_store.get_and_delete_oauth_session(state)
         logger.info("[User %s] Account web collegato a Telegram", chat_id)
+        # Il chat_id qui è già quello definitivo post-riassegnazione.
+        gamification.record_event(_user_store, chat_id, "telegram_linked")
         await update.message.reply_text(
             "✅ *Account collegato!*\n\n"
             "Il tuo profilo Expensum è ora sincronizzato con Telegram: puoi registrare spese semplicemente scrivendo, mandando una foto o un audio in chat"
@@ -2338,6 +2391,22 @@ async def _save_to_notion(query, context, chat_id: str, data: dict | None, accou
                 category_name=data.get("category"),
                 account_id=account_id
             )
+            # Rilevamento abbonamenti ricorrenti (src/subscription_detector.py):
+            # aggiornamento incrementale O(1), niente rescan batch. Best-effort,
+            # non deve mai far fallire il salvataggio della spesa.
+            sub_eval = subscription_detector.SubscriptionEvalResult()
+            try:
+                with _user_store.Session() as sub_session:
+                    sub_eval = subscription_detector.evaluate_and_track(
+                        sub_session,
+                        chat_id,
+                        date,
+                        float(data["amount"]),
+                        data.get("category"),
+                        data["name"],
+                    )
+            except Exception as _se:
+                logger.warning("[User %s] Rilevamento abbonamenti fallito: %s", chat_id, _se)
             date_str = date.strftime("%d/%m/%Y")
             saved_msg = (
                 f"✅ *Spesa salvata!*\n\n"
@@ -2361,6 +2430,29 @@ async def _save_to_notion(query, context, chat_id: str, data: dict | None, accou
             except Exception as _le:
                 logger.debug("[User %s] log_message expense saved fallito: %s", chat_id, _le)
 
+            if sub_eval.awaiting_confirmation and sub_eval.candidate_id:
+                _track_event(chat_id, "subscription_candidate_awaiting_confirmation", {
+                    "cadence": sub_eval.cadence, "source": "live",
+                })
+                cadence_label = subscription_detector.cadence_label_it(sub_eval.cadence)
+                sub_keyboard = InlineKeyboardMarkup([[
+                    InlineKeyboardButton("✅ Sì", callback_data=f"subpromote_yes:{sub_eval.candidate_id}"),
+                    InlineKeyboardButton("❌ No", callback_data=f"subpromote_no:{sub_eval.candidate_id}"),
+                ]])
+                try:
+                    await query._bot.send_message(
+                        chat_id=chat_id,
+                        text=(
+                            f"🔎 Ho notato che paghi ricorrentemente *{sub_eval.display_name}* "
+                            f"(~€{sub_eval.amount:.2f} {cadence_label}) in *{sub_eval.category_name}* — "
+                            "vuoi che lo aggiunga ai tuoi abbonamenti tracciati?"
+                        ),
+                        parse_mode=ParseMode.MARKDOWN,
+                        reply_markup=sub_keyboard,
+                    )
+                except Exception as _sn:
+                    logger.warning("[User %s] Invio prompt abbonamento fallito: %s", chat_id, _sn)
+
         # Cancella i dati demo al primo salvataggio reale
         user_obj = _user_store.get_user(chat_id)
         if user_obj and user_obj.has_demo_data:
@@ -2377,19 +2469,27 @@ async def _save_to_notion(query, context, chat_id: str, data: dict | None, accou
             "storage_backend": user_obj.storage_backend if user_obj else "unknown",
             "transaction_type": tx_type,
         })
-        streak_result = _user_store.record_tx_event(chat_id, tx_type, input_method, "confirmed", "telegram")
-        if streak_result:
+        rewards = _user_store.record_tx_event(
+            chat_id, tx_type, input_method, "confirmed", "telegram"
+        ) or {}
+        # Il dict contiene le chiavi della streak solo a ciclo completato: testarne
+        # la verità non basta più, adesso può contenere solo achievement.
+        if rewards.get("cycle_completed_days"):
             try:
                 await query._bot.send_message(
                     chat_id=chat_id,
                     text=(
-                        f"🎉 Hai completato {streak_result['cycle_completed_days']} giorni di streak!\n"
+                        f"🎉 Hai completato {rewards['cycle_completed_days']} giorni di streak!\n"
                         f"Ti abbiamo regalato 2 settimane di Pro.\n"
-                        f"La prossima streak sarà di {streak_result['next_target_days']} giorni."
+                        f"La prossima streak sarà di {rewards['next_target_days']} giorni."
                     ),
                 )
             except Exception as _se:
                 logger.warning(f"[User {chat_id}] Errore invio messaggio streak: {_se}")
+        goal_unlocks = await _check_goals_and_notify(query._bot, chat_id)
+        await _notify_achievements(
+            query._bot, chat_id, (rewards.get("achievements") or []) + goal_unlocks
+        )
 
         # Aggiorna la dashboard pinnata in background (se esiste)
         try:
@@ -2893,6 +2993,36 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             await query.edit_message_text("👍 Nessun problema, non creo la categoria.")
         return
 
+    if query.data.startswith("subpromote_yes:") or query.data.startswith("subpromote_no:"):
+        decision_yes = query.data.startswith("subpromote_yes:")
+        candidate_id = int(query.data.split(":", 1)[1])
+
+        if decision_yes:
+            storage = _get_storage(chat_id)
+            try:
+                with _user_store.Session() as sub_session:
+                    candidate = subscription_detector.confirm_candidate(sub_session, storage, candidate_id)
+                if candidate is None:
+                    await query.edit_message_text("⚠️ Candidato non trovato (forse già gestito altrove).")
+                else:
+                    _track_event(chat_id, "subscription_candidate_confirmed", {"cadence": candidate.cadence})
+                    await query.edit_message_text(
+                        f"✅ Abbonamento «{candidate.display_name}» aggiunto! Lo trovi tra i tuoi "
+                        "abbonamenti tracciati."
+                    )
+            except Exception as e:
+                logger.error("[User %s] Conferma abbonamento fallita: %s", chat_id, e)
+                await query.edit_message_text(
+                    "⚠️ Non sono riuscito ad aggiungere l'abbonamento in questo momento (problema "
+                    "temporaneo col tuo storage). Riprova con /scova_abbonamenti."
+                )
+        else:
+            with _user_store.Session() as sub_session:
+                subscription_detector.dismiss_candidate(sub_session, candidate_id)
+            _track_event(chat_id, "subscription_candidate_dismissed", {})
+            await query.edit_message_text("👍 Nessun problema, non lo aggiungo.")
+        return
+
 
 # ---------------------------------------------------------------------------
 # Error handler globale
@@ -3229,6 +3359,12 @@ def _savings_goals_monthly_job(app: Application, loop: asyncio.AbstractEventLoop
                     update_fields["status"] = "completed"
                     update_fields["completed_at"] = datetime.utcnow()
                     completed_notifications.append((chat_id, goal, score))
+                    # Rete di sicurezza: il rilevamento in tempo reale copre già la
+                    # maggior parte dei casi, ma non `category_spending_reduction`,
+                    # che si può dire riuscito solo a mese finito. `record_event` è
+                    # idempotente sul dedup_key, quindi un doppio passaggio non
+                    # assegna due volte l'achievement.
+                    mark_goal_reached(chat_id, goal)
                 storage.update_savings_goal(goal["id"], **update_fields)
                 evaluated += 1
         except Exception as e:
@@ -3286,7 +3422,15 @@ def _trial_expiry_job(app: Application, loop: asyncio.AbstractEventLoop) -> None
     downgraded = 0
     for user in expired:
         try:
+            # `set_user_plan` applica da sé gli eventuali giorni di Pro in credito
+            # (referral/streak maturati mentre l'utente era già Pro): se ce n'erano,
+            # l'utente resta Pro e non è un churn da contare.
             _user_store.set_user_plan(user.chat_id, "free", payment_reference="trial_expired")
+            if _user_store.get_user_plan(user.chat_id)["plan_type"] == "pro":
+                logger.info(
+                    "[TrialExpiry] %s resta Pro: applicati giorni in credito.", user.chat_id,
+                )
+                continue
             _track_event(user.chat_id, "trial_expired", {})
             downgraded += 1
         except Exception as e:
@@ -3489,10 +3633,11 @@ def _nightly_retention_cleanup() -> None:
         deleted_chats = _user_store.cleanup_old_chat_messages(days=90)
         deleted_jobs = _user_store.cleanup_old_job_runs(days=90)
         deleted_candidates = _user_store.cleanup_stale_category_candidates(days=90)
+        deleted_sub_candidates = _user_store.cleanup_stale_subscription_candidates(days=120)
         logger.info(
             "[NightlyRetention] OAuth sessions rimosse: %d, chat_messages rimossi: %d, "
-            "job_runs rimossi: %d, category_candidates rimossi: %d",
-            deleted_oauth, deleted_chats, deleted_jobs, deleted_candidates,
+            "job_runs rimossi: %d, category_candidates rimossi: %d, subscription_candidates rimossi: %d",
+            deleted_oauth, deleted_chats, deleted_jobs, deleted_candidates, deleted_sub_candidates,
         )
     except Exception as e:
         logger.error(f"[NightlyRetention] Errore job: {e}")
@@ -3513,6 +3658,247 @@ def _streak_break_message(lost_streak_days: int) -> str:
         f"😅 Ops! Ieri ti sei dimenticato di segnare le spese e la streak di "
         f"*{lost_streak_days} giorni* è andata in fumo... si riparte da zero, dai!" + tail
     )
+
+
+def mark_goal_reached(chat_id: str, goal: dict) -> list[dict]:
+    """Registra il raggiungimento di un obiettivo nel motore achievement.
+
+    Idempotente sul `dedup_key`: chiamarla sia dal rilevamento in tempo reale sia
+    dal job mensile non assegna due volte lo stesso badge.
+    """
+    return [
+        u.as_dict() for u in gamification.record_event(
+            _user_store, chat_id, "savings_goal_completed",
+            dedup_key=f"goal:{goal['id']}",
+        )
+    ]
+
+
+def complete_reached_goals(chat_id: str, storage) -> tuple[list[dict], list[dict]]:
+    """Chiude gli obiettivi già raggiunti e registra i relativi achievement.
+
+    Usa `is_goal_reached`, che calcola solo il valore corrente senza ricostruire le
+    serie mensili necessarie all'ETA: il costo resta una manciata di aggregati, non
+    una scansione di tutto lo storico. È quindi chiamabile subito dopo una
+    transazione confermata, senza aspettare il job del 1° del mese — che resta
+    comunque la rete di sicurezza e continua a produrre voti e storico per il
+    report, invariato.
+
+    Non solleva mai: un errore qui non deve far fallire il salvataggio della spesa.
+
+    Returns:
+        `(obiettivi_chiusi, achievement_sbloccati)`.
+    """
+    try:
+        from src.savings_goals_service import detect_completed_goals
+
+        goals, unlocks = [], []
+        for goal in detect_completed_goals(storage):
+            storage.update_savings_goal(
+                goal["id"], status="completed", completed_at=datetime.utcnow(),
+            )
+            goals.append(goal)
+            unlocks += mark_goal_reached(chat_id, goal)
+        return goals, unlocks
+    except Exception as exc:  # noqa: BLE001 — la gamification non deve mai propagare
+        logger.warning(
+            "[SavingsGoals] Rilevamento in tempo reale fallito per %s: %s", chat_id, exc,
+            extra={"domain": "gamification", "event": "goal_realtime_check_failed",
+                   "meta": {"chat_id": str(chat_id)}},
+        )
+        return [], []
+
+
+async def _check_goals_and_notify(bot, chat_id: str) -> list[dict]:
+    """Chiude gli obiettivi raggiunti e manda il messaggio celebrativo su Telegram.
+
+    Il testo è lo stesso del job mensile: raggiungere un obiettivo si festeggia
+    allo stesso modo, che lo si scopra subito o il 1° del mese.
+
+    **Non solleva mai.** Viene chiamata dentro il blocco che, in caso di eccezione,
+    dice all'utente «non sono riuscito a salvare»: un errore qui — anche solo un
+    `_get_storage` che fallisce per un token scaduto — farebbe comparire quel
+    messaggio su una spesa già salvata, e l'utente la reinserirebbe.
+
+    Returns:
+        Gli achievement sbloccati, da notificare insieme agli altri.
+    """
+    try:
+        storage = _get_storage(chat_id)
+        if not isinstance(storage, PostgresStorage):
+            return []
+
+        goals, unlocks = complete_reached_goals(chat_id, storage)
+        if not goals:
+            return unlocks
+
+        user = _user_store.get_user(chat_id)
+        if user is not None and not user.notifications_enabled:
+            return unlocks
+
+        for goal in goals:
+            try:
+                await bot.send_message(
+                    chat_id=int(chat_id),
+                    text=f"🎉 Obiettivo raggiunto: *{goal['name']}*!",
+                    parse_mode=ParseMode.MARKDOWN,
+                )
+                _track_event(chat_id, "notification_sent",
+                             {"notification_type": "savings_goal_completed"})
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "[SavingsGoals] Notifica obiettivo fallita per %s: %s", chat_id, exc,
+                )
+        return unlocks
+    except Exception as exc:  # noqa: BLE001 — la spesa è già salvata, non ribaltarne l'esito
+        logger.warning(
+            "[SavingsGoals] Controllo obiettivi fallito per %s: %s", chat_id, exc,
+            extra={"domain": "gamification", "event": "goal_check_failed",
+                   "meta": {"chat_id": str(chat_id)}},
+        )
+        return []
+
+
+async def _notify_achievements(bot, chat_id: str, unlocks: list[dict]) -> int:
+    """Notifica su Telegram gli achievement appena sbloccati.
+
+    Rispetta `notifications_enabled` (GDPR Art. 21) e marca gli sblocchi come già
+    notificati, così un eventuale ricalcolo notturno non li rimanda. Non solleva
+    mai: una notifica mancata non deve far fallire il flusso chiamante.
+
+    Returns:
+        Il numero di messaggi effettivamente inviati.
+    """
+    if not unlocks:
+        return 0
+    try:
+        user = _user_store.get_user(chat_id)
+        if user is not None and not user.notifications_enabled:
+            return 0
+
+        sent = 0
+        for text in build_achievement_messages(unlocks):
+            await bot.send_message(chat_id=int(chat_id), text=text, parse_mode="Markdown")
+            sent += 1
+            await asyncio.sleep(0.3)
+
+        gamification.mark_notified(_user_store, chat_id, [u["code"] for u in unlocks])
+        for unlock in unlocks:
+            _track_event(chat_id, "achievement_unlocked", {
+                "code": unlock["code"], "family": unlock["family"], "tier": unlock["tier"],
+            })
+        return sent
+    except Exception as exc:  # noqa: BLE001 — la gamification non deve mai propagare
+        logger.warning(
+            "[Achievement] Notifica fallita per %s: %s", chat_id, exc,
+            extra={"domain": "gamification", "event": "notify_failed",
+                   "meta": {"chat_id": str(chat_id)}},
+        )
+        return 0
+
+
+def _gamification_clean_month_job(app: Application, loop: asyncio.AbstractEventLoop) -> None:
+    """Job APScheduler il 1° del mese alle 06:30 — valuta il mese appena chiuso.
+
+    Un mese conta come "pulito" se non contiene nemmeno una spesa nella categoria di
+    fallback e ne contiene almeno `CLEAN_MONTH_MIN_EXPENSES`: senza quella soglia
+    basterebbe non registrare nulla per collezionare la serie.
+
+    Un mese sporco azzera il contatore ma non revoca nulla: gli achievement già
+    sbloccati restano.
+    """
+    from src.gamification.backfill import _previous_month, evaluate_month
+
+    logger.info("[Gamification] Avvio valutazione cicli mensili.")
+    year, month = _previous_month(date.today())
+    evaluated = 0
+    unlocks_by_chat: dict[str, list[dict]] = {}
+
+    for user in _user_store.get_all_active_users():
+        if user.storage_backend != "postgres":
+            continue  # Notion non espone le categorie in modo affidabile: skip silenzioso
+        chat_id = user.chat_id
+        try:
+            storage = _get_storage(chat_id)
+            if not isinstance(storage, PostgresStorage):
+                continue
+            unlocks = evaluate_month(_user_store, chat_id, storage, year, month)
+            evaluated += 1
+            if unlocks:
+                unlocks_by_chat[chat_id] = [u.as_dict() for u in unlocks]
+        except Exception as e:
+            logger.error(f"[Gamification] Errore ciclo mensile per {chat_id}: {e}")
+
+    logger.info(
+        "[Gamification] Cicli mensili: %d utenti valutati, %d con sblocchi.",
+        evaluated, len(unlocks_by_chat),
+        extra={"domain": "gamification", "event": "cycle_month_job_done",
+               "meta": {"evaluated": evaluated, "unlocked": len(unlocks_by_chat)}},
+    )
+    _dispatch_achievement_notifications(app, loop, unlocks_by_chat)
+
+
+def _gamification_reconcile_job(app: Application, loop: asyncio.AbstractEventLoop) -> None:
+    """Job APScheduler alle 03:25 — riallinea i contatori e recupera gli sblocchi persi.
+
+    I contatori sono materializzati: senza questa passata un evento perso resterebbe
+    perso per sempre. Gira dopo il reset streak delle 03:15 così legge lo stato
+    definitivo della giornata.
+    """
+    from src.gamification import backfill
+
+    logger.info("[Gamification] Avvio riconciliazione contatori.")
+    reconciled = 0
+    unlocks_by_chat: dict[str, list[dict]] = {}
+
+    for user in _user_store.get_all_active_users():
+        chat_id = user.chat_id
+        try:
+            storage = None
+            if user.storage_backend == "postgres":
+                candidate = _get_storage(chat_id)
+                storage = candidate if isinstance(candidate, PostgresStorage) else None
+            counters = backfill.recompute_metrics(_user_store, chat_id, storage)
+            # `notified=False`: questi sono sblocchi legittimi sfuggiti agli hook,
+            # vanno festeggiati. Il silenzio è solo per il backfill iniziale.
+            unlocks = gamification.evaluate(
+                _user_store, chat_id, counters=counters, source="reconcile",
+            )
+            if unlocks:
+                unlocks_by_chat[chat_id] = [u.as_dict() for u in unlocks]
+            reconciled += 1
+        except Exception as e:
+            logger.error(f"[Gamification] Errore riconciliazione per {chat_id}: {e}")
+
+    logger.info(
+        "[Gamification] Riconciliazione completata: %d utenti, %d con sblocchi recuperati.",
+        reconciled, len(unlocks_by_chat),
+        extra={"domain": "gamification", "event": "reconcile_job_done",
+               "meta": {"users": reconciled, "recovered": len(unlocks_by_chat)}},
+    )
+    _dispatch_achievement_notifications(app, loop, unlocks_by_chat)
+
+
+def _dispatch_achievement_notifications(
+    app: Application, loop: asyncio.AbstractEventLoop, unlocks_by_chat: dict[str, list[dict]],
+) -> None:
+    """Invia le notifiche di sblocco accumulate da un job (thread dello scheduler)."""
+    if not unlocks_by_chat:
+        return
+
+    async def _run() -> int:
+        sent = 0
+        for chat_id, unlocks in unlocks_by_chat.items():
+            sent += await _notify_achievements(app.bot, chat_id, unlocks)
+            await asyncio.sleep(0.5)
+        return sent
+
+    future = asyncio.run_coroutine_threadsafe(_run(), loop)
+    try:
+        sent = future.result(timeout=300)
+        logger.info("[Gamification] Notifiche di sblocco inviate: %d.", sent)
+    except Exception as e:
+        logger.error(f"[Gamification] Errore invio notifiche di sblocco: {e}")
 
 
 def _nightly_streak_reset_job(app: Application, loop: asyncio.AbstractEventLoop) -> None:
@@ -3655,6 +4041,7 @@ async def _start_scheduler(app: Application) -> None:
         BotCommand("weekly_plan", "Piano settimanale spese"),
         BotCommand("monthly_report", "Report mensile spese"),
         BotCommand("monthly_plan", "Piano mensile spese"),
+        BotCommand("scova_abbonamenti", "Abbonamenti ricorrenti rilevati dalle spese"),
         BotCommand("privacy", "Link alla privacy policy"),
         BotCommand("export", "Esporta i tuoi dati (Art. 15/20 GDPR)"),
         BotCommand("elimina_account", "Cancella definitivamente l'account (Art. 17 GDPR)"),
@@ -3672,6 +4059,10 @@ async def _start_scheduler(app: Application) -> None:
     scheduler.add_job(_nightly_subscription_job, 'cron', hour=3, minute=5, args=[app, loop], id='nightly_subscription_job')
     scheduler.add_job(_nightly_retention_cleanup, 'cron', hour=3, minute=10, id='nightly_retention_cleanup')
     scheduler.add_job(_nightly_streak_reset_job, 'cron', hour=3, minute=15, args=[app, loop], id='nightly_streak_reset_job')
+    scheduler.add_job(_gamification_reconcile_job, 'cron', hour=3, minute=25, args=[app, loop], id='gamification_reconcile_job')
+    # Il 1° del mese alle 06:30, prima degli obiettivi (07:30) e del report (08:00):
+    # il mese appena chiuso deve essere già contabilizzato quando quelli girano.
+    scheduler.add_job(_gamification_clean_month_job, 'cron', day=1, hour=6, minute=30, args=[app, loop], id='gamification_clean_month_job')
     scheduler.add_job(_trial_expiry_job, 'cron', hour=4, minute=0, args=[app, loop], id='trial_expiry_job')
     scheduler.add_job(_daily_dashboard_job, 'cron', hour=8, minute=0, args=[app, loop], id='daily_dashboard_job')
     scheduler.add_job(_weekly_plan_job, 'cron', day_of_week='mon', hour=8, minute=5, args=[app, loop], id='weekly_plan_job')
@@ -4276,6 +4667,7 @@ def main():
     app.add_handler(CommandHandler("status", cmd_status))
     app.add_handler(CommandHandler("piano", cmd_piano))
     app.add_handler(CommandHandler("obiettivi", cmd_obiettivi))
+    app.add_handler(CommandHandler("scova_abbonamenti", cmd_scova_abbonamenti))
     app.add_handler(CommandHandler("weekly_report", cmd_weekly_report))
     app.add_handler(CommandHandler("weekly_plan", cmd_weekly_plan))
     app.add_handler(CommandHandler("monthly_report", cmd_monthly_report))

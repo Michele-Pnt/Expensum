@@ -18,7 +18,8 @@ class NotionStorage(FinancialStorage):
         self._store = store
         self._user_id = user_id
 
-    def get_category_names(self) -> list[str]:
+    def get_category_names(self, include_archived: bool = False) -> list[str]:
+        """Notion non ha il concetto di archiviazione: il parametro è ignorato."""
         if self._store and self._user_id:
             return self._store.get_user_category_names(self._user_id)
         # Fallback: legge da Notion API se store non disponibile (es. durante bootstrap)
@@ -100,12 +101,33 @@ class NotionStorage(FinancialStorage):
     def fetch_transfers(self, start_date: date, end_date: date) -> list[dict]:
         return self._client.fetch_transfers(start_date, end_date)
 
-    def create_subscription(self, name: str) -> dict:
-        result = self._client.create_subscription(name)
+    def create_subscription(
+        self,
+        name: str,
+        amount: float | None = None,
+        last_billed: str | None = None,
+        sub_type: str | None = None,
+        account_id: str | None = None,
+        category_id: str | None = None,
+        category_name: str | None = None,
+    ) -> dict:
+        """Crea un abbonamento. `category_name` viene risolta in page_id Notion
+        (stesso pattern di `create_expense`) se `category_id` non è già passato."""
+        resolved_category_id = category_id
+        if resolved_category_id is None and self._store and self._user_id and category_name:
+            resolved_category_id = self._store.get_notion_page_id_for_category(self._user_id, category_name)
+        result = self._client.create_subscription(
+            name,
+            sub_type=sub_type,
+            amount=amount,
+            category_id=resolved_category_id,
+            account_id=account_id,
+            last_billed=last_billed,
+        )
         return {"id": result["id"], "name": name}
 
-    def get_categories(self) -> list[dict]:
-        """Ritorna categorie con budget e average dal DB locale (user_categories)."""
+    def get_categories(self, include_archived: bool = False) -> list[dict]:
+        """Categorie con budget e average dal DB locale. Notion non archivia: parametro ignorato."""
         if self._store and self._user_id:
             return self._store.get_user_categories_with_budget(self._user_id)
         return [{"name": n, "monthly_budget": None, "average": 0.0} for n in self.get_category_names()]

@@ -40,6 +40,7 @@ from src.user_store import (
     User,
     UserPlan,
 )
+from src.storage.models import SubscriptionCandidate
 
 # Soglia storica del ledger token: coerente con la dashboard esistente, si
 # considerano solo gli eventi dal 2026-05-01 in avanti (prima i dati non erano
@@ -323,8 +324,13 @@ def get_token_usage_per_user(s: Session) -> list[dict[str, Any]]:
 # ---------------------------------------------------------------------------
 # 4. Consumo token mensile per utente + media (per tarare le quote)
 # ---------------------------------------------------------------------------
-def get_monthly_token_usage(s: Session, months: int = 6) -> dict[str, Any]:
+def get_monthly_token_usage(
+    s: Session, months: int = 6, now: datetime | None = None
+) -> dict[str, Any]:
     """Consumo token per mese e per utente, con statistiche per tarare le quote.
+
+    `now` è iniettabile per gli stessi motivi di `get_retention`: ancorare i bucket
+    mensili al tempo reale rende i test silenziosamente rossi al cambio di mese.
 
     Ritorna:
     - `months`: elenco ordinato dei bucket 'YYYY-MM' considerati
@@ -333,7 +339,7 @@ def get_monthly_token_usage(s: Session, months: int = 6) -> dict[str, Any]:
     - `current_month_stats`: avg/median/p90/max del mese corrente (per decidere
       il tetto free, oggi 150k)
     """
-    now = datetime.utcnow()
+    now = now or datetime.utcnow()
     # Primo giorno del mese `months-1` mesi fa.
     start_year = now.year
     start_month = now.month - (months - 1)
@@ -584,9 +590,14 @@ def get_onboarding_funnel(s: Session) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 # 9. Funnel & revenue: piani, MRR, churn, unit economics
 # ---------------------------------------------------------------------------
-def get_funnel_revenue(s: Session) -> dict[str, Any]:
-    """Metriche di business: distribuzione piani, MRR proxy, churn, unit economics."""
-    now = datetime.utcnow()
+def get_funnel_revenue(s: Session, now: datetime | None = None) -> dict[str, Any]:
+    """Metriche di business: distribuzione piani, MRR proxy, churn, unit economics.
+
+    `now` è iniettabile per gli stessi motivi di `get_retention`: ancorare le
+    finestre rolling al tempo reale rende i test silenziosamente rossi appena
+    i dati seminati escono dalla finestra.
+    """
+    now = now or datetime.utcnow()
     thirty_days_ago = now - timedelta(days=30)
     ninety_days_ago = now - timedelta(days=90)
 
@@ -1062,16 +1073,54 @@ def get_tour_funnel(s: Session) -> dict[str, Any]:
     }
 
 
+def get_subscription_candidate_funnel(s: Session, days: int = 90) -> dict[str, Any]:
+    """Funnel del rilevamento abbonamenti (src/subscription_detector.py).
+
+    `satisfaction_pct` è la metrica di successo della feature: sui candidati per
+    cui l'utente ha già preso una decisione (confermato o rifiutato), quanti ne
+    ha voluti davvero. Non è un tasso di rilevamento (quello lo direbbe solo
+    "candidati creati"), è un segnale di fiducia/precisione — se scende, vuol
+    dire che i falsi positivi (bande di tolleranza troppo larghe, categorie
+    keyword troppo permissive) stanno costando credibilità, non solo un tap.
+    Fonte: subscription_candidates, popolata sia dall'hook live (bot.py) sia dal
+    backfill storico (scripts/backfill_subscription_candidates.py) — questa
+    metrica non li distingue, riflette lo stato complessivo del sistema.
+    """
+    since = datetime.utcnow() - timedelta(days=days)
+    rows = s.query(
+        SubscriptionCandidate.status, func.count()
+    ).filter(SubscriptionCandidate.created_at >= since).group_by(
+        SubscriptionCandidate.status
+    ).all()
+    by_status = {status: cnt for status, cnt in rows}
+
+    pending = by_status.get("pending", 0)
+    awaiting_confirm = by_status.get("awaiting_confirm", 0)
+    confirmed = by_status.get("confirmed", 0)
+    dismissed = by_status.get("dismissed", 0)
+    decided = confirmed + dismissed
+
+    return {
+        "days": days,
+        "total_detected": pending + awaiting_confirm + confirmed + dismissed,
+        "pending": pending,
+        "awaiting_confirm": awaiting_confirm,
+        "confirmed": confirmed,
+        "dismissed": dismissed,
+        "satisfaction_pct": round(100 * confirmed / decided, 1) if decided else None,
+    }
+
+
 # ---------------------------------------------------------------------------
 # 13. Referral: leaderboard, reward, sblocco Lifetime Founder
 # ---------------------------------------------------------------------------
 def get_referral_metrics(s: Session, top_n: int = 20, recent_n: int = 50) -> dict[str, Any]:
     """Stato del sistema referral: KPI, classifica referrer, invii recenti.
 
-    Tetto reward per il referrer (fisso a 60gg, non additivo) e sblocco
-    Lifetime Founder al 3° referral sono applicati in
-    UserStore.create_referral_rewards; qui si aggregano solo i dati già
-    persistiti (tally_leads + referral_rewards), nessuna logica di business.
+    Le regole (giorni per invito, tetto di inviti premiati per il referrer, sblocco
+    Lifetime Founder) sono applicate in `UserStore.create_referral_rewards`; qui si
+    aggregano solo i dati già persistiti (tally_leads + referral_rewards), nessuna
+    logica di business.
     """
     total_codes_generated = s.query(TallyLead).filter(TallyLead.referral_code.isnot(None)).count()
     total_referred_signups = s.query(TallyLead).filter(TallyLead.referred_by_code.isnot(None)).count()
