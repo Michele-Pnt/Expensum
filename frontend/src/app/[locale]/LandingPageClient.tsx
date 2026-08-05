@@ -111,9 +111,6 @@ export default function LandingPage() {
             <button className={styles.navLink} onClick={() => scrollToSection("come-funziona")}>
               {t("nav.comeFunziona")}
             </button>
-            <button className={styles.navLink} onClick={() => scrollToSection("prezzi")}>
-              {t("nav.prezzi")}
-            </button>
           </div>
           <div className={styles.navActions}>
             {/* /login è una route Flask (proxata via next.config.ts rewrites),
@@ -143,9 +140,6 @@ export default function LandingPage() {
             <button className={styles.mobileMenuLink} onClick={() => scrollToSection("come-funziona")}>
               {t("nav.comeFunziona")}
             </button>
-            <button className={styles.mobileMenuLink} onClick={() => scrollToSection("prezzi")}>
-              {t("nav.prezzi")}
-            </button>
           </div>
         )}
       </nav>
@@ -156,9 +150,8 @@ export default function LandingPage() {
           <div className={styles.heroInner}>
             <div className={styles.heroLeft}>
               <div className={styles.heroPillGroup} aria-label="Stato del servizio">
-                <p className={styles.heroPill}>{t("hero.pill")}</p>
                 <p className={`${styles.heroPill} ${styles.heroPillBeta}`}>
-                  Beta privata ad accesso esclusivo
+                  Compila il form per provare la beta privata ad accesso esclusivo
                 </p>
               </div>
               <h1 className={styles.heroHeadline}>
@@ -359,7 +352,9 @@ export default function LandingPage() {
         </section>
 
         {/* ── Pricing ── */}
-        <section id="prezzi" className={styles.sectionAlt}>
+        {/* Nascosta temporaneamente (non eliminata): prodotto in beta privata,
+            i piani a pagamento non vanno mostrati finché non si apre l'accesso pubblico. */}
+        <section id="prezzi" className={styles.sectionAlt} style={{ display: "none" }}>
           <div className={styles.sectionInner}>
             <h2 className={styles.sectionH2Full} data-reveal>
               {t("pricing.title")}
