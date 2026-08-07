@@ -295,6 +295,8 @@ class Feedback(Base):
     message = Column(String, nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow)
     status = Column(String, default="unread")
+    category = Column(String, nullable=True)  # es. "beta_validation", NULL per feedback liberi
+    rating = Column(String, nullable=True)  # es. "up" / "down" / "skip"
 
 # 5. TABELLA SCHEMI DATABASE (Fase 5 - Schema-Driven)
 class DatabaseSchema(Base):
@@ -1641,11 +1643,13 @@ class UserStore:
             session.commit()
             logger.debug(f"[AI Metrics] {'completion' if success else 'fallback'} (+1) — {today}")
 
-    def save_feedback(self, chat_id: str, message: str):
-        """Salva un feedback utente."""
+    def save_feedback(
+        self, chat_id: str, message: str, category: str | None = None, rating: str | None = None
+    ):
+        """Salva un feedback utente, opzionalmente taggato con categoria e rating."""
         chat_id = str(chat_id)
         with self.Session() as session:
-            fb = Feedback(chat_id=chat_id, message=message)
+            fb = Feedback(chat_id=chat_id, message=message, category=category, rating=rating)
             session.add(fb)
             session.commit()
             logger.info(f"[User {chat_id}] Salvato nuovo feedback.")
@@ -2376,6 +2380,40 @@ class UserStore:
                     UserPlan.plan_type == plan_type
                 )
             return [(row[0], row[1]) for row in query.all()]
+
+    def get_beta_default_users(self) -> list[str]:
+        """Chat id degli utenti beta (piano Pro assegnato via `create_beta_account`).
+
+        Rispetta l'opt-out (`notifications_enabled`), come `get_users_for_product_announcement`:
+        il check-in di validazione feature è una comunicazione facoltativa, non un obbligo.
+        """
+        with self.Session() as session:
+            rows = (
+                session.query(User.chat_id)
+                .join(UserPlan, UserPlan.chat_id == User.chat_id)
+                .join(PlanChange, PlanChange.chat_id == User.chat_id)
+                .filter(User.is_active == True)  # noqa: E712
+                .filter(User.notifications_enabled == True)  # noqa: E712
+                .filter(UserPlan.plan_type == "pro")
+                .filter(PlanChange.reason == "beta_default")
+                .distinct()
+                .all()
+            )
+            return [row[0] for row in rows]
+
+    def has_recent_beta_validation_feedback(self, chat_id: str, days: int = 6) -> bool:
+        """True se l'utente ha già risposto al check-in beta negli ultimi `days` giorni."""
+        chat_id = str(chat_id)
+        cutoff = datetime.utcnow() - timedelta(days=days)
+        with self.Session() as session:
+            row = (
+                session.query(Feedback.id)
+                .filter(Feedback.chat_id == chat_id)
+                .filter(Feedback.category == "beta_validation")
+                .filter(Feedback.created_at >= cutoff)
+                .first()
+            )
+            return row is not None
 
     def save_tally_lead(
         self,

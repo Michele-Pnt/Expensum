@@ -1925,6 +1925,13 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     # Mostra "sta scrivendo..."
     await update.message.chat.send_action("typing")
 
+    # Step 2 del check-in beta (vedi handle_callback, "betaval:"): il prossimo
+    # messaggio testuale è il feedback libero, non va parsato come spesa.
+    if context.user_data.pop("waiting_for_beta_feedback", False):
+        _user_store.save_feedback(chat_id, message=message_text, category="beta_validation")
+        await update.message.reply_text("✅ Grazie per il feedback, lo terremo in considerazione! 🙏")
+        return
+
     # Controlla se siamo in attesa dell'importo
     if context.user_data.get("waiting_for_amount"):
         parser = _get_parser(chat_id)
@@ -2660,6 +2667,38 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         return
 
     # ------------------------------------------------------------------
+    # Check-in beta (vedi _beta_feature_validation_job): step 1 reazione a una
+    # feature, poi step 2 facoltativo di feedback libero (mai un wall).
+    # ------------------------------------------------------------------
+
+    if query.data.startswith("betaval:"):
+        _, feature_code, reaction = query.data.split(":", 2)
+        feature_label = next(
+            (label for code, label in BETA_VALIDATION_FEATURES if code == feature_code), feature_code
+        )
+        reaction_label = BETA_VALIDATION_REACTIONS.get(reaction, reaction)
+        _user_store.save_feedback(
+            chat_id,
+            message=f"[Beta validation] {feature_label}: {reaction_label}",
+            category="beta_validation",
+            rating=reaction,
+        )
+        context.user_data["waiting_for_beta_feedback"] = True
+        await query.edit_message_text(
+            f"{reaction_label}, grazie: la tua opinione conta! 🙏\n\n"
+            "Vuoi lasciarci anche due righe di feedback libero? Scrivi pure qui sotto e premi invio 👇",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("❌ Salta", callback_data="betaval_skip_feedback"),
+            ]]),
+        )
+        return
+
+    if query.data == "betaval_skip_feedback":
+        context.user_data.pop("waiting_for_beta_feedback", None)
+        await query.edit_message_text("Va bene, grazie lo stesso per il check-in! 🙏")
+        return
+
+    # ------------------------------------------------------------------
     # Transazioni multiple presentate in parallelo (vedi _process_expense_text):
     # ognuna vive in context.user_data["pending_expenses"][tx_id], indipendente
     # dalle altre — annullarne/confermarne una non tocca le altre in sospeso.
@@ -3267,6 +3306,80 @@ def _weekly_plan_job(app: Application, loop: asyncio.AbstractEventLoop) -> None:
         future.result(timeout=300)
     except Exception as e:
         logger.error(f"[WeeklyPlan] Errore job: {e}")
+        raise
+
+
+# Rotazione feature del check-in beta: una a settimana (indicizzata su isocalendar
+# week), non tutte insieme — evita di affaticare i beta tester con più domande.
+BETA_VALIDATION_FEATURES: list[tuple[str, str]] = [
+    ("budget_categories_webapp", "📊 Il budget suggerito per categoria nella web app"),
+    ("savings_goals", "🎯 Gli obiettivi di risparmio"),
+    ("subscription_detection", "🔁 Il rilevamento automatico degli abbonamenti"),
+    ("weekly_report", "📈 Il report settimanale delle spese"),
+    ("monthly_report", "🗓️ Il report mensile delle spese"),
+    ("daily_summary", "🌅 Il messaggio riassuntivo giornaliero"),
+    ("analytics_webapp", "🧭 La scheda analytics nella web app"),
+    ("text_parsing", "✍️ Il riconoscimento delle spese scritte a testo"),
+    ("voice_parsing", "🎙️ Il riconoscimento delle spese a voce"),
+    ("photo_parsing", "📸 Il riconoscimento delle spese da foto scontrino"),
+    ("spending_calendar_webapp", "📅 Il calendario di spesa nella web app"),
+]
+
+BETA_VALIDATION_REACTIONS: dict[str, str] = {
+    "up": "👍 Mi piace",
+    "down": "👎 Non mi piace",
+    "skip": "🤷 Non l'ho usata",
+}
+
+
+def _beta_feature_validation_job(app: Application, loop: asyncio.AbstractEventLoop) -> None:
+    """Job APScheduler ogni martedì — check-in ai beta tester per validare una feature
+    a rotazione (👍/👎/non usata) e raccogliere un feedback libero. Mai un wall: chi
+    ignora il messaggio non perde nulla, è solo un check-in facoltativo."""
+    logger.info("[BetaValidation] Avvio check-in beta.")
+    feature_code, feature_label = BETA_VALIDATION_FEATURES[
+        date.today().isocalendar()[1] % len(BETA_VALIDATION_FEATURES)
+    ]
+
+    async def _send_checkins():
+        bot = app.bot
+        chat_ids = _user_store.get_beta_default_users()
+
+        sent = 0
+        for chat_id in chat_ids:
+            if _user_store.has_recent_beta_validation_feedback(chat_id):
+                continue
+            keyboard = InlineKeyboardMarkup([[
+                InlineKeyboardButton(BETA_VALIDATION_REACTIONS["up"], callback_data=f"betaval:{feature_code}:up"),
+                InlineKeyboardButton(BETA_VALIDATION_REACTIONS["down"], callback_data=f"betaval:{feature_code}:down"),
+                InlineKeyboardButton(BETA_VALIDATION_REACTIONS["skip"], callback_data=f"betaval:{feature_code}:skip"),
+            ]])
+            try:
+                await bot.send_message(
+                    chat_id=int(chat_id),
+                    text=(
+                        "🧪 *Check-in beta*\n\n"
+                        "Ci stai aiutando a validare Expensum: questa settimana vorremmo un tuo parere su\n"
+                        f"{feature_label}.\n\n"
+                        "Che ne pensi?"
+                    ),
+                    parse_mode=ParseMode.MARKDOWN,
+                    reply_markup=keyboard,
+                )
+                _track_event(chat_id, "notification_sent", {"notification_type": "beta_validation"})
+                sent += 1
+                logger.info(f"[BetaValidation] Check-in inviato a {chat_id}")
+            except Exception as e:
+                logger.error(f"[BetaValidation] Errore per {chat_id}: {e}")
+            await asyncio.sleep(0.5)
+
+        logger.info(f"[BetaValidation] Completato: {sent}/{len(chat_ids)} check-in inviati.")
+
+    future = asyncio.run_coroutine_threadsafe(_send_checkins(), loop)
+    try:
+        future.result(timeout=300)
+    except Exception as e:
+        logger.error(f"[BetaValidation] Errore job: {e}")
         raise
 
 
@@ -4066,6 +4179,7 @@ async def _start_scheduler(app: Application) -> None:
     scheduler.add_job(_trial_expiry_job, 'cron', hour=4, minute=0, args=[app, loop], id='trial_expiry_job')
     scheduler.add_job(_daily_dashboard_job, 'cron', hour=8, minute=0, args=[app, loop], id='daily_dashboard_job')
     scheduler.add_job(_weekly_plan_job, 'cron', day_of_week='mon', hour=8, minute=5, args=[app, loop], id='weekly_plan_job')
+    scheduler.add_job(_beta_feature_validation_job, 'cron', day_of_week='tue', hour=10, minute=0, args=[app, loop], id='beta_feature_validation_job')
     scheduler.add_job(_savings_goals_monthly_job, 'cron', day=1, hour=7, minute=30, args=[app, loop], id='savings_goals_monthly_job')
     scheduler.add_job(_monthly_plan_job, 'cron', day=1, hour=8, minute=0, args=[app, loop], id='monthly_plan_job')
     scheduler.add_job(_trial_lifecycle_job, 'cron', hour=9, minute=0, args=[app, loop], id='trial_lifecycle_job')

@@ -1,0 +1,207 @@
+.page {
+  padding: 24px;
+  max-width: 640px;
+  margin: 0 auto;
+}
+
+.headerRow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 20px;
+}
+
+.monthLabel {
+  font-size: 1.25rem;
+  font-weight: 700;
+  color: var(--color-text);
+  text-transform: capitalize;
+}
+
+.navButtons {
+  display: flex;
+  gap: 8px;
+}
+
+.navButton {
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  border: 1px solid var(--color-border);
+  background: var(--color-surface);
+  color: var(--color-text-2);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+}
+
+.navButton:hover {
+  background: var(--color-surface-2);
+}
+
+.weekdayRow {
+  display: grid;
+  grid-template-columns: repeat(7, 1fr);
+  margin-bottom: 8px;
+}
+
+.weekday {
+  text-align: center;
+  font-size: 0.7rem;
+  font-weight: 700;
+  color: var(--color-text-3);
+  letter-spacing: 0.04em;
+  padding-bottom: 6px;
+}
+
+.grid {
+  display: grid;
+  grid-template-columns: repeat(7, 1fr);
+  row-gap: 4px;
+}
+
+.cell {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  padding: 6px 0;
+  cursor: pointer;
+  border: none;
+  background: transparent;
+  font-family: inherit;
+}
+
+.cell:disabled {
+  cursor: default;
+}
+
+.dayNumber {
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 0.9rem;
+  color: var(--color-text);
+}
+
+.dayNumberOutside {
+  color: var(--color-text-3);
+}
+
+.dayNumberToday {
+  border: 1px solid var(--color-primary);
+}
+
+.dayNumberSelected {
+  background: var(--color-primary);
+  color: #FFFFFF;
+}
+
+.dots {
+  display: flex;
+  gap: 3px;
+  height: 6px;
+}
+
+.dotExpense {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--color-expense);
+}
+
+.dotSubscription {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: transparent;
+  border: 1px solid var(--color-accent-dim);
+}
+
+.sheetHandle {
+  width: 36px;
+  height: 4px;
+  border-radius: 2px;
+  background: var(--color-border-2);
+  margin: 8px auto 4px;
+}
+
+.sheetHeader {
+  padding: 4px 20px 12px;
+}
+
+.sheetTitle {
+  font-size: 1rem;
+  font-weight: 700;
+  color: var(--color-text);
+  text-transform: capitalize;
+}
+
+.sheetSubtitle {
+  font-size: 0.8rem;
+  color: var(--color-text-2);
+}
+
+.itemRow {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 20px;
+}
+
+.itemIcon {
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.itemIconExpense {
+  background: var(--color-primary-light);
+  color: var(--color-primary);
+}
+
+.itemIconSubscription {
+  background: rgba(197, 160, 89, 0.12);
+  color: var(--color-accent-dim);
+}
+
+.itemBody {
+  flex: 1;
+  min-width: 0;
+}
+
+.itemName {
+  font-size: 0.9rem;
+  font-weight: 600;
+  color: var(--color-text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.itemMeta {
+  font-size: 0.75rem;
+  color: var(--color-text-2);
+}
+
+.itemAmount {
+  font-size: 0.9rem;
+  font-weight: 700;
+  color: var(--color-text);
+  flex-shrink: 0;
+}
+
+.emptyState {
+  padding: 32px 20px 40px;
+  text-align: center;
+  color: var(--color-text-2);
+  font-size: 0.85rem;
+}

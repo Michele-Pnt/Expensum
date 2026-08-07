@@ -94,3 +94,32 @@ def get_monthly_equivalent(amount: float | None, sub_type: str | None) -> float:
         period_months = 1.0
 
     return float(amount) / period_months
+
+
+def get_occurrences_in_range(
+    last_billed: date | str | None,
+    sub_type: str | None,
+    start: date,
+    end: date,
+) -> list[date]:
+    """Proietta le date di addebito di un abbonamento che cadono in [start, end].
+
+    Riusa get_next_billing_date iterando ciclo per ciclo a partire da last_billed,
+    per restare coerente con la logica di cadenza già validata in quella funzione.
+    """
+    if not last_billed or start > end:
+        return []
+
+    current = last_billed
+    occurrences: list[date] = []
+
+    # Safety cap: evita loop infiniti su input anomali.
+    for _ in range(500):
+        nxt = get_next_billing_date(current, sub_type)
+        if nxt is None or nxt > end:
+            break
+        if nxt >= start:
+            occurrences.append(nxt)
+        current = nxt
+
+    return occurrences

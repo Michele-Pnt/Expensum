@@ -5392,6 +5392,62 @@ def space_subscriptions_delete(sub_id: int):
         return jsonify({"status": "ok"})
 
 
+# ── Calendar ──────────────────────────────────────────────────────────────────
+
+@app.route("/api/calendar/month", methods=["GET"])
+@_tg_webapp_auth
+def calendar_month():
+    """Spese reali + occorrenze di abbonamento proiettate per un mese, raggruppate per giorno.
+
+    Query params: year=YYYY, month=1-12 (default: mese corrente).
+    """
+    from flask import g
+    from datetime import date
+    import calendar as _calendar
+
+    today = date.today()
+    try:
+        year = int(request.args.get("year", today.year))
+        month = int(request.args.get("month", today.month))
+        if not (1 <= month <= 12):
+            raise ValueError
+    except (ValueError, TypeError):
+        return jsonify({"error": "Parametri year/month non validi"}), 400
+
+    start_date = date(year, month, 1)
+    end_date = date(year, month, _calendar.monthrange(year, month)[1])
+
+    with store.Session() as s:
+        pg, err = _pg_or_401(s, g.chat_id)
+        if err:
+            return err
+        data = pg.fetch_calendar_month(start_date, end_date)
+
+    days: dict[str, dict] = {}
+
+    for exp in data["expenses"]:
+        day_key = exp["date"].isoformat() if hasattr(exp["date"], "isoformat") else str(exp["date"])
+        days.setdefault(day_key, {"expenses": [], "subscription_occurrences": []})["expenses"].append({
+            "id": exp.get("id"),
+            "name": exp.get("name", ""),
+            "amount": round(exp["amount"], 2),
+            "category": exp.get("category") or "Altro",
+        })
+
+    for occ in data["subscription_occurrences"]:
+        days.setdefault(occ["date"], {"expenses": [], "subscription_occurrences": []})["subscription_occurrences"].append({
+            "subscription_id": occ["subscription_id"],
+            "name": occ.get("name", ""),
+            "amount": round(occ["amount"], 2) if occ.get("amount") is not None else None,
+        })
+
+    return jsonify({
+        "year": year,
+        "month": month,
+        "days": days,
+    })
+
+
 # ── Expenses ──────────────────────────────────────────────────────────────────
 
 @app.route("/api/space/expenses", methods=["GET"])

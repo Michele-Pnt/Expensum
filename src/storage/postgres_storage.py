@@ -16,6 +16,7 @@ from sqlalchemy.orm import Session
 
 import uuid
 
+from src.billing_utils import get_occurrences_in_range
 from src.storage.base import FinancialStorage
 from src.storage.models import (
     Account, UserCategory, UserCategoryNotionLink, CategoryCandidate, Expense, Income,
@@ -994,6 +995,31 @@ class PostgresStorage(FinancialStorage):
         for s in subs:
             s["account_name"] = acc_map.get(s.get("account_id"), "") or ""
         return subs
+
+    def fetch_calendar_month(self, start_date: date, end_date: date) -> dict:
+        """Spese reali + occorrenze di abbonamento proiettate nell'intervallo, per la vista calendario.
+
+        Le spese sono la fonte di verità (ledger); le occorrenze di abbonamento sono
+        proiettate on-read a partire da `last_billed`/`sub_type` (nessuna riga persistita
+        per un addebito non ancora avvenuto), quindi possono includere date passate se
+        l'utente non ha ancora registrato/aggiornato l'abbonamento.
+        """
+        expenses = self.fetch_all_transactions(start_date, end_date)
+        subs = self.fetch_subscriptions()
+
+        subscription_occurrences = []
+        for sub in subs:
+            for occ_date in get_occurrences_in_range(
+                sub.get("last_billed"), sub.get("sub_type"), start_date, end_date
+            ):
+                subscription_occurrences.append({
+                    "subscription_id": sub["id"],
+                    "date": occ_date.isoformat(),
+                    "amount": sub["amount"],
+                    "name": sub["name"],
+                })
+
+        return {"expenses": expenses, "subscription_occurrences": subscription_occurrences}
 
 
     def fetch_categories_full(self, include_archived: bool = True) -> list[dict]:
