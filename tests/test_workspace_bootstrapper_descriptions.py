@@ -34,7 +34,7 @@ class TestBootstrapWorkspaceDescriptions:
 
         calls_by_name = {c.args[0]: c.kwargs for c in empty_storage.create_category.call_args_list}
         assert calls_by_name["Affitto"]["description_summary"] == CATEGORY_DESCRIPTIONS["Affitto"]
-        assert calls_by_name["Supermercato"]["description_summary"] == CATEGORY_DESCRIPTIONS["Supermercato"]
+        assert calls_by_name["Spese Alimentari"]["description_summary"] == CATEGORY_DESCRIPTIONS["Spese Alimentari"]
 
     def test_every_default_category_has_a_description(self):
         """Nessuna categoria di default deve restare silenziosamente senza descrizione."""

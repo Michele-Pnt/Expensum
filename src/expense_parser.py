@@ -70,7 +70,7 @@ REGOLE TASSATIVE:
 ESEMPI SPESE (transazione singola):
 - "ieri pizza 25€" → {"type": "expense", "amount": 25.0, "category": "Ristoranti", "income_type": null, "name": "Pizza", "date": "2026-03-20", "from_account": null, "to_account": null}
 - "netflix" → {"type": "expense", "amount": null, "category": "Abbonamenti", "income_type": null, "name": "Netflix", "date": "2026-03-21", "from_account": null, "to_account": null}
-- "ho speso 67 euro al supermercato" → {"type": "expense", "amount": 67.0, "category": "Supermercato", "income_type": null, "name": "Spesa supermercato", "date": "2026-03-21", "from_account": null, "to_account": null}
+- "ho speso 67 euro al supermercato" → {"type": "expense", "amount": 67.0, "category": "Spese Alimentari", "income_type": null, "name": "Spesa supermercato", "date": "2026-03-21", "from_account": null, "to_account": null}
 - "3 settimane fa ho pagato 80 euro di dentista" (oggi=2026-04-10) → {"type": "expense", "amount": 80.0, "category": "Salute", "income_type": null, "name": "Dentista", "date": "2026-03-20", "from_account": null, "to_account": null}
 
 ESEMPI ENTRATE (transazione singola):
@@ -96,7 +96,7 @@ ESEMPI MULTI-TRANSAZIONE:
   {"type": "expense", "amount": 5.0, "category": "Bar", "income_type": null, "name": "Caffè", "date": "2026-04-09", "from_account": null, "to_account": null}
 ]}
 - "oggi 15 euro di spesa e ieri ho ricevuto un rimborso di 50 euro" (oggi=2026-04-10) → {"transactions": [
-  {"type": "expense", "amount": 15.0, "category": "Supermercato", "income_type": null, "name": "Spesa", "date": "2026-04-10", "from_account": null, "to_account": null},
+  {"type": "expense", "amount": 15.0, "category": "Spese Alimentari", "income_type": null, "name": "Spesa", "date": "2026-04-10", "from_account": null, "to_account": null},
   {"type": "income", "amount": 50.0, "category": null, "income_type": "Rimborso", "name": "Rimborso", "date": "2026-04-09", "from_account": null, "to_account": null}
 ]}
 """

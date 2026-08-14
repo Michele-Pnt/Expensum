@@ -29,8 +29,7 @@ DEFAULT_CATEGORIES: list[str] = [
     "Condominio",
     "Casa Vario",
     # Alimentari (19% budget ISTAT 2024)
-    "Supermercato",
-    "Mercato",
+    "Spese Alimentari",
     # Ristorazione (6% budget, +4% YoY ISTAT 2024)
     "Ristorante",
     "Bar",
@@ -48,10 +47,10 @@ DEFAULT_CATEGORIES: list[str] = [
     "Telefono",
     "Internet",
     # Persona
-    "Abbigliamento",
-    "Scarpe",
+    "Shopping",
     "Parrucchiere",
-    "Igiene personale",
+    "Hobby",
+    "Sport",
     # Finanza
     "Assicurazioni",
     "Banca",
@@ -159,8 +158,7 @@ CATEGORY_DESCRIPTIONS: dict[str, str] = {
     "Condominio": "Spese condominiali della casa",
     "Casa Vario": "Piccole spese di manutenzione o arredamento della casa",
     # Alimentari
-    "Supermercato": "Spesa alimentare fatta al supermercato",
-    "Mercato": "Spesa alimentare fatta al mercato rionale",
+    "Spese Alimentari": "Spesa alimentare fatta al supermercato o al mercato",
     # Ristorazione
     "Ristorante": "Spese per mangiare fuori al ristorante",
     "Bar": "Spese al bar per caffè, colazioni o aperitivi veloci",
@@ -178,10 +176,10 @@ CATEGORY_DESCRIPTIONS: dict[str, str] = {
     "Telefono": "Abbonamento telefonico o ricariche del cellulare",
     "Internet": "Abbonamento internet/fibra di casa",
     # Persona
-    "Abbigliamento": "Acquisto di vestiti",
-    "Scarpe": "Acquisto di scarpe",
+    "Shopping": "Acquisto di vestiti, scarpe e accessori",
     "Parrucchiere": "Spese dal parrucchiere o barbiere",
-    "Igiene personale": "Prodotti per l'igiene personale quotidiana",
+    "Hobby": "Spese per hobby non coperte da una categoria più specifica",
+    "Sport": "Attività sportive, abbonamenti palestra o attrezzatura",
     # Finanza
     "Assicurazioni": "Polizze assicurative (esclusa auto e viaggio, vedi categorie dedicate)",
     "Banca": "Commissioni e costi bancari",
