@@ -200,6 +200,33 @@ class TestExplainScore:
         assert "22%" in text
         assert "20%" in text
 
+    def test_negative_pace_uses_losing_wording(self):
+        goal = {
+            "goal_type": "net_worth", "target_amount": 5000.0,
+            "target_date": "2026-12-31",
+        }
+        score = {
+            "score_label": "Fuori rotta", "pace_effettivo": -123.0, "pace_richiesto": 828.0,
+        }
+        text = explain_score(goal, score, markdown=False)
+        assert "perdendo" in text
+        assert "123" in text
+        assert "-123" not in text
+        assert "circa 828" in text
+        assert "~" not in text
+
+    def test_positive_pace_uses_circa_not_tilde(self):
+        goal = {
+            "goal_type": "net_worth", "target_amount": 5000.0,
+            "target_date": "2026-12-31",
+        }
+        score = {
+            "score_label": "In linea", "pace_effettivo": 200.0, "pace_richiesto": 250.0,
+        }
+        text = explain_score(goal, score, markdown=False)
+        assert "circa" in text
+        assert "~" not in text
+
     def test_insufficient_data_explanation(self):
         goal = {"goal_type": "net_savings", "target_amount": 1000.0}
         score = {"score_label": "Dati insufficienti", "pace_effettivo": None, "pace_richiesto": None}

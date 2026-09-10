@@ -4,35 +4,45 @@ import { createTheme } from '@mui/material/styles';
 
 const theme = createTheme({
   palette: {
-    mode: 'light',
+    mode: 'dark',
     primary: {
-      main: '#1A3673',
-      dark: '#142959',
-      light: '#2B4FA8',
-      contrastText: '#FFFFFF',
+      main: '#5FC4CB',
+      dark: '#4AA7AE',
+      light: '#7ED0D6',
+      contrastText: '#1C363D',
     },
     secondary: {
-      main: '#C5A059',
-      dark: '#A8853C',
-      light: '#D4B47A',
-      contrastText: '#FFFFFF',
+      main: '#B0B5B9',
+      dark: '#8D9296',
+      light: '#C7CBCE',
+      contrastText: '#1C363D',
     },
     background: {
-      default: '#F7F6F2',
-      paper: '#FFFFFF',
+      default: '#1C363D',
+      paper: '#1C363D',
     },
     text: {
-      primary: '#1A1A1A',
-      secondary: '#6B7280',
+      primary: '#E9F1EA',
+      secondary: '#B0B5B9',
     },
-    divider: '#E5E2DC',
+    divider: 'rgba(176,181,185,0.25)',
     error: { main: '#DC2626' },
     success: { main: '#16A34A' },
-    info: { main: '#1A3673' },
-    warning: { main: '#C5A059' },
+    info: { main: '#5FC4CB' },
+    warning: { main: '#F0A93E' },
   },
   typography: {
-    fontFamily: '"Inter", system-ui, sans-serif',
+    fontFamily: '"Sora", system-ui, sans-serif',
+    // Titoli in Sora Light col letter-spacing aumentato (vedi
+    // foundations-typography.html sul design system): non il bold di default
+    // di MUI. h4/h5/h6 restano medium/semibold, sono titoli di card/sezione
+    // piu' piccoli dove il peso leggero perderebbe leggibilita'.
+    h1: { fontWeight: 300, letterSpacing: '0.01em' },
+    h2: { fontWeight: 300, letterSpacing: '0.015em' },
+    h3: { fontWeight: 500 },
+    h4: { fontWeight: 500 },
+    h5: { fontWeight: 500 },
+    h6: { fontWeight: 600 },
     button: {
       textTransform: 'none',
       fontWeight: 600,
@@ -45,13 +55,28 @@ const theme = createTheme({
       styleOverrides: {
         body: {
           backgroundImage: 'none',
-          scrollbarColor: '#E5E2DC transparent',
+          scrollbarColor: 'rgba(176,181,185,0.25) transparent',
           '&::-webkit-scrollbar': { width: '6px' },
           '&::-webkit-scrollbar-track': { background: 'transparent' },
           '&::-webkit-scrollbar-thumb': {
-            background: '#E5E2DC',
+            background: 'rgba(176,181,185,0.25)',
             borderRadius: '3px',
             '&:hover': { background: '#B0B5B9' },
+          },
+        },
+        // Recharts focalizza internamente questo layer SVG quando si seleziona un dato.
+        // Il valore resta disponibile nel tooltip: rimuoviamo solo il ring nativo di Chrome.
+        '.recharts-surface g[tabindex="-1"]:focus': {
+          outline: 'none',
+        },
+      },
+    },
+    MuiButtonBase: {
+      styleOverrides: {
+        root: {
+          '&.Mui-focusVisible': {
+            outline: '2px solid #5FC4CB',
+            outlineOffset: '2px',
           },
         },
       },
@@ -59,32 +84,32 @@ const theme = createTheme({
     MuiButton: {
       styleOverrides: {
         root: {
-          borderRadius: 8,
+          borderRadius: 12,
           fontWeight: 600,
-          transition: 'transform 150ms ease, box-shadow 150ms ease',
+          minHeight: 44,
+          transition: 'background-color 150ms ease, border-color 150ms ease',
         },
         contained: {
-          backgroundColor: '#1A3673',
-          color: '#FFFFFF',
-          boxShadow: '0 1px 3px rgba(26,54,115,0.20)',
+          backgroundColor: '#5FC4CB',
+          color: '#1C363D',
+          boxShadow: 'none',
           '&:hover': {
-            backgroundColor: '#142959',
-            boxShadow: '0 4px 12px rgba(26,54,115,0.30)',
-            transform: 'translateY(-1px)',
+            backgroundColor: '#7ED0D6',
+            boxShadow: 'none',
           },
         },
         outlined: {
-          borderColor: '#E5E2DC',
-          color: '#1A1A1A',
+          borderColor: 'rgba(176,181,185,0.25)',
+          color: '#E9F1EA',
           '&:hover': {
-            borderColor: '#1A3673',
-            backgroundColor: 'rgba(26,54,115,0.04)',
+            borderColor: '#B0B5B9',
+            backgroundColor: 'rgba(233,241,234,0.04)',
           },
         },
         text: {
-          color: '#1A1A1A',
+          color: '#E9F1EA',
           '&:hover': {
-            backgroundColor: 'rgba(26,54,115,0.04)',
+            backgroundColor: 'rgba(233,241,234,0.04)',
           },
         },
       },
@@ -93,9 +118,9 @@ const theme = createTheme({
       styleOverrides: {
         root: {
           borderRadius: 12,
-          background: '#FFFFFF',
-          border: '1px solid #E5E2DC',
-          boxShadow: '0 1px 4px rgba(0,0,0,0.06)',
+          background: 'rgba(233,241,234,0.04)',
+          border: '1px solid rgba(176,181,185,0.25)',
+          boxShadow: 'none',
         },
       },
     },
@@ -103,36 +128,38 @@ const theme = createTheme({
       styleOverrides: {
         root: {
           backgroundImage: 'none',
-          border: '1px solid #E5E2DC',
+          backgroundColor: '#1C363D',
+          border: '1px solid rgba(176,181,185,0.25)',
         },
       },
     },
     MuiTab: {
       styleOverrides: {
         root: {
-          fontFamily: '"Inter", system-ui, sans-serif',
-          color: '#6B7280',
-          '&.Mui-selected': { color: '#1A3673' },
+          fontFamily: '"Sora", system-ui, sans-serif',
+          color: '#B0B5B9',
+          minHeight: 44,
+          '&.Mui-selected': { color: '#5FC4CB' },
         },
       },
     },
     MuiTabs: {
       styleOverrides: {
-        indicator: { backgroundColor: '#C5A059' },
+        indicator: { backgroundColor: '#5FC4CB' },
       },
     },
     MuiSlider: {
       styleOverrides: {
-        root: { color: '#1A3673' },
+        root: { color: '#5FC4CB' },
       },
     },
     MuiTextField: {
       styleOverrides: {
         root: {
           '& .MuiOutlinedInput-root': {
-            '& fieldset': { borderColor: '#E5E2DC' },
+            '& fieldset': { borderColor: 'rgba(176,181,185,0.25)' },
             '&:hover fieldset': { borderColor: '#B0B5B9' },
-            '&.Mui-focused fieldset': { borderColor: '#1A3673' },
+            '&.Mui-focused fieldset': { borderColor: '#5FC4CB' },
           },
         },
       },
@@ -140,43 +167,43 @@ const theme = createTheme({
     MuiTooltip: {
       styleOverrides: {
         tooltip: {
-          background: '#1A1A1A',
-          border: '1px solid #E5E2DC',
+          background: '#1C363D',
+          border: '1px solid rgba(176,181,185,0.25)',
           borderRadius: 8,
           fontSize: '0.8rem',
-          color: '#FFFFFF',
+          color: '#E9F1EA',
         },
       },
     },
     MuiChip: {
       styleOverrides: {
         root: {
-          borderRadius: 8,
-          border: '1px solid #E5E2DC',
-          backgroundColor: '#F7F6F2',
-          color: '#1A1A1A',
+          borderRadius: 999,
+          border: '1px solid rgba(176,181,185,0.25)',
+          backgroundColor: 'rgba(233,241,234,0.04)',
+          color: '#E9F1EA',
         },
       },
     },
     MuiDialog: {
       styleOverrides: {
         paper: {
-          background: '#FFFFFF',
-          border: '1px solid #E5E2DC',
+          background: '#1C363D',
+          border: '1px solid rgba(176,181,185,0.25)',
         },
       },
     },
     MuiSelect: {
       styleOverrides: {
         root: {
-          '& .MuiOutlinedInput-notchedOutline': { borderColor: '#E5E2DC' },
+          '& .MuiOutlinedInput-notchedOutline': { borderColor: 'rgba(176,181,185,0.25)' },
         },
       },
     },
     MuiLinearProgress: {
       styleOverrides: {
-        root: { backgroundColor: '#F0EDE8' },
-        bar: { backgroundColor: '#1A3673' },
+        root: { backgroundColor: 'rgba(176,181,185,0.18)' },
+        bar: { backgroundColor: '#5FC4CB' },
       },
     },
   },

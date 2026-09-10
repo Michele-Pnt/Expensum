@@ -96,7 +96,12 @@ def compute_historical_score(
     Match esatto sul nome normalizzato -> candidate trovato direttamente.
     Altrimenti clustering tra i candidate pending/promoted dell'utente, con due
     criteri alternativi:
-    - fuzzy ratio (difflib) >= `cluster_cutoff` — cattura typo/variazioni minori;
+    - fuzzy ratio (difflib.SequenceMatcher — NON sostituibile con rapidfuzz.fuzz.ratio:
+      algoritmi diversi, verificato che divergono ~19% su coppie casuali e sempre nella
+      direzione più permissiva su stringhe dissimili, es. "aperitivo"/"benzina" 0.13 vs
+      0.25 — rapidfuzz ricalibrerebbe silenziosamente CATEGORY_CANDIDATE_CLUSTER_CUTOFF
+      senza che nessuno l'abbia deciso) >= `cluster_cutoff` — cattura typo/variazioni
+      minori;
     - containment di token — se l'insieme di parole del pattern più corto è
       sottoinsieme di quello del pattern più lungo (es. {netflix} ⊆ {netflix,
       mensile}), sono considerati lo stesso pattern anche se il ratio testuale è

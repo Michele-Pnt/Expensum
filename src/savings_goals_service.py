@@ -7,7 +7,7 @@ come fanno gli endpoint /api/analytics/wealth, /capital-trend, /budget-status in
 src/dashboard/app.py. Il valore "adesso" di un obiettivo non e' mai persistito:
 si ricalcola on-read ad ogni chiamata.
 
-5 tipi di obiettivo supportati (vedi SavingsGoal.goal_type):
+6 tipi di obiettivo supportati (vedi SavingsGoal.goal_type):
 - net_savings: risparmio netto cumulato (entrate - uscite) dal start_date del goal.
 - account_balance: saldo di un conto specifico.
 - net_worth: capitale totale (somma saldi di tutti i conti).
@@ -15,6 +15,14 @@ si ricalcola on-read ad ogni chiamata.
   cumulativo — target_amount e' una percentuale, non un importo).
 - category_spending_reduction: spesa mensile in una categoria, da tenere sotto
   una soglia (target_amount).
+- emergency_fund: mediana della spesa mensile totale (tutte le categorie) sugli
+  ultimi fino a 6 mesi disponibili, moltiplicata per emergency_fund_months
+  (3/6/12, scelto dall'utente). A differenza degli altri tipi, target_amount
+  NON è il valore autoritativo: viene ricalcolato a ogni lettura (vedi
+  compute_goal_progress) perché la mediana di spesa cambia mese per mese. Il
+  "current" segue account_balance se account_id è impostato, altrimenti
+  net_worth (somma di tutti i conti) — l'utente può cambiare account_id in
+  seguito per tracciare un conto dedicato al fondo.
 """
 
 from __future__ import annotations
@@ -31,7 +39,12 @@ GOAL_TYPES = {
     "net_worth",
     "savings_rate",
     "category_spending_reduction",
+    "emergency_fund",
 }
+
+# Finestra usata per la mediana di spesa del fondo emergenza: fino a 6 mesi,
+# meno se lo storico e' piu' corto (mai un errore, solo meno punti).
+EMERGENCY_FUND_MEDIAN_MONTHS = 6
 
 # Finestra di storico usata per stimare il ritmo mensile (ETA) — stessa finestra
 # usata da MonthlyPlanBuilder.MONTHS_HISTORY per coerenza con il resto del progetto.
@@ -210,6 +223,56 @@ def _category_spending_monthly_series(storage, goal: dict, today: date) -> list[
     return [totals[k] for k in sorted(totals.keys())]
 
 
+def _monthly_expense_series(storage, today: date, months: int) -> list[float]:
+    """Serie mensile della spesa TOTALE (tutte le categorie), fino a `months` mesi
+    indietro incluso quello corrente. Meno punti se lo storico e' piu' corto: mai
+    un errore, il chiamante (_median) gestisce liste corte o vuote."""
+    y, m = today.year, today.month
+    for _ in range(months - 1):
+        m -= 1
+        if m == 0:
+            m = 12
+            y -= 1
+    start = date(y, m, 1)
+    expenses = storage.fetch_all_transactions(start, today)
+    totals: dict[tuple[int, int], float] = {}
+    for e in expenses:
+        key = (e["date"].year, e["date"].month)
+        totals[key] = totals.get(key, 0.0) + e["amount"]
+    return [totals[k] for k in sorted(totals.keys())]
+
+
+def _median(values: list[float]) -> float:
+    """Mediana di una lista di valori. 0.0 su lista vuota."""
+    if not values:
+        return 0.0
+    ordered = sorted(values)
+    n = len(ordered)
+    mid = n // 2
+    if n % 2 == 1:
+        return ordered[mid]
+    return (ordered[mid - 1] + ordered[mid]) / 2
+
+
+def _emergency_fund_target(storage, goal: dict, today: date) -> float:
+    """Mediana della spesa mensile totale sugli ultimi (fino a) 6 mesi, moltiplicata
+    per i mesi di copertura scelti dall'utente. Ricalcolata ad ogni lettura: la
+    spesa mediana cambia mese per mese, il target non e' mai un valore fisso."""
+    months_coverage = goal.get("emergency_fund_months") or EMERGENCY_FUND_MEDIAN_MONTHS
+    series = _monthly_expense_series(storage, today, EMERGENCY_FUND_MEDIAN_MONTHS)
+    return _median(series) * months_coverage
+
+
+def _emergency_fund_current(storage, goal: dict) -> float:
+    """Saldo del conto collegato se impostato, altrimenti patrimonio totale
+    (stessa scelta di default di net_worth): un fondo emergenza generico non e'
+    per forza vincolato a un conto specifico."""
+    if goal.get("account_id"):
+        current = _account_balance_current(storage, goal)
+        return current if current is not None else 0.0
+    return _net_worth_current(storage)
+
+
 # ---------------------------------------------------------------------------
 # API principale: progresso corrente + ETA
 # ---------------------------------------------------------------------------
@@ -222,47 +285,50 @@ def compute_goal_progress(storage, goal: dict, today: date | None = None) -> dic
     """
     today = today or date.today()
     goal_type = goal["goal_type"]
-    target = float(goal["target_amount"])
+    # emergency_fund non ha ancora un target_amount quando questa funzione viene
+    # chiamata per calcolarlo la prima volta (vedi savings_goals_create): il
+    # fallback a 0 qui e' innocuo, il branch emergency_fund lo ricalcola subito.
+    target = float(goal.get("target_amount", 0) or 0)
 
     if goal_type == "net_savings":
         current = _net_savings_current(storage, goal, today)
         series = _net_savings_monthly_series(storage, goal, today)
         pct = round(max(current, 0.0) / target * 100, 1) if target > 0 else 0.0
         eta = _eta_from_increasing_series(series, current, target, today)
-        return {"current": current, "progress_pct": pct, "eta_date": eta, "evaluable": True, "note": None}
+        return {"current": current, "progress_pct": pct, "eta_date": eta, "evaluable": True, "note": None, "target_amount": target}
 
     if goal_type == "account_balance":
         current = _account_balance_current(storage, goal)
         if current is None:
             return {"current": None, "progress_pct": 0.0, "eta_date": None,
-                     "evaluable": False, "note": "Il conto collegato non esiste più"}
+                     "evaluable": False, "note": "Il conto collegato non esiste più", "target_amount": target}
         series = _wealth_monthly_series(storage, today, account_id=goal["account_id"])
         pct = round(max(current, 0.0) / target * 100, 1) if target > 0 else 0.0
         eta = _eta_from_increasing_series(series, current, target, today)
-        return {"current": current, "progress_pct": pct, "eta_date": eta, "evaluable": True, "note": None}
+        return {"current": current, "progress_pct": pct, "eta_date": eta, "evaluable": True, "note": None, "target_amount": target}
 
     if goal_type == "net_worth":
         current = _net_worth_current(storage)
         series = _wealth_monthly_series(storage, today, account_id=None)
         pct = round(max(current, 0.0) / target * 100, 1) if target > 0 else 0.0
         eta = _eta_from_increasing_series(series, current, target, today)
-        return {"current": current, "progress_pct": pct, "eta_date": eta, "evaluable": True, "note": None}
+        return {"current": current, "progress_pct": pct, "eta_date": eta, "evaluable": True, "note": None, "target_amount": target}
 
     if goal_type == "savings_rate":
         rate = _savings_rate_current_month(storage, today)
         if not rate["evaluable"]:
             return {"current": None, "progress_pct": 0.0, "eta_date": None,
-                     "evaluable": False, "note": "Dati insufficienti (nessuna entrata questo mese)"}
+                     "evaluable": False, "note": "Dati insufficienti (nessuna entrata questo mese)", "target_amount": target}
         pct = round(rate["saved_pct"] / target * 100, 1) if target > 0 else 0.0
         return {"current": rate["saved_pct"], "progress_pct": pct, "eta_date": None,
-                 "evaluable": True, "note": None}
+                 "evaluable": True, "note": None, "target_amount": target}
 
     if goal_type == "category_spending_reduction":
         spent = _category_spending_current_month(storage, goal, today)
         cat_name = _category_name_for(storage, goal.get("category_id"))
         if cat_name is None:
             return {"current": None, "progress_pct": 0.0, "eta_date": None,
-                     "evaluable": False, "note": "La categoria collegata non esiste più"}
+                     "evaluable": False, "note": "La categoria collegata non esiste più", "target_amount": target}
         # "Progresso" = quanto sei sotto la soglia (100% = esattamente in linea col target)
         pct = round(max(0.0, (1 - spent / target)) * 100, 1) if target > 0 else 0.0
         series = _category_spending_monthly_series(storage, goal, today)
@@ -271,7 +337,15 @@ def compute_goal_progress(storage, goal: dict, today: date | None = None) -> dic
         eta = _eta_from_increasing_series(
             [-v for v in series], current=-spent, target=-target, today=today
         )
-        return {"current": spent, "progress_pct": pct, "eta_date": eta, "evaluable": True, "note": None}
+        return {"current": spent, "progress_pct": pct, "eta_date": eta, "evaluable": True, "note": None, "target_amount": target}
+
+    if goal_type == "emergency_fund":
+        target = _emergency_fund_target(storage, goal, today)
+        current = _emergency_fund_current(storage, goal)
+        series = _wealth_monthly_series(storage, today, account_id=goal.get("account_id"))
+        pct = round(max(current, 0.0) / target * 100, 1) if target > 0 else 0.0
+        eta = _eta_from_increasing_series(series, current, target, today)
+        return {"current": current, "progress_pct": pct, "eta_date": eta, "evaluable": True, "note": None, "target_amount": target}
 
     raise ValueError(f"goal_type sconosciuto: {goal_type}")
 
@@ -313,7 +387,7 @@ def compute_monthly_score(storage, goal: dict, progress: dict, today: date | Non
         return {"score_label": "Dati insufficienti", "pace_effettivo": None, "pace_richiesto": None}
 
     if goal_type == "savings_rate":
-        target = float(goal["target_amount"])
+        target = progress.get("target_amount", float(goal["target_amount"]))
         saved_pct = progress["current"]
         if saved_pct >= target + 5:
             label = "Ottimo mese"
@@ -335,7 +409,7 @@ def compute_monthly_score(storage, goal: dict, progress: dict, today: date | Non
 
     target_date = date.fromisoformat(target_date_str)
     start_date = date.fromisoformat(goal["start_date"])
-    target = float(goal["target_amount"])
+    target = progress.get("target_amount", float(goal["target_amount"]))
     current = progress["current"]
 
     months_total = max(1, (target_date.year - start_date.year) * 12 + (target_date.month - start_date.month))
@@ -356,6 +430,8 @@ def compute_monthly_score(storage, goal: dict, progress: dict, today: date | Non
             series = _net_savings_monthly_series(storage, goal, today)
         elif goal_type == "account_balance":
             series = _wealth_monthly_series(storage, today, account_id=goal["account_id"])
+        elif goal_type == "emergency_fund":
+            series = _wealth_monthly_series(storage, today, account_id=goal.get("account_id"))
         else:  # net_worth
             series = _wealth_monthly_series(storage, today, account_id=None)
         pace_effettivo = _weighted_monthly_delta(series) if len(series) >= 2 else None
@@ -374,34 +450,121 @@ def compute_monthly_score(storage, goal: dict, progress: dict, today: date | Non
 # Spiegazione testuale — stessa funzione per webapp e Telegram
 # ---------------------------------------------------------------------------
 
-def explain_score(goal: dict, score: dict, markdown: bool = True) -> str:
+def explain_score(goal: dict, score: dict, markdown: bool = True, category_name: str | None = None) -> str:
     """Genera la frase di spiegazione del voto, identica (a meno dello stile) su
     webapp e Telegram — mai numeri incoerenti tra i due canali.
+
+    `category_name` serve solo per `category_spending_reduction` (il dict `goal`
+    ha solo `category_id`): il chiamante lo risolve con `_category_name_for`
+    quando ha `storage` a disposizione. Senza, si ripiega su "questa categoria".
     """
     label = score["score_label"]
     bold = (lambda s: f"**{s}**") if markdown else (lambda s: s)
+    goal_type = goal["goal_type"]
 
     if label == "Dati insufficienti":
-        return f"{bold(label)} — non ci sono ancora abbastanza dati per valutare questo obiettivo."
+        return (
+            f"{bold(label)}: non ci sono ancora abbastanza dati per valutare questo obiettivo. "
+            "Prova a portarlo avanti per conto tuo nel frattempo: dopo un mese di storico, "
+            "Expensum inizierà a darti suggerimenti mirati per raggiungerlo."
+        )
 
-    if goal["goal_type"] == "savings_rate":
+    if goal_type == "savings_rate":
         saved_pct = score["pace_effettivo"]
         target_pct = score["pace_richiesto"]
         return (
-            f"{bold(label)} — questo mese hai risparmiato il {saved_pct:.0f}% del reddito, "
+            f"{bold(label)}: questo mese hai risparmiato il {saved_pct:.0f}% del reddito, "
             f"il tuo obiettivo è {target_pct:.0f}%."
         )
 
     pace_eff = score.get("pace_effettivo")
     pace_req = score.get("pace_richiesto")
     if pace_eff is None or pace_req is None or pace_req <= 0:
-        return f"{bold(label)} — obiettivo raggiunto o senza scadenza definita."
+        return f"{bold(label)}: obiettivo raggiunto o senza scadenza definita."
 
     target_date_str = goal.get("target_date")
-    target_label = f" entro {_format_date_it(target_date_str)}" if target_date_str else ""
+    target_label = f" entro il {_format_date_it(target_date_str)}" if target_date_str else ""
+
+    # pace_eff e' una MEDIA PONDERATA dei cambiamenti mese su mese sulla finestra
+    # storica disponibile (i mesi piu' recenti pesano di piu', non e' ne' il
+    # delta dell'ultimo mese ne' una media piatta) — vedi _weighted_monthly_delta.
+    # "in media negli ultimi mesi" nel testo e' li' apposta per non far credere
+    # che sia un confronto secco col mese scorso. Se arrotondato a 0 (es. -0.4),
+    # niente "in aumento/calo di 0€": si dichiara stabile, altrimenti il segno
+    # del ramo (aumento/calo) non corrisponde al numero mostrato.
+    is_stable = round(pace_eff) == 0
+
+    if goal_type == "category_spending_reduction":
+        # pace_eff/pace_req qui sono già "quanto scende la spesa al mese", non
+        # un risparmio: parlarne come se fosse denaro accantonato confonde
+        # l'utente. pace_eff < 0 = la spesa sta SALENDO, non scendendo.
+        cat_label = category_name or "questa categoria"
+        if is_stable:
+            return (
+                f"{bold(label)}: la spesa in {cat_label} è rimasta stabile negli ultimi mesi, "
+                f"nessun calo in corso. Per rientrare sotto la soglia{target_label} serve una "
+                f"riduzione di circa {pace_req:.0f}€ al mese."
+            )
+        if pace_eff < 0:
+            return (
+                f"{bold(label)}: in media negli ultimi mesi la spesa in {cat_label} è cresciuta "
+                f"di circa {abs(pace_eff):.0f}€ al mese, nella direzione sbagliata. Per rientrare "
+                f"sotto la soglia{target_label} dovresti invece ridurla di circa {pace_req:.0f}€ al mese."
+            )
+        return (
+            f"{bold(label)}: in media negli ultimi mesi stai riducendo la spesa in {cat_label} "
+            f"di circa {pace_eff:.0f}€ al mese. Per rientrare sotto la soglia{target_label} serve "
+            f"un calo di circa {pace_req:.0f}€ al mese."
+        )
+
+    if goal_type == "emergency_fund":
+        # Come account_balance/net_worth: il fondo puo' seguire un conto
+        # specifico o il totale, e la frase deve dirlo (vedi _emergency_fund_current).
+        scope_label = "sul conto collegato" if goal.get("account_id") else "sul totale dei tuoi conti"
+        if is_stable:
+            return (
+                f"{bold(label)}: il fondo emergenza ({scope_label}) è rimasto stabile negli "
+                f"ultimi mesi. Per completarlo{target_label} dovresti accantonarne circa "
+                f"{pace_req:.0f}€ al mese."
+            )
+        if pace_eff < 0:
+            return (
+                f"{bold(label)}: in media negli ultimi mesi il fondo emergenza ({scope_label}) "
+                f"è calato di circa {abs(pace_eff):.0f}€ al mese. Per coprirlo{target_label} "
+                f"dovresti accantonarne circa {pace_req:.0f}€ al mese."
+            )
+        return (
+            f"{bold(label)}: in media negli ultimi mesi stai accantonando circa {pace_eff:.0f}€ "
+            f"al mese per il fondo emergenza ({scope_label}), per completarlo{target_label} ne "
+            f"servirebbero circa {pace_req:.0f}€ al mese."
+        )
+
+    # net_savings/account_balance/net_worth: net_savings e' un flusso (entrate -
+    # uscite), non legato a un conto, quindi resta generico. account_balance e
+    # net_worth invece leggono un saldo conti, e la frase deve specificare se e'
+    # un conto preciso o il totale, altrimenti sembrano lo stesso obiettivo.
+    if goal_type == "account_balance":
+        scope_label = " su questo conto"
+    elif goal_type == "net_worth":
+        scope_label = " in generale su tutti i tuoi conti"
+    else:
+        scope_label = ""
+
+    if is_stable:
+        return (
+            f"{bold(label)}: il saldo{scope_label} è rimasto stabile negli ultimi mesi. Per "
+            f"centrare l'obiettivo{target_label} ti servirebbero circa {pace_req:.0f}€ al mese."
+        )
+    if pace_eff < 0:
+        return (
+            f"{bold(label)}: in media negli ultimi mesi stai perdendo circa {abs(pace_eff):.0f}€ al "
+            f"mese{scope_label}. Per centrare l'obiettivo{target_label}, ne dovresti risparmiare "
+            f"circa {pace_req:.0f}€ al mese."
+        )
     return (
-        f"{bold(label)} — stai risparmiando ~{pace_eff:.0f}€/mese, per centrare "
-        f"l'obiettivo{target_label} ne servirebbero ~{pace_req:.0f}€/mese."
+        f"{bold(label)}: in media negli ultimi mesi hai risparmiato circa {pace_eff:.0f}€ al "
+        f"mese{scope_label}, per centrare l'obiettivo{target_label} ne servirebbero circa "
+        f"{pace_req:.0f}€ al mese."
     )
 
 
@@ -452,8 +615,17 @@ def is_goal_reached(storage, goal: dict, today: date | None = None) -> bool:
     """
     today = today or date.today()
     goal_type = goal["goal_type"]
+    if goal_type == "savings_rate":
+        return False
+
+    if goal_type == "emergency_fund":
+        target = _emergency_fund_target(storage, goal, today)
+        if target <= 0:
+            return False
+        return _emergency_fund_current(storage, goal) >= target
+
     target = float(goal["target_amount"])
-    if target <= 0 or goal_type == "savings_rate":
+    if target <= 0:
         return False
 
     if goal_type == "net_savings":

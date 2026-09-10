@@ -28,7 +28,6 @@ from src.gamification.registry import (
     BY_CODE,
     BY_FAMILY,
     BY_METRIC,
-    FAMILIES_BY_METRIC,
     FAMILY_TITLES,
     AchievementDef,
     family_title,

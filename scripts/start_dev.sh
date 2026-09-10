@@ -29,8 +29,16 @@ fi
 # da uno stato pulito.
 echo "Pulizia processi residui..."
 pkill -f "ngrok http 3000" 2>/dev/null || true
-pkill -f "$VENV_PYTHON bot.py" 2>/dev/null || true
-pkill -f "$VENV_PYTHON src/dashboard/app.py" 2>/dev/null || true
+# Pattern senza prefisso interprete: un bot.py/dashboard avviato a mano con un
+# python diverso da $VENV_PYTHON non veniva ucciso, restava a servire
+# richieste col vecchio .env (es. sqlite invece di Postgres) mentre il
+# processo nuovo falliva silenziosamente il bind sulla stessa porta. Match
+# sull'argomento finale, indipendente dall'interprete.
+pkill -f "[ /]bot\.py$" 2>/dev/null || true
+pkill -f "src/dashboard/app\.py$" 2>/dev/null || true
+# Rete di sicurezza: libera comunque la porta della dashboard (5050, vedi
+# src/dashboard/app.py) da qualunque cosa la occupi, a prescindere dal pattern.
+lsof -ti:5050 2>/dev/null | xargs kill 2>/dev/null || true
 pkill -f "tail -f $LOG_DIR/ngrok.log" 2>/dev/null || true
 pkill -f "tail -f $LOG_DIR/bot.log" 2>/dev/null || true
 pkill -f "tail -f $LOG_DIR/dashboard.log" 2>/dev/null || true

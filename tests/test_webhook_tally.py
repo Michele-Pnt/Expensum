@@ -1,9 +1,34 @@
+import base64
+import hashlib
+import hmac
 import json
 import threading
 import pytest
 from unittest.mock import patch
 
 pytestmark = pytest.mark.e2e
+
+
+@pytest.fixture(autouse=True)
+def tally_signing_secret(monkeypatch):
+    """Imposta un segreto fittizio senza leggere la configurazione reale."""
+    from config import Config
+
+    monkeypatch.setattr(Config, "TALLY_WEBHOOK_SIGNING_SECRET", "test-signing-secret", raising=False)
+
+
+def _signed_tally_post(client, payload, secret="test-signing-secret"):
+    """Invia il body esatto che Tally firmerebbe con il segreto di test."""
+    body = json.dumps(payload).encode()
+    signature = base64.b64encode(
+        hmac.new(secret.encode(), body, hashlib.sha256).digest()
+    ).decode()
+    return client.post(
+        "/webhooks/tally",
+        data=body,
+        content_type="application/json",
+        headers={"Tally-Signature": signature},
+    )
 
 
 def _tally_payload(submission_id="sub_123", email="lead@example.com"):
@@ -41,13 +66,11 @@ class _SyncThread(threading.Thread):
 def test_webhook_tally_saves_lead_and_syncs_to_brevo(client):
     from src.dashboard.app import store
 
-    with patch("src.dashboard.app.threading.Thread", _SyncThread), \
-         patch("src.dashboard.app.brevo_client.upsert_contact") as mock_upsert, \
-         patch("src.dashboard.app.beta_access.grant_beta_access", return_value=None):
-        response = client.post(
-            "/webhooks/tally",
-            data=json.dumps(_tally_payload(submission_id="sub_new", email="new@example.com")),
-            content_type="application/json",
+    with patch("src.dashboard.blueprints.public.threading.Thread", _SyncThread), \
+         patch("src.dashboard.blueprints.public.brevo_client.upsert_contact") as mock_upsert, \
+         patch("src.dashboard.blueprints.public.beta_access.grant_beta_access", return_value=None):
+        response = _signed_tally_post(
+            client, _tally_payload(submission_id="sub_new", email="new@example.com")
         )
         assert response.status_code == 200
 
@@ -60,57 +83,51 @@ def test_webhook_tally_saves_lead_and_syncs_to_brevo(client):
 
 
 def test_webhook_tally_is_idempotent_on_duplicate_submission(client):
-    with patch("src.dashboard.app.threading.Thread", _SyncThread), \
-         patch("src.dashboard.app.brevo_client.upsert_contact") as mock_upsert, \
-         patch("src.dashboard.app.beta_access.grant_beta_access", return_value=None):
+    with patch("src.dashboard.blueprints.public.threading.Thread", _SyncThread), \
+         patch("src.dashboard.blueprints.public.brevo_client.upsert_contact") as mock_upsert, \
+         patch("src.dashboard.blueprints.public.beta_access.grant_beta_access", return_value=None):
         payload = _tally_payload(submission_id="sub_dup", email="dup@example.com")
 
-        first = client.post("/webhooks/tally", data=json.dumps(payload), content_type="application/json")
+        first = _signed_tally_post(client, payload)
         assert first.status_code == 200
         assert mock_upsert.call_count == 1
 
         # Tally può reinviare lo stesso webhook (retry): stesso submissionId,
         # non deve rifare il sync Brevo una seconda volta.
-        second = client.post("/webhooks/tally", data=json.dumps(payload), content_type="application/json")
+        second = _signed_tally_post(client, payload)
         assert second.status_code == 200
         assert mock_upsert.call_count == 1
 
 
 def test_webhook_tally_missing_submission_id_returns_400(client):
-    response = client.post(
-        "/webhooks/tally",
-        data=json.dumps({"data": {"fields": []}}),
-        content_type="application/json",
-    )
+    response = _signed_tally_post(client, {"data": {"fields": []}})
     assert response.status_code == 400
 
 
 def test_webhook_tally_without_email_does_not_sync(client):
-    with patch("src.dashboard.app.threading.Thread", _SyncThread), \
-         patch("src.dashboard.app.brevo_client.upsert_contact") as mock_upsert:
+    with patch("src.dashboard.blueprints.public.threading.Thread", _SyncThread), \
+         patch("src.dashboard.blueprints.public.brevo_client.upsert_contact") as mock_upsert:
         payload = _tally_payload(submission_id="sub_noemail")
         payload["data"]["fields"] = [{"key": "q", "label": "Nome", "type": "INPUT_TEXT", "value": "Mario"}]
 
-        response = client.post("/webhooks/tally", data=json.dumps(payload), content_type="application/json")
+        response = _signed_tally_post(client, payload)
         assert response.status_code == 200
 
     mock_upsert.assert_not_called()
 
 
 def test_webhook_tally_auto_grants_beta_access_when_enabled(client, monkeypatch):
-    from src.dashboard import app as app_module
+    from config import Config
 
-    monkeypatch.setattr(app_module.Config, "AUTO_BETA_ACCESS_ENABLED", True)
-    monkeypatch.setattr(app_module.Config, "AUTO_BETA_ACCESS_MAX_ACCOUNTS", 50)
+    monkeypatch.setattr(Config, "AUTO_BETA_ACCESS_ENABLED", True)
+    monkeypatch.setattr(Config, "AUTO_BETA_ACCESS_MAX_ACCOUNTS", 50)
 
-    with patch("src.dashboard.app.threading.Thread", _SyncThread), \
-         patch("src.dashboard.app.brevo_client.upsert_contact"), \
-         patch("src.dashboard.app.beta_access.grant_beta_access", return_value=("web_abc", "pwd")) as mock_grant, \
+    with patch("src.dashboard.blueprints.public.threading.Thread", _SyncThread), \
+         patch("src.dashboard.blueprints.public.brevo_client.upsert_contact"), \
+         patch("src.dashboard.blueprints.public.beta_access.grant_beta_access", return_value=("web_abc", "pwd")) as mock_grant, \
          patch("src.dashboard.app.store.mark_tally_lead_beta_access_granted") as mock_mark:
-        response = client.post(
-            "/webhooks/tally",
-            data=json.dumps(_tally_payload(submission_id="sub_auto", email="auto@example.com")),
-            content_type="application/json",
+        response = _signed_tally_post(
+            client, _tally_payload(submission_id="sub_auto", email="auto@example.com")
         )
         assert response.status_code == 200
 
@@ -122,17 +139,15 @@ def test_webhook_tally_auto_grants_beta_access_when_enabled(client, monkeypatch)
 
 
 def test_webhook_tally_skips_auto_grant_when_disabled(client, monkeypatch):
-    from src.dashboard import app as app_module
+    from config import Config
 
-    monkeypatch.setattr(app_module.Config, "AUTO_BETA_ACCESS_ENABLED", False)
+    monkeypatch.setattr(Config, "AUTO_BETA_ACCESS_ENABLED", False)
 
-    with patch("src.dashboard.app.threading.Thread", _SyncThread), \
-         patch("src.dashboard.app.brevo_client.upsert_contact"), \
-         patch("src.dashboard.app.beta_access.grant_beta_access") as mock_grant:
-        response = client.post(
-            "/webhooks/tally",
-            data=json.dumps(_tally_payload(submission_id="sub_off", email="off@example.com")),
-            content_type="application/json",
+    with patch("src.dashboard.blueprints.public.threading.Thread", _SyncThread), \
+         patch("src.dashboard.blueprints.public.brevo_client.upsert_contact"), \
+         patch("src.dashboard.blueprints.public.beta_access.grant_beta_access") as mock_grant:
+        response = _signed_tally_post(
+            client, _tally_payload(submission_id="sub_off", email="off@example.com")
         )
         assert response.status_code == 200
 
@@ -140,20 +155,44 @@ def test_webhook_tally_skips_auto_grant_when_disabled(client, monkeypatch):
 
 
 def test_webhook_tally_skips_auto_grant_when_cap_reached(client, monkeypatch):
-    from src.dashboard import app as app_module
+    from config import Config
 
-    monkeypatch.setattr(app_module.Config, "AUTO_BETA_ACCESS_ENABLED", True)
-    monkeypatch.setattr(app_module.Config, "AUTO_BETA_ACCESS_MAX_ACCOUNTS", 1)
+    monkeypatch.setattr(Config, "AUTO_BETA_ACCESS_ENABLED", True)
+    monkeypatch.setattr(Config, "AUTO_BETA_ACCESS_MAX_ACCOUNTS", 1)
 
-    with patch("src.dashboard.app.threading.Thread", _SyncThread), \
-         patch("src.dashboard.app.brevo_client.upsert_contact"), \
+    with patch("src.dashboard.blueprints.public.threading.Thread", _SyncThread), \
+         patch("src.dashboard.blueprints.public.brevo_client.upsert_contact"), \
          patch("src.dashboard.app.store.count_beta_accounts_granted", return_value=1), \
-         patch("src.dashboard.app.beta_access.grant_beta_access") as mock_grant:
-        response = client.post(
-            "/webhooks/tally",
-            data=json.dumps(_tally_payload(submission_id="sub_cap", email="cap@example.com")),
-            content_type="application/json",
+         patch("src.dashboard.blueprints.public.beta_access.grant_beta_access") as mock_grant:
+        response = _signed_tally_post(
+            client, _tally_payload(submission_id="sub_cap", email="cap@example.com")
         )
         assert response.status_code == 200
 
     mock_grant.assert_not_called()
+
+
+def test_webhook_tally_rejects_invalid_signature(client):
+    """Una richiesta non firmata da Tally non puo' creare un lead."""
+    response = client.post(
+        "/webhooks/tally",
+        data=json.dumps(_tally_payload(submission_id="sub_forged")),
+        content_type="application/json",
+        headers={"Tally-Signature": "not-a-valid-signature"},
+    )
+
+    assert response.status_code == 401
+
+
+def test_webhook_tally_is_unavailable_without_signing_secret(client, monkeypatch):
+    """Un deploy privo di segreto non deve tornare ad accettare webhook anonimi."""
+    from config import Config
+
+    monkeypatch.setattr(Config, "TALLY_WEBHOOK_SIGNING_SECRET", "")
+    response = client.post(
+        "/webhooks/tally",
+        data=json.dumps(_tally_payload(submission_id="sub_unconfigured")),
+        content_type="application/json",
+    )
+
+    assert response.status_code == 503

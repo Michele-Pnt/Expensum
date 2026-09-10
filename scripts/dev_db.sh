@@ -25,7 +25,8 @@ _load_env() {
     set -a; # shellcheck disable=SC1091
     source "$ROOT_DIR/.env.local"; set +a
   else
-    echo "⚠️  Manca .env.local — copialo da .env.local.example" >&2
+    echo "Errore: manca .env.local — migrazione annullata per evitare il fallback SQLite." >&2
+    return 1
   fi
 }
 
@@ -43,9 +44,13 @@ case "${1:-}" in
     ;;
   migrate)
     _load_env
+    if [[ -z "${MIGRATION_DATABASE_URL:-}" ]]; then
+      echo "Errore: MIGRATION_DATABASE_URL è obbligatoria per le migration PostgreSQL." >&2
+      exit 1
+    fi
     cd "$ROOT_DIR"
     echo "⏫ alembic upgrade head (ruolo OWNER)…"
-    MIGRATION_DATABASE_URL="${MIGRATION_DATABASE_URL:-}" alembic upgrade head
+    "$ROOT_DIR/.venv/bin/alembic" upgrade head
     ;;
   psql)     docker exec -it "$CONTAINER" psql -U expensum -d expensum ;;
   psql-app) docker exec -it "$CONTAINER" psql -U expensum_app -d expensum ;;

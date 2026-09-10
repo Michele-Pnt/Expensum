@@ -444,42 +444,63 @@ class TestWeeklyPlanBuilder:
         assert r.limite_reale >= 0.0
         assert r.status in ("ok", "attenzione", "sforato")
 
+    @staticmethod
+    def _section(content, heading: str):
+        """Cerca la sezione con l'heading dato dentro `content['sections']`."""
+        for section in content["sections"]:
+            if section["heading"] == heading:
+                return section
+        raise AssertionError(f"Sezione '{heading}' non trovata: {[s['heading'] for s in content['sections']]}")
+
     def test_fallback_text_generated(self):
+        # Ex `build_fallback_text` (Markdown): oggi il contenuto è un ReportContent
+        # strutturato (vedi src/report_schema.py). Verifica lo stesso comportamento
+        # di business (titolo del piano settimanale + KPI presenti) sulla struttura
+        # dict invece che su substring di testo libero.
         storage = self._make_storage()
         data = WeeklyPlanBuilder().build(storage)
-        text = WeeklyPlanBuilder().build_fallback_text(data)
-        assert "Report Budget" in text
-        assert "Saldo" in text
-        assert "Entrate" in text
-        assert "Settimane rimaste" in text
+        content = WeeklyPlanBuilder().build_content(data)
+        assert content["title"].startswith("Piano Settimanale")
+        kpi_labels = {k["label"] for k in content["kpis"]}
+        assert "Saldo conti" in kpi_labels
+        assert "Entrate mese" in kpi_labels
+        assert "Settimane rimaste" in kpi_labels
 
     def test_fallback_text_no_code_block_table(self):
-        # La tabella è ora un PNG — il testo non deve contenere code block
+        # Con il vecchio fallback Markdown la tabella budget era un blocco di
+        # codice ASCII con substring "```"; con ReportContent la tabella è una
+        # struttura tipizzata (type == "table"), quindi il concetto di "niente
+        # code block" non si applica più a livello di stringa. Verifichiamo
+        # invece che la sezione budget sia effettivamente strutturata come
+        # tabella (non testo libero che potrebbe reintrodurre ASCII art).
         storage = self._make_storage()
         data = WeeklyPlanBuilder().build(storage)
-        text = WeeklyPlanBuilder().build_fallback_text(data)
-        assert "```" not in text
+        content = WeeklyPlanBuilder().build_content(data)
+        budget_section = self._section(content, "Budget per categoria")
+        assert budget_section["type"] == "table"
 
     def test_fallback_text_no_budget_category_shown(self):
         storage = self._make_storage()
         data = WeeklyPlanBuilder().build(storage)
         data.no_budget_cats["Svago"] = 25.0
-        text = WeeklyPlanBuilder().build_fallback_text(data)
-        assert "Categorie senza budget" in text
-        assert "Svago" in text
+        content = WeeklyPlanBuilder().build_content(data)
+        section = self._section(content, "Categorie senza budget (stima storica)")
+        assert any("Svago" in item for item in section["items"])
 
     def test_fallback_text_abbonamenti_shown(self):
         storage = self._make_storage()
         data = WeeklyPlanBuilder().build(storage)
-        text = WeeklyPlanBuilder().build_fallback_text(data)
-        assert "Abbonamenti" in text
+        content = WeeklyPlanBuilder().build_content(data)
+        self._section(content, "Abbonamenti in uscita questa settimana")
 
     def test_fallback_text_no_budget_message_when_empty(self):
         storage = self._make_storage()
         data = WeeklyPlanBuilder().build(storage)
         data.budget_results = {}
-        text = WeeklyPlanBuilder().build_fallback_text(data)
-        assert "budget impostato" in text
+        content = WeeklyPlanBuilder().build_content(data)
+        section = self._section(content, "Budget per categoria")
+        assert section["rows"] == []
+        assert "budget impostato" in section["empty_message"]
 
     def test_to_prompt_text_contains_key_sections(self):
         storage = self._make_storage()

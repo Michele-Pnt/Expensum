@@ -3,6 +3,8 @@
 import { useEffect, useState } from "react";
 import { Box, Card, CardHeader, CardContent, Typography, LinearProgress, Chip, Button } from "@mui/material";
 import Link from "next/link";
+import { Target } from "lucide-react";
+import { apiFetch } from "@/lib/api";
 
 interface SavingsGoal {
   id: number;
@@ -12,12 +14,6 @@ interface SavingsGoal {
   progress: number;
   score_label: string;
   eta_date: string | null;
-}
-
-function getTelegramInitData(): string {
-  if (typeof window === "undefined") return "";
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  return (window as any).Telegram?.WebApp?.initData ?? "";
 }
 
 function scoreColor(label: string): "success" | "info" | "warning" | "error" | "default" {
@@ -36,10 +32,7 @@ export default function SavingsGoalsProgress() {
   const [goals, setGoals] = useState<SavingsGoal[] | null>(null);
 
   useEffect(() => {
-    const initData = getTelegramInitData();
-    const headers: HeadersInit = initData ? { "X-Telegram-Init-Data": initData } : {};
-    fetch("/api/savings-goals", { headers })
-      .then((res) => (res.ok ? res.json() : { goals: [] }))
+    apiFetch<{ goals: SavingsGoal[] }>("/api/savings-goals")
       .then((data) => setGoals(data.goals || []))
       .catch(() => setGoals([]));
   }, []);
@@ -53,8 +46,13 @@ export default function SavingsGoalsProgress() {
   return (
     <Card sx={{ mb: 2, borderRadius: 2 }}>
       <CardHeader
-        title="🎯 Obiettivi di risparmio"
-        titleTypographyProps={{ variant: "subtitle2", fontWeight: 700 }}
+        title={
+          <Box sx={{ display: "flex", alignItems: "center", gap: 0.75 }}>
+            <Target size={16} strokeWidth={1.5} aria-hidden="true" />
+            Obiettivi di risparmio
+          </Box>
+        }
+        titleTypographyProps={{ variant: "subtitle2", fontWeight: 500 }}
         action={
           <Button component={Link} href="/goals" size="small">Vedi tutti</Button>
         }

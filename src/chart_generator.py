@@ -2,7 +2,6 @@
 src/chart_generator.py — Generazione di grafici da inviare via Telegram.
 """
 
-from PIL import GimpGradientFile
 import os
 import uuid
 import logging

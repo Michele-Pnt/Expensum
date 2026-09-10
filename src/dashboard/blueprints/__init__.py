@@ -1,0 +1,1 @@
+# Init blueprints dashboard

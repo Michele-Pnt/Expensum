@@ -17,25 +17,27 @@ logger = logging.getLogger("financial_agent.input_sanitizer")
 # Lunghezze massime per testo proveniente da sorgenti non testuali
 _MAX_OCR_LEN = 3000   # testo estratto da foto scontrino
 _MAX_AUDIO_LEN = 1500  # testo trascritto da audio
+_MAX_CATEGORY_NAME_LEN = 80
+_MAX_CATEGORY_DESCRIPTION_LEN = 500
 
 # Caratteri Unicode usati per obfuscare iniezioni
 _DANGEROUS_CHARS = {
-    "​",  # zero-width space
-    "‌",  # zero-width non-joiner
-    "‍",  # zero-width joiner
-    "‪",  # left-to-right embedding
-    "‫",  # right-to-left embedding
-    "‬",  # pop directional formatting
-    "‭",  # left-to-right override
-    "‮",  # right-to-left override (usato per invertire testo malevolo)
-    "⁠",  # word joiner
-    "⁡",  # function application
-    "⁢",  # invisible times
-    "⁣",  # invisible separator
-    "⁤",  # invisible plus
-    "﻿",  # byte order mark / zero-width no-break space
-    "­",  # soft hyphen (usato per spezzare parole chiave)
-    "͏",  # combining grapheme joiner
+    "\u200b",  # zero-width space
+    "\u200c",  # zero-width non-joiner
+    "\u200d",  # zero-width joiner
+    "\u202a",  # left-to-right embedding
+    "\u202b",  # right-to-left embedding
+    "\u202c",  # pop directional formatting
+    "\u202d",  # left-to-right override
+    "\u202e",  # right-to-left override (usato per invertire testo malevolo)
+    "\u2060",  # word joiner
+    "\u2061",  # function application
+    "\u2062",  # invisible times
+    "\u2063",  # invisible separator
+    "\u2064",  # invisible plus
+    "\ufeff",  # byte order mark / zero-width no-break space
+    "\u00ad",  # soft hyphen (usato per spezzare parole chiave)
+    "\u034f",  # combining grapheme joiner
 }
 
 # Pattern di prompt injection — IT e EN, con e senza spazi intenzionali
@@ -105,6 +107,19 @@ def sanitize_audio_transcription(text: str, chat_id: str) -> str:
         InjectionDetectedError: Se vengono rilevati pattern di injection.
     """
     return _sanitize(text, source="audio", max_len=_MAX_AUDIO_LEN, chat_id=chat_id)
+
+
+def sanitize_category_metadata(
+    text: str, chat_id: str, *, field: str,
+) -> str:
+    """Validate category metadata before persistence or use in an LLM prompt.
+
+    Category names and descriptions are user-controlled text.  They use the same
+    Unicode normalization and injection detection as OCR/audio, with stricter
+    field-specific limits.
+    """
+    max_len = _MAX_CATEGORY_NAME_LEN if field == "name" else _MAX_CATEGORY_DESCRIPTION_LEN
+    return _sanitize(text, source=f"category_{field}", max_len=max_len, chat_id=chat_id)
 
 
 def _sanitize(text: str, source: str, max_len: int, chat_id: str) -> str:

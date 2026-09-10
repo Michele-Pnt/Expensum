@@ -40,7 +40,7 @@ from src.user_store import (
     User,
     UserPlan,
 )
-from src.storage.models import SubscriptionCandidate
+from src.storage.models import Expense, ExpenseLabelCluster, SubscriptionCandidate
 
 # Soglia storica del ledger token: coerente con la dashboard esistente, si
 # considerano solo gli eventi dal 2026-05-01 in avanti (prima i dati non erano
@@ -691,9 +691,14 @@ def get_funnel_revenue(s: Session, now: datetime | None = None) -> dict[str, Any
 # ---------------------------------------------------------------------------
 # 10. Engagement & acquisizione
 # ---------------------------------------------------------------------------
-def get_engagement_acquisition(s: Session, signup_days: int = 30) -> dict[str, Any]:
-    """DAU/WAU/MAU, trend registrazioni, distribuzione backend, waitlist."""
-    now = datetime.utcnow()
+def get_engagement_acquisition(
+    s: Session, signup_days: int = 30, now: datetime | None = None
+) -> dict[str, Any]:
+    """DAU/WAU/MAU, trend registrazioni, distribuzione backend, waitlist.
+
+    ``now`` e' iniettabile per rendere deterministiche le finestre rolling nei test.
+    """
+    now = now or datetime.utcnow()
 
     def _active_since(days: int) -> int:
         since = now - timedelta(days=days)
@@ -890,7 +895,9 @@ TX_TYPES = ("expense", "income", "transfer")
 INPUT_METHODS = ("text", "voice", "photo", "button")
 
 
-def get_tx_success_by_type_method(s: Session, days: int = 30) -> dict[str, Any]:
+def get_tx_success_by_type_method(
+    s: Session, days: int = 30, now: datetime | None = None
+) -> dict[str, Any]:
     """Successi/fallimenti di parsing per tipo transazione x modalità di input.
 
     Successo = l'utente ha cliccato Conferma e la transazione è stata salvata
@@ -898,7 +905,7 @@ def get_tx_success_by_type_method(s: Session, days: int = 30) -> dict[str, Any]:
     calcolare il success-rate. Fonte: tx_events, rispecchiata da bot.py/app.py
     accanto agli eventi PostHog esistenti.
     """
-    since = datetime.utcnow() - timedelta(days=days)
+    since = (now or datetime.utcnow()) - timedelta(days=days)
     rows = s.query(
         TxEvent.tx_type, TxEvent.input_method, TxEvent.outcome, func.count()
     ).filter(TxEvent.occurred_at >= since).group_by(
@@ -920,7 +927,7 @@ def get_tx_success_by_type_method(s: Session, days: int = 30) -> dict[str, Any]:
     methods = [m for m in INPUT_METHODS if m in seen_methods] + sorted(seen_methods - set(INPUT_METHODS))
 
     rows_out = []
-    totals_confirmed = totals_all = 0
+    totals_confirmed = totals_cancelled = totals_failed = totals_all = 0
     for tx_type in types:
         for method in methods:
             cell = matrix.get(tx_type, {}).get(method)
@@ -929,6 +936,8 @@ def get_tx_success_by_type_method(s: Session, days: int = 30) -> dict[str, Any]:
             total = sum(cell.values())
             confirmed = cell.get("confirmed", 0)
             totals_confirmed += confirmed
+            totals_cancelled += cell.get("cancelled", 0)
+            totals_failed += cell.get("failed", 0)
             totals_all += total
             rows_out.append({
                 "tx_type": tx_type,
@@ -940,12 +949,30 @@ def get_tx_success_by_type_method(s: Session, days: int = 30) -> dict[str, Any]:
                 "success_rate_pct": round(100 * confirmed / total, 1) if total else 0.0,
             })
 
+    # Quota di conferme in cui l'utente ha corretto la categoria proposta dall'AI
+    # prima di salvare (reason='category_corrected', vedi bot.py::setcat/msetcat).
+    # Non è un fallimento — la transazione è comunque confermata — ma segnala
+    # quanto spesso il parsing azzecca l'importo/tipo ma sbaglia la categoria.
+    category_corrected_count = s.query(func.count()).filter(
+        TxEvent.occurred_at >= since,
+        TxEvent.outcome == "confirmed",
+        TxEvent.reason == "category_corrected",
+    ).scalar() or 0
+
     return {
         "days": days,
         "rows": rows_out,
         "types": types,
         "methods": methods,
         "overall_success_rate_pct": round(100 * totals_confirmed / totals_all, 1) if totals_all else 0.0,
+        # Separati apposta: un errore tecnico (failed, guasto lato AI/salvataggio) e
+        # un abbandono deliberato dell'utente (cancelled) sono segnali diversi — il
+        # vecchio success_rate li fondeva in un solo "non confermato".
+        "overall_error_rate_pct": round(100 * totals_failed / totals_all, 1) if totals_all else 0.0,
+        "overall_cancel_rate_pct": round(100 * totals_cancelled / totals_all, 1) if totals_all else 0.0,
+        "overall_category_corrected_pct": (
+            round(100 * category_corrected_count / totals_confirmed, 1) if totals_confirmed else 0.0
+        ),
         "overall_total": totals_all,
     }
 
@@ -1119,6 +1146,94 @@ def get_subscription_candidate_funnel(s: Session, days: int = 90) -> dict[str, A
         "confirmed": confirmed,
         "dismissed": dismissed,
         "satisfaction_pct": round(100 * confirmed / decided, 1) if decided else None,
+    }
+
+
+def get_expense_label_cluster_stats(s: Session, days: int = 30) -> dict[str, Any]:
+    """Osservabilità della normalizzazione voci di spesa (src/expense_label_normalizer.py).
+
+    Sistema fragile per design (ancora fissa + soglia rapidfuzz + guardrail categoria,
+    tutto automatico, mai una conferma umana) — questa vista è la rete di sicurezza:
+    senza, un peggioramento (soglia scalibrata male, guardrail troppo permissivo) resta
+    invisibile finché qualcuno non lo nota per caso in un grafico.
+
+    - `unlabeled_expenses`: spese Postgres senza `label_cluster_id` — dovrebbe tendere
+      a zero dopo il backfill (`scripts/backfill_expense_label_clusters.py`); se cresce
+      nel tempo, l'hook live in `create_expense` ha smesso di girare.
+    - `singleton_clusters` vs `multi_clusters`: quanti cluster non si sono mai uniti a
+      nulla. Non è di per sé un problema (può essere genuina varietà di spesa), ma un
+      rapporto singleton/totale che cresce nel tempo segnala una soglia troppo rigida.
+    - `new_clusters_period` vs `merges_period`: nella finestra, quante spese hanno aperto
+      un cluster nuovo contro quante si sono unite a uno esistente — è il tasso di
+      "successo" della normalizzazione nel periodo, non solo lo stato cumulativo.
+      ATTENZIONE: subito dopo un'esecuzione del backfill storico, questa coppia è
+      falsata — il backfill crea molti cluster nuovi (`ExpenseLabelCluster.created_at`
+      = adesso) per spese vecchie (`Expense.created_at` = data originale, fuori dalla
+      finestra), quindi `new_clusters_period` si gonfia e `merges_period` crolla verso
+      zero senza che sia un problema reale. Il segnale torna affidabile una volta che
+      la finestra (`days`) supera la data dell'ultimo backfill.
+    """
+    since = datetime.utcnow() - timedelta(days=days)
+
+    total_clusters = s.query(func.count(ExpenseLabelCluster.id)).scalar() or 0
+    unlabeled_expenses = (
+        s.query(func.count(Expense.id)).filter(Expense.label_cluster_id.is_(None)).scalar() or 0
+    )
+
+    size_by_cluster = dict(
+        s.query(Expense.label_cluster_id, func.count(Expense.id))
+        .filter(Expense.label_cluster_id.isnot(None))
+        .group_by(Expense.label_cluster_id)
+        .all()
+    )
+    labeled_expenses = sum(size_by_cluster.values())
+    singleton_clusters = sum(1 for size in size_by_cluster.values() if size == 1)
+    multi_clusters = sum(1 for size in size_by_cluster.values() if size > 1)
+    # Denominatore = cluster con almeno una spesa (len(size_by_cluster)), non
+    # total_clusters: un cluster senza spese (possibile dopo una cancellazione)
+    # diluirebbe la media senza motivo.
+    populated_clusters = len(size_by_cluster)
+    avg_cluster_size = round(labeled_expenses / populated_clusters, 2) if populated_clusters else None
+
+    # Ogni spesa assegnata nel periodo o ha creato il proprio cluster (1 evento = 1
+    # cluster nuovo) o si è unita a uno esistente (merge): il conteggio esatto delle
+    # unioni è quindi "assegnazioni totali nel periodo" meno "cluster nuovi nel
+    # periodo" — non serve un log eventi separato, `Expense.created_at` basta.
+    new_clusters_period = (
+        s.query(func.count(ExpenseLabelCluster.id))
+        .filter(ExpenseLabelCluster.created_at >= since)
+        .scalar() or 0
+    )
+    assignments_period = (
+        s.query(func.count(Expense.id))
+        .filter(Expense.created_at >= since, Expense.label_cluster_id.isnot(None))
+        .scalar() or 0
+    )
+    merges_period = max(assignments_period - new_clusters_period, 0)
+
+    top_clusters_rows = sorted(size_by_cluster.items(), key=lambda kv: kv[1], reverse=True)[:10]
+    top_cluster_ids = [cid for cid, _ in top_clusters_rows]
+    anchors = dict(
+        s.query(ExpenseLabelCluster.id, ExpenseLabelCluster.anchor_text)
+        .filter(ExpenseLabelCluster.id.in_(top_cluster_ids))
+        .all()
+    ) if top_cluster_ids else {}
+    top_clusters = [
+        {"anchor_text": anchors.get(cid, "?"), "size": size}
+        for cid, size in top_clusters_rows
+    ]
+
+    return {
+        "days": days,
+        "total_clusters": total_clusters,
+        "labeled_expenses": labeled_expenses,
+        "unlabeled_expenses": unlabeled_expenses,
+        "singleton_clusters": singleton_clusters,
+        "multi_clusters": multi_clusters,
+        "avg_cluster_size": avg_cluster_size,
+        "new_clusters_period": new_clusters_period,
+        "merges_period": merges_period,
+        "top_clusters": top_clusters,
     }
 
 

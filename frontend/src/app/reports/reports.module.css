@@ -19,7 +19,7 @@
 .title {
   font-size: 1.5rem;
   font-weight: 700;
-  color: var(--color-text);
+  color: var(--color-primary);
   margin: 0 0 0.25rem 0;
 }
 
@@ -43,12 +43,13 @@
   background: var(--color-surface);
   color: var(--color-text);
   cursor: pointer;
+  min-height: 44px;
   transition: border-color 0.15s, background 0.15s;
 }
 
 .generateBtn:hover:not(:disabled) {
   border-color: var(--color-primary);
-  background: rgba(26, 54, 115, 0.04);
+  background: rgba(95, 196, 203, 0.06);
 }
 
 .generateBtn:disabled {
@@ -56,13 +57,50 @@
   cursor: default;
 }
 
+.savingsGoalCta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  flex-wrap: wrap;
+  margin-top: 1rem;
+  padding: 1rem;
+  border: 1px solid rgba(95, 196, 203, 0.35);
+  border-radius: 12px;
+  background: rgba(95, 196, 203, 0.08);
+}
+
+.savingsGoalCta p {
+  margin: 0;
+  font-size: 0.9rem;
+  color: var(--color-text);
+}
+
+.savingsGoalCtaLink {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 44px;
+  padding: 0 1rem;
+  border-radius: 8px;
+  background: var(--color-primary);
+  color: #1C363D;
+  font-size: 0.85rem;
+  font-weight: 700;
+  text-decoration: none;
+}
+
+.savingsGoalCtaLink:hover {
+  background: var(--color-primary-dark);
+}
+
 .upgradeNote {
   margin-top: 1.1rem;
   display: flex;
   align-items: center;
   gap: 0.9rem;
-  background: linear-gradient(135deg, rgba(197, 160, 89, 0.10), rgba(212, 180, 122, 0.06));
-  border: 1px solid rgba(197, 160, 89, 0.35);
+  background: rgba(95, 196, 203, 0.08);
+  border: 1px solid rgba(95, 196, 203, 0.3);
   border-radius: 12px;
   padding: 0.85rem 1rem;
 }
@@ -75,9 +113,8 @@
   align-items: center;
   justify-content: center;
   border-radius: 50%;
-  background: linear-gradient(135deg, #C5A059, #D4B47A);
-  color: #ffffff;
-  box-shadow: 0 2px 8px rgba(197, 160, 89, 0.35);
+  background: var(--color-primary);
+  color: #1C363D;
 }
 
 .upgradeNoteBody {
@@ -102,8 +139,8 @@
   flex-shrink: 0;
   font-size: 0.8rem;
   font-weight: 700;
-  color: #ffffff;
-  background: linear-gradient(135deg, #C5A059, #D4B47A);
+  color: #1C363D;
+  background: var(--color-primary);
   padding: 0.5rem 1rem;
   border-radius: 999px;
   text-decoration: none;
@@ -150,7 +187,7 @@
 
 .reportCard:hover {
   border-color: var(--color-primary);
-  background: rgba(26, 54, 115, 0.04);
+  background: rgba(95, 196, 203, 0.06);
 }
 
 .reportCardLeft {
@@ -181,13 +218,13 @@
   font-weight: 600;
   padding: 0.2rem 0.6rem;
   border-radius: 999px;
-  background: rgba(197, 160, 89, 0.12);
-  color: var(--color-accent);
+  background: rgba(95, 196, 203, 0.14);
+  color: var(--color-primary);
 }
 
 .reportBadgeWeekly {
-  background: rgba(26, 54, 115, 0.10);
-  color: var(--color-primary);
+  background: rgba(176, 181, 185, 0.15);
+  color: var(--color-text-2);
 }
 
 .reportCardRight {
@@ -203,8 +240,8 @@
   width: 22px;
   height: 22px;
   border-radius: 50%;
-  background: linear-gradient(135deg, #C5A059, #D4B47A);
-  color: #ffffff;
+  background: var(--color-primary);
+  color: #1C363D;
   flex-shrink: 0;
 }
 
@@ -320,7 +357,7 @@
   color: var(--color-text);
   white-space: pre;
   overflow-x: auto;
-  background: rgba(26, 54, 115, 0.04);
+  background: rgba(95, 196, 203, 0.05);
   border: 1px solid var(--color-border);
   border-radius: 6px;
   padding: 0.85rem 1rem;
@@ -387,7 +424,7 @@
   font-size: 0.76rem;
   line-height: 1.7;
   white-space: pre;
-  background: rgba(26, 54, 115, 0.04);
+  background: rgba(95, 196, 203, 0.05);
   border: 1px solid var(--color-border);
   border-radius: 6px;
   padding: 0.85rem 1rem;
@@ -431,8 +468,8 @@
   display: inline-block;
   font-size: 0.85rem;
   font-weight: 700;
-  color: #ffffff;
-  background: linear-gradient(135deg, #C5A059, #D4B47A);
+  color: #1C363D;
+  background: var(--color-primary);
   padding: 0.5rem 1.1rem;
   border-radius: 999px;
   text-decoration: none;
@@ -440,4 +477,189 @@
 
 .lockedCta:hover {
   opacity: 0.9;
+}
+
+/* ---------------------------------------------------------------------- */
+/* Report strutturato (schema_version JSON) — KPI, tabelle, elenchi        */
+/* ---------------------------------------------------------------------- */
+
+.kpiGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 0.75rem;
+  margin-bottom: 1.5rem;
+}
+
+.kpiCard {
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: 10px;
+  padding: 0.9rem 1rem;
+}
+
+.kpiLabel {
+  font-size: 0.72rem;
+  font-weight: 600;
+  color: var(--color-text-2);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  margin: 0 0 0.35rem 0;
+}
+
+.kpiValue {
+  font-size: 1.15rem;
+  font-weight: 700;
+  color: var(--color-text);
+  margin: 0;
+}
+
+.kpiPositive .kpiValue {
+  color: #199e70;
+}
+
+.kpiWarning .kpiValue {
+  color: #c98500;
+}
+
+.kpiNegative .kpiValue {
+  color: #e66767;
+}
+
+.sectionBlock {
+  margin-bottom: 1.5rem;
+}
+
+.sectionBlock:last-child {
+  margin-bottom: 0;
+}
+
+.sectionHeading {
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: var(--color-primary);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  margin: 0 0 0.75rem 0;
+}
+
+.narrativeParagraph {
+  font-family: Georgia, "Iowan Old Style", "Palatino Linotype", Palatino, serif;
+  font-size: 0.92rem;
+  line-height: 1.85;
+  color: var(--color-text);
+  margin: 0 0 0.9rem 0;
+}
+
+.narrativeParagraph:last-child {
+  margin-bottom: 0;
+}
+
+.bulletList {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+}
+
+.bulletItem {
+  font-size: 0.9rem;
+  line-height: 1.6;
+  color: var(--color-text);
+  padding-left: 1.1rem;
+  position: relative;
+}
+
+.bulletItem::before {
+  content: "•";
+  position: absolute;
+  left: 0;
+  color: var(--color-primary);
+}
+
+.emptyMessage {
+  font-size: 0.88rem;
+  color: var(--color-text-2);
+  font-style: italic;
+  margin: 0;
+}
+
+.tableWrap {
+  overflow-x: auto;
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+}
+
+.dataTable {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.85rem;
+}
+
+.dataTable th,
+.dataTable td {
+  padding: 0.55rem 0.85rem;
+  text-align: left;
+  white-space: nowrap;
+}
+
+.dataTable th {
+  font-size: 0.72rem;
+  font-weight: 600;
+  color: var(--color-text-2);
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  border-bottom: 1px solid var(--color-border);
+}
+
+.dataTable td {
+  color: var(--color-text);
+  border-bottom: 1px solid rgba(176, 181, 185, 0.15);
+}
+
+.dataTable tbody tr:last-child td {
+  border-bottom: none;
+}
+
+.dataTable tbody tr:nth-child(even) {
+  background: rgba(95, 196, 203, 0.04);
+}
+
+.alignRight {
+  text-align: right;
+}
+
+.rowWarning td:first-child {
+  border-left: 3px solid #c98500;
+}
+
+.rowNegative td:first-child {
+  border-left: 3px solid #e66767;
+}
+
+.rowPositive td:first-child {
+  border-left: 3px solid #199e70;
+}
+
+.referralNote {
+  margin-top: 1.25rem;
+  padding-top: 1.1rem;
+  border-top: 1px solid var(--color-border);
+  font-size: 0.85rem;
+}
+
+.referralNote a {
+  color: var(--color-primary);
+  font-weight: 600;
+}
+
+/* Blocco sfocato (piano Free): sostituisce il peek per paragrafo con un blocco
+   per sezione — le sezioni da `locked_from_section` in poi vivono qui, dentro
+   lo stesso .peekWrap (max-height + overlay) già usato per il report legacy. */
+.lockedSections {
+  filter: blur(6px);
+  opacity: 0.55;
+  pointer-events: none;
+  user-select: none;
 }

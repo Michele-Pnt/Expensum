@@ -128,6 +128,32 @@ class TelegramClient:
         except TelegramError as e:
             logger.warning(f"Invio link button fallito: {e}")
 
+    async def send_browser_link_button(
+        self, text: str, path: str, button_label: str = "📊 Apri in Expensum",
+        parse_mode: str | None = None,
+    ) -> None:
+        """Invia un messaggio con un bottone `url` verso `{WEBAPP_BASE_URL}/login?next={path}`.
+
+        Bottone link normale, non `web_app`: si apre sempre nel browser predefinito
+        del dispositivo, mai nel WebView/mini-app interno di Telegram. `/login`
+        autentica via sessione browser e redirige a `path` (stesso pattern di
+        `bot.py::_webapp_button`).
+        """
+        from urllib.parse import quote
+
+        next_encoded = quote(path, safe="")
+        url = f"{Config.WEBAPP_BASE_URL}/login?next={next_encoded}"
+        keyboard = InlineKeyboardMarkup([[InlineKeyboardButton(button_label, url=url)]])
+        try:
+            await self._bot.send_message(
+                chat_id=self._chat_id,
+                text=text,
+                parse_mode=parse_mode,
+                reply_markup=keyboard,
+            )
+        except TelegramError as e:
+            logger.warning(f"Invio link button fallito: {e}")
+
     # ------------------------------------------------------------------
     # Test connessione
     # ------------------------------------------------------------------
@@ -137,7 +163,7 @@ class TelegramClient:
             await self._bot.send_message(
                 chat_id=self._chat_id,
                 text=(
-                    "✅ *Agente Finanziario* — Test connessione OK!\n"
+                    "✅ *Agente Finanziario*: Test connessione OK!\n"
                     "Il bot è configurato correttamente e pronto all'uso."
                 ),
                 parse_mode=ParseMode.MARKDOWN,

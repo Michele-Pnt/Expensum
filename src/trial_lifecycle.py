@@ -25,7 +25,7 @@ _STEP_ORDER: list[str] = sorted(DRIP_STEPS, key=lambda step: DRIP_STEPS[step])
 # - upgrade: D25/D29 (trial in scadenza), verso la sezione prezzi della landing page —
 #   non esiste ancora una pagina piani in-app autenticata, il checkout Stripe è fuori
 #   scope in questa fase beta (vedi task ClickUp pagamenti post-beta).
-_EMAIL_SIGNATURE = '<p style="margin-top:24px;color:#6b7280">— Moneo 🤖, il tuo assistente Expensum</p>'
+_EMAIL_SIGNATURE = '<p style="margin-top:24px;color:#6b7280">Moneo 🤖, il tuo assistente Expensum</p>'
 
 _EMAIL_CTA_BUTTON = (
     '<p style="margin-top:24px">'

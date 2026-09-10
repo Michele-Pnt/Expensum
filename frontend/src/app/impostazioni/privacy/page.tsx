@@ -278,7 +278,7 @@ export default function PrivacyPage() {
   return (
     <Box sx={{ p: { xs: 2, md: 4 }, maxWidth: 980 }}>
       <Box sx={{ mb: 4 }}>
-        <Typography variant="h4" fontWeight={800} color="primary.main" gutterBottom>
+        <Typography component="h1" variant="h4" fontWeight={800} color="primary.main" gutterBottom>
           Privacy e dati
         </Typography>
         <Typography color="text.secondary">

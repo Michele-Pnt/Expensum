@@ -1,0 +1,110 @@
+.preview {
+  width: 100%;
+  min-width: 0;
+  overflow: hidden;
+  border: 1px solid rgba(205, 235, 231, 0.18);
+  border-radius: 20px;
+  background: #0a1315;
+  color: #e9f1ea;
+}
+
+.appHeader { display: flex; align-items: center; justify-content: space-between; min-height: 52px; padding: 0 22px; border-bottom: 1px solid rgba(205, 235, 231, 0.12); background: #0c181a; }
+.wordmark { font-size: 0.82rem; font-weight: 700; letter-spacing: -0.025em; }
+.liveStatus { display: flex; align-items: center; gap: 7px; color: rgba(233, 241, 234, 0.52); font-size: 0.65rem; }
+.liveStatus i { width: 6px; height: 6px; border-radius: 50%; background: #5fc4cb; }
+.viewport { min-height: 460px; }
+.screen { padding: clamp(22px, 4vw, 38px); }
+.contextLine { display: flex; align-items: flex-start; justify-content: space-between; gap: 18px; }
+.eyebrow { color: #5fc4cb; font-size: 0.64rem; font-weight: 750; letter-spacing: 0.18em; }
+.contextLine h3 { margin: 7px 0 0; color: #e9f1ea; font-size: clamp(1.35rem, 2.4vw, 2rem); font-weight: 500; letter-spacing: -0.045em; line-height: 1.08; }
+.contextBadge, .newGoal { flex: 0 0 auto; padding: 7px 10px; border: 1px solid rgba(205, 235, 231, 0.14); border-radius: 999px; background: transparent; color: rgba(233, 241, 234, 0.62); font: inherit; font-size: 0.64rem; }
+.newGoal { display: flex; align-items: center; gap: 5px; color: #e9f1ea; }
+
+.conversation { display: grid; gap: 11px; margin-top: 26px; }
+.userBubble { justify-self: end; max-width: 72%; padding: 10px 13px; border-radius: 14px 14px 4px 14px; background: #23454a; color: #e9f1ea; font-size: 0.76rem; }
+.assistantBubble { display: flex; align-items: center; gap: 10px; width: fit-content; color: rgba(233, 241, 234, 0.76); font-size: 0.72rem; }
+.assistantBubble div { display: grid; gap: 2px; }
+.assistantBubble strong { color: #e9f1ea; font-weight: 650; }
+.assistantBubble span { color: rgba(233, 241, 234, 0.48); }
+.confirmIcon { display: grid; place-items: center; width: 28px; height: 28px; border-radius: 50%; background: rgba(95, 196, 203, 0.14); color: #5fc4cb; }
+.transactionCard { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: 10px 12px; margin-top: 3px; padding: 15px; border: 1px solid rgba(205, 235, 231, 0.15); border-radius: 13px; background: #0e1b1d; }
+.transactionIcon, .movementIcon, .goalIcon, .reportIcon { display: grid; place-items: center; width: 36px; height: 36px; border-radius: 10px; background: rgba(95, 196, 203, 0.11); color: #5fc4cb; }
+.transactionMain { display: grid; gap: 3px; }
+.transactionMain strong, .movement strong { color: #e9f1ea; font-size: 0.76rem; }
+.transactionMain span, .movement span { color: rgba(233, 241, 234, 0.56); font-size: 0.64rem; }
+.amount { align-self: center; color: #e9f1ea; font-size: 0.76rem; white-space: nowrap; }
+.transactionMeta { grid-column: 2 / -1; display: flex; justify-content: space-between; color: rgba(233, 241, 234, 0.4); font-size: 0.6rem; }
+.quickActions { display: flex; align-items: center; gap: 7px; margin-top: 18px; overflow: hidden; color: rgba(233, 241, 234, 0.42); font-size: 0.61rem; white-space: nowrap; }
+.quickActions button { padding: 6px 9px; border: 1px solid rgba(205, 235, 231, 0.13); border-radius: 999px; background: transparent; color: rgba(233, 241, 234, 0.66); font: inherit; }
+.composer { display: flex; align-items: center; gap: 10px; margin-top: 12px; padding: 11px 12px; border: 1px solid rgba(205, 235, 231, 0.15); border-radius: 12px; color: rgba(233, 241, 234, 0.42); font-size: 0.68rem; }
+.composer span { flex: 1; }
+
+.balanceCard { margin-top: 24px; padding: 20px; border: 1px solid rgba(205, 235, 231, 0.15); border-radius: 14px; background: #0e1b1d; }
+.balanceCard > span { color: rgba(233, 241, 234, 0.52); font-size: 0.68rem; }
+.balanceCard > strong { display: block; margin-top: 8px; font-size: clamp(1.8rem, 4vw, 2.7rem); font-weight: 450; letter-spacing: -0.06em; }
+.balanceMeta { display: flex; justify-content: space-between; margin-top: 16px; color: rgba(233, 241, 234, 0.52); font-size: 0.65rem; }
+.balanceMeta span:last-child { display: flex; align-items: center; gap: 4px; color: #5fc4cb; }
+.budgetTrack, .goalTrack { height: 5px; margin-top: 11px; overflow: hidden; border-radius: 999px; background: rgba(233, 241, 234, 0.1); }
+.budgetTrack i { display: block; width: 53%; height: 100%; background: #5fc4cb; }
+.sectionHeading { display: flex; justify-content: space-between; margin: 23px 0 8px; font-size: 0.7rem; }
+.sectionHeading strong { font-weight: 650; }
+.sectionHeading span { display: flex; align-items: center; color: rgba(233, 241, 234, 0.58); }
+.movements { display: grid; }
+.movement { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 10px; padding: 10px 0; border-top: 1px solid rgba(205, 235, 231, 0.09); }
+.movementIcon { width: 31px; height: 31px; border-radius: 9px; }
+.movement div { display: grid; gap: 2px; }
+.movement b { font-size: 0.7rem; white-space: nowrap; }
+.movement b.positive { color: #5fc4cb; }
+
+.goalCard { margin-top: 26px; padding: 20px; border: 1px solid rgba(205, 235, 231, 0.16); border-radius: 14px; background: #0e1b1d; }
+.goalTop { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 11px; }
+.goalTop > div { display: grid; gap: 3px; }
+.goalTop strong { font-size: 0.8rem; }
+.goalTop span { color: rgba(233, 241, 234, 0.45); font-size: 0.62rem; }
+.goalTop > b { padding: 5px 8px; border-radius: 999px; background: rgba(95, 196, 203, 0.12); color: #5fc4cb; font-size: 0.57rem; font-weight: 650; }
+.goalAmounts { display: flex; align-items: baseline; gap: 5px; margin-top: 22px; }
+.goalAmounts strong { font-size: 1.3rem; font-weight: 500; letter-spacing: -0.04em; }
+.goalAmounts span { color: rgba(233, 241, 234, 0.43); font-size: 0.64rem; }
+.goalAmounts b { margin-left: auto; color: #5fc4cb; font-size: 0.67rem; }
+.goalTrack i { display: block; height: 100%; border-radius: inherit; background: #5fc4cb; }
+.goalCard p { margin: 17px 0; color: rgba(233, 241, 234, 0.55); font-size: 0.68rem; line-height: 1.45; }
+.goalCard footer { display: flex; align-items: center; gap: 7px; padding-top: 14px; border-top: 1px solid rgba(205, 235, 231, 0.1); color: rgba(233, 241, 234, 0.44); font-size: 0.62rem; }
+.goalCard footer strong { margin-left: auto; color: rgba(233, 241, 234, 0.76); }
+.goalHint { display: grid; gap: 5px; margin-top: 13px; padding: 13px 16px; border-left: 2px solid #5fc4cb; background: #0e1b1d; }
+.goalHint span { color: #5fc4cb; font-size: 0.58rem; text-transform: uppercase; letter-spacing: 0.11em; }
+.goalHint strong { font-size: 0.72rem; font-weight: 550; }
+
+.screenIntro { max-width: 390px; margin: 14px 0 24px; color: rgba(233, 241, 234, 0.5); font-size: 0.7rem; line-height: 1.5; }
+.reportList { display: grid; gap: 10px; }
+.reportCard { display: grid; grid-template-columns: auto minmax(0, 1fr) auto auto; align-items: center; gap: 12px; padding: 15px; border: 1px solid rgba(205, 235, 231, 0.14); border-radius: 13px; background: #0e1b1d; }
+.reportCard > div { display: grid; gap: 3px; }
+.reportCard > div span { color: #5fc4cb; font-size: 0.55rem; font-weight: 700; letter-spacing: 0.1em; }
+.reportCard > div strong { font-size: 0.76rem; }
+.reportCard > div small { color: rgba(233, 241, 234, 0.43); font-size: 0.6rem; }
+.reportCard > b { display: flex; align-items: center; gap: 4px; color: rgba(233, 241, 234, 0.55); font-size: 0.58rem; font-weight: 500; }
+.reportArrow { color: rgba(233, 241, 234, 0.3); }
+.reportNote { display: flex; align-items: center; gap: 8px; margin-top: 18px; color: rgba(233, 241, 234, 0.48); font-size: 0.64rem; }
+.reportNote svg { color: #5fc4cb; }
+
+.previewNav { display: grid; grid-template-columns: repeat(5, 1fr); min-height: 58px; border-top: 1px solid rgba(205, 235, 231, 0.12); background: #0c181a; }
+.navItem { position: relative; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4px; color: rgba(233, 241, 234, 0.58); }
+.navItem small { font-size: 0.52rem; }
+.navSelected { color: #5fc4cb; }
+.navPrimary svg { width: 30px; height: 30px; margin-top: -20px; padding: 7px; border: 1px solid #5fc4cb; border-radius: 50%; background: #122629; color: #e9f1ea; }
+
+.compact .viewport { min-height: 390px; }
+.compact .screen { padding: 24px; }
+
+@media (max-width: 520px) {
+  .appHeader { padding-inline: 16px; }
+  .viewport { min-height: 430px; }
+  .screen { padding: 22px 16px; }
+  .compact .viewport { min-height: 410px; }
+  .compact .screen { padding: 22px 16px; }
+  .contextLine h3 { max-width: 220px; }
+  .reportCard { grid-template-columns: auto minmax(0, 1fr) auto; }
+  .reportCard > b { display: none; }
+  .reportArrow { grid-column: 3; grid-row: 1; }
+  .goalTop { grid-template-columns: auto minmax(0, 1fr); }
+  .goalTop > b { display: none; }
+}

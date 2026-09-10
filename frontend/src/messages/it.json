@@ -1,56 +1,101 @@
 {
   "Landing": {
     "meta": {
-      "title": "Expensum — Il tuo compagno del risparmio",
-      "description": "Traccia le spese via Telegram, capisci i tuoi soldi, vivi meglio. Powered by Gemini AI."
+      "title": "Expensum: il tuo compagno del risparmio",
+      "description": "Registra le spese in chat, l'AI le analizza, tu capisci i tuoi soldi."
     },
     "nav": {
       "comeFunziona": "Come funziona",
       "prezzi": "Prezzi",
       "menu": "Menu",
-      "accedi": "Accedi alla beta"
+      "accedi": "Accedi"
     },
     "hero": {
       "pill": "Powered by AI",
-      "headlineLine1": "Non chiederti dove sono finiti i tuoi soldi.",
-      "headlineLine2": "Inizia a dirgli dove andare.",
-      "subLine1": "Traccia le spese via Telegram. L'AI le analizza.",
-      "subLine2": "Tu capisci i tuoi soldi.",
+      "headlineLine1": "La tua piattaforma",
+      "headlineLine2": "finanziaria.",
+      "subLine1": "Expensum trasforma ogni spesa in una decisione più consapevole.",
+      "subLine2": "",
       "scrollDown": "Scorri in basso",
-      "mascotAlt": "Moneo, il tuo assistente finanziario",
-      "socialProof": "{count, number} spese già tracciate con Expensum"
+      "socialProof": "{count, number} spese già tracciate con Expensum",
+      "betaBadge": "Beta privata · accesso via email",
+      "betaEyebrow": "Beta privata",
+      "betaPrompt": "Inserisci la tua email e ricevi le credenziali.",
+      "betaCta": "Ottieni l’accesso"
     },
     "perChi": {
-      "titleLine1": "Per chi è pensato",
-      "titleLine2": "Expensum.",
+      "titleLine1": "Expensum fa per te quando:",
+      "titleLine2": "",
       "items": [
         {
-          "title": "Studenti fuori sede",
-          "desc": "Affitto, spesa, uscite — tante voci, zero chiarezza. Expensum ti mostra dove finiscono i soldi."
+          "title": "Quando non sai dove finiscono i soldi.",
+          "desc": "Spese, uscite e piccoli acquisti si accumulano. Expensum ti aiuta a capire cosa sta succedendo."
         },
         {
-          "title": "Giovani professionisti",
-          "desc": "Stipendio fisso ma fine mese sempre uguale? Scopri dove ottimizzare senza rinunciare a nulla."
+          "title": "Quando vuoi organizzarti, rinunciando al giusto.",
+          "desc": "Budget e obiettivi ti aiutano seguire il tuo percorso finanziario in modo più efficace."
         },
         {
-          "title": "Chiunque voglia più controllo",
-          "desc": "Non serve essere un esperto di finanza. Basta parlare con Expensum come faresti con un amico."
+          "title": "Quando vuoi finalmente avere il controllo.",
+          "desc": "Expensum è il luogo dove il disordine si trasforma in chiarezza."
         }
       ]
     },
     "features": {
+      "atomEyebrow": "Cosa fa Expensum",
+      "atomTitle": "Il tuo ecosistema finanziario. Tutto finalmente sotto controllo.",
+      "atomIntro": "Expensum collega tutti i tuoi dati economici creando l'ecosistema ideale per mantenere il controllo sulle tue finanze in maniera facile.",
+      "atomScrollHint": "Scorri per esplorare il sistema",
+      "orbitItems": [
+        {
+          "title": "Segna ogni spesa in 1 secondo",
+          "desc": "Scrivi un messaggio, fotografa uno scontrino o invia un vocale. Expensum trasforma un gesto naturale in un dato ordinato."
+        },
+        {
+          "title": "Tutto al posto giusto",
+          "desc": "Importo, categoria, conto e contesto vengono riconosciuti automaticamente, senza moduli da compilare."
+        },
+        {
+          "title": "Conosci il tuo patrimonio",
+          "desc": "Conti, entrate, spese, mutui e trasferimenti li integri su Expensum e potrai avere visione di quello che possiedi davvero."
+        },
+        {
+          "title": "Visione futura",
+          "desc": "Budget, andamento e previsioni ti mostrano quanto margine rimane prima che sia troppo tardi."
+        },
+        {
+          "title": "Niente più sorprese",
+          "desc": "Expensum riconosce le ricorrenze e riunisce spese passate e prossime scadenze nel calendario."
+        },
+        {
+          "title": "Trasforma intenzioni in progresso",
+          "desc": "Imposta un obiettivo e Expensum ti aiuta a portarlo a termine."
+        },
+        {
+          "title": "Comprensione immediata",
+          "desc": "Analytics, chat e report automatici per capire in maniera semplice il tuo stato."
+        }
+      ],
       "titlePart1": "Cosa fa Expensum.",
       "titlePart2": "Tutto il necessario,",
       "titlePart3": "niente di superfluo.",
-      "illustrationAlt": "Moneo categorizza e analizza le tue spese con AI",
+      "illustrationAlt": "Esempio di spesa registrata e categorizzata in automatico in chat",
       "items": [
         {
-          "title": "Chatbot AI su Telegram",
-          "desc": "Invia spese via testo, foto scontrino o vocale. Nessuna app da aprire, nessun form da compilare."
+          "title": "Spese in chat",
+          "desc": "Scrivi il messaggio, scatta una foto allo scontrino o manda un vocale. Nessuna app da aprire, nessun form da compilare."
+        },
+        {
+          "title": "Obiettivi di risparmio",
+          "desc": "Fissa un obiettivo (viaggio, fondo emergenza, un acquisto) ed Expensum calcola un budget su misura dal tuo reddito per portartici, senza rinunce a caso."
         },
         {
           "title": "Analytics & Dashboard",
           "desc": "Grafici chiari su categorie, trend mensili e andamento del capitale. Sempre aggiornati."
+        },
+        {
+          "title": "Calendario",
+          "desc": "Spese passate e abbonamenti in scadenza su un unico calendario, sempre chiaro su cosa arriva e quando."
         },
         {
           "title": "Abbonamenti automatici",
@@ -58,14 +103,14 @@
         },
         {
           "title": "Report mensili",
-          "desc": "Ogni fine mese un riepilogo completo arriva direttamente su Telegram. Niente da fare."
+          "desc": "Ogni fine mese ricevi un riepilogo completo in chat. Niente da fare."
         }
       ]
     },
     "comeFunziona": {
-      "titleLine1": "Come funziona.",
-      "titleLine2": "Semplice e veloce.",
-      "useCaseAlt": "Fotografa lo scontrino, Expensum lo registra in automatico",
+      "titleLine1": "Mai stato così",
+      "titleLine2": "semplice e veloce.",
+      "scrollHint": "Scorri verso il basso per il prossimo step",
       "steps": [
         {
           "title": "Invia la spesa.",
@@ -73,25 +118,29 @@
         },
         {
           "title": "L'AI la analizza.",
-          "desc": "Il modello AI categorizza e struttura i dati in automatico. Zero errori, zero sforzo."
+          "desc": "Categorizza e struttura i dati in automatico. Zero errori, zero sforzo: molto meno di una riga su un foglio di calcolo."
         },
         {
           "title": "Dashboard aggiornata.",
-          "desc": "Visualizza grafici, trend e budget in tempo reale dalla web app o direttamente su Telegram."
+          "desc": "Visualizza grafici, trend e budget in tempo reale."
         },
         {
-          "title": "Report automatico.",
-          "desc": "Ogni mese ricevi un riepilogo completo con analisi delle spese e consigli personalizzati."
+          "title": "Report automatici.",
+          "desc": "Ogni settimana ricevi un mini-report per restare aggiornato. Ogni mese, un’analisi più approfondita con andamento delle spese, trend e consigli personalizzati. Tutto in automatico."
         }
       ]
     },
     "trust": {
-      "dashboardAlt": "Analytics e portfolio growth",
-      "dashboardTitle": "Dashboard sempre aggiornata",
-      "dashboardDesc": "Grafici, trend e previsioni mensili. I tuoi dati finanziari in un colpo d'occhio.",
-      "secureAlt": "I tuoi dati sono al sicuro",
-      "secureTitle": "I tuoi dati al sicuro",
-      "secureDesc": "Sincronizzazione protetta su Notion. Nessun dato finanziario condiviso con terze parti."
+      "eyebrow": "Fiducia verificabile",
+      "titleLine1": "I tuoi dati.",
+      "titleLine2": "Alle tue condizioni.",
+      "intro": "Non richiediamo accesso diretto alla tua banca. Decidi tu quali informazioni registrare e mantieni il controllo sui tuoi dati.",
+      "controlLabel": "Controllo",
+      "portabilityLabel": "Portabilità",
+      "dashboardTitle": "Non tocchiamo la tua banca.",
+      "dashboardDesc": "Nessuna credenziale bancaria e nessun accesso a conto o carta. Registri tu ciò che vuoi condividere.",
+      "secureTitle": "Dati europei, esportabili e cancellabili.",
+      "secureDesc": "I dati sono ospitati in Europa. Puoi esportarli o richiedere la cancellazione del tuo account in qualsiasi momento."
     },
     "pricing": {
       "title": "Scegli il tuo piano.",
@@ -121,11 +170,11 @@
         ]
       },
       "lifetime": {
-        "badge": "Compila il form, Solo 40 posti!",
+        "badge": "Beta privata · 40 posti",
         "label": "Lifetime Founder",
-        "cta": "Prenota il tuo posto",
+        "cta": "Ottieni l’accesso",
         "lifetimeAccess": "Accesso a vita, zero abbonamenti",
-        "note": "Lancio a settembre. Entra nella lista d'attesa per bloccare l'offerta."
+        "note": "Inserisci la tua email e ricevi le credenziali di accesso."
       },
       "ctaQuestion": "Hai domande sul piano giusto per te?",
       "ctaContact": "Contattaci →"
@@ -148,44 +197,44 @@
       "cookiePolicy": "Cookie Policy",
       "terminiServizio": "Termini di servizio",
       "seguici": "Seguici",
-      "copy": "© {year} Expensum — Il tuo compagno del risparmio."
+      "copy": "© {year} Expensum, il tuo compagno del risparmio."
     }
   },
   "ComeFunzionaMoneo": {
     "meta": {
-      "title": "Come funziona Moneo — Expensum",
+      "title": "Come funziona l’AI | Expensum",
       "description": "Trasparenza sui modelli AI usati da Expensum, in linea con l'AI Act."
     },
-    "title": "Come funziona Moneo",
-    "intro": "Moneo è l'assistente AI di Expensum 🤖. Qui trovi quali modelli usiamo, per cosa li usiamo e quali sono i loro limiti, in linea con gli obblighi di trasparenza dell'AI Act (Regolamento UE 2024/1689, Art. 50).",
+    "title": "Come funziona l’AI",
+    "intro": "L’assistente AI di Expensum ti aiuta a leggere e organizzare i tuoi dati finanziari. Qui trovi quali modelli usiamo, per cosa li usiamo e quali sono i loro limiti, in linea con gli obblighi di trasparenza dell’AI Act (Regolamento UE 2024/1689, Art. 50).",
     "aiDisclosure": {
       "title": "Stai parlando con un'intelligenza artificiale",
-      "desc": "Ogni risposta di Moneo — sul bot Telegram, nella chat web e nei report mensili e settimanali — è generata automaticamente da un modello linguistico (LLM), non da una persona. Te lo segnaliamo sempre alla prima interazione e in ogni report."
+      "desc": "Ogni risposta dell’assistente, sia nei messaggi che ricevi, sia nella chat web, sia nei report mensili e settimanali, è generata automaticamente da un modello linguistico (LLM), non da una persona. Te lo segnaliamo sempre alla prima interazione e in ogni report."
     },
     "models": {
       "title": "I modelli AI che usiamo",
       "items": [
         {
-          "name": "Mistral Small 3.1",
-          "purpose": "Lettura e categorizzazione delle spese che scrivi o fotografi (scontrini).",
+          "name": "Modello di lettura spese",
+          "purpose": "Legge e categorizza le spese che scrivi o fotografi (scontrini).",
           "scope": "Tutti gli utenti"
         },
         {
-          "name": "Mistral Large 3",
-          "purpose": "Conversazione con Moneo nella chat: risponde alle tue domande sulle tue finanze.",
+          "name": "Modello di conversazione",
+          "purpose": "Conversazione con l’assistente nella chat: risponde alle tue domande sulle tue finanze.",
           "scope": "Tutti gli utenti"
         },
         {
-          "name": "Gemini 2.0 (Vertex AI)",
+          "name": "Modello di trascrizione vocale",
           "purpose": "Trascrizione dei messaggi vocali in testo, prima dell'analisi della spesa.",
           "scope": "Solo piano PRO"
         }
       ],
-      "footnote": "Tutti i modelli usati per l'analisi testo/foto sono forniti da Mistral AI, azienda europea conforme al GDPR. Gemini 2.0 (Vertex AI) è usato solo per la trascrizione vocale, esclusivamente per gli utenti PRO."
+      "footnote": "Tutti i modelli usati per l'analisi di testo e foto sono forniti da un provider AI europeo conforme al GDPR. Il modello di trascrizione vocale è usato solo per trascrivere i messaggi vocali, esclusivamente per gli utenti PRO."
     },
     "limits": {
       "title": "Limiti noti",
-      "desc": "Moneo può commettere errori: categorie sbagliate, importi letti male da uno scontrino poco leggibile, o trascrizioni vocali imprecise. Verifica sempre i dati finanziari importanti prima di prendere decisioni basate sui report o sulle risposte di Moneo. Puoi correggere qualsiasi spesa o entrata in qualsiasi momento."
+      "desc": "L’assistente AI può commettere errori: categorie sbagliate, importi letti male da uno scontrino poco leggibile o trascrizioni vocali imprecise. Verifica sempre i dati finanziari importanti prima di prendere decisioni basate sui report o sulle sue risposte. Puoi correggere qualsiasi spesa o entrata in qualsiasi momento."
     },
     "privacy": {
       "title": "Dati personali e privacy",
@@ -195,10 +244,63 @@
   },
   "Legal": {
     "backToSite": "← Torna al sito",
-    "footerCopy": "© {year} Expensum — Michele Pinotti",
+    "footerCopy": "© {year} Expensum, Michele Pinotti",
     "privacyPolicy": "Privacy Policy",
     "cookiePolicy": "Cookie Policy",
     "termsOfService": "Termini di servizio"
+  },
+  "MutuoCalculator": {
+    "meta": {
+      "title": "Calcolo mutuo e finanziamento | Expensum",
+      "description": "Calcola la rata e il TAEG del tuo mutuo o finanziamento. Gratis, senza registrazione."
+    },
+    "backToSite": "← Torna al sito",
+    "title": "Calcolo mutuo/finanziamento",
+    "intro": "Inserisci i dati per stimare la rata mensile e il TAEG. Il calcolo è indicativo: la banca applicherà le sue condizioni definitive.",
+    "fields": {
+      "principal": "Importo richiesto (€)",
+      "duration": "Durata: {years} anni",
+      "rateType": "Tipo di tasso",
+      "rateTypeFixed": "Fisso",
+      "rateTypeVariable": "Variabile",
+      "tan": "TAN (%)",
+      "tanHelper": "Il tasso nominale annuo comunicato dalla banca: guida il calcolo della rata.",
+      "accessoryCostsToggle": "Costi accessori (istruttoria, spese incasso rata)",
+      "originationFee": "Istruttoria (€, una tantum)",
+      "originationFeeHelper": "Costo di apertura pratica, addebitato una sola volta.",
+      "monthlyFee": "Spese incasso rata (€/mese)",
+      "monthlyFeeHelper": "Costo fisso ricorrente addebitato a ogni rata."
+    },
+    "results": {
+      "title": "Stima",
+      "installment": "Rata mensile",
+      "taeg": "TAEG stimato",
+      "totalInterest": "Interessi totali sulla durata",
+      "disclaimer": "Il TAEG mostrato è una stima calcolata da Expensum sulla base dei costi accessori inseriti: non sostituisce quello ufficiale indicato dalla banca nel foglio informativo."
+    },
+    "cta": "Continua su Expensum"
+  },
+  "Marketing": {
+    "nav": {
+      "label": "Navigazione marketing",
+      "howItWorks": "Come funziona",
+      "features": "Funzionalità",
+      "security": "Sicurezza",
+      "faq": "FAQ",
+      "cta": "Ottieni l’accesso",
+      "menu": "Apri il menu"
+    },
+    "footer": {
+      "label": "Link utili",
+      "mission": "Più chiarezza sulle tue finanze, una scelta alla volta.",
+      "cta": "Ottieni l’accesso",
+      "pricing": "Prezzi",
+      "about": "Chi siamo",
+      "contact": "Contatti",
+      "ai": "Come funziona l’AI",
+      "privacy": "Privacy",
+      "terms": "Termini"
+    }
   },
   "LanguageSwitcher": {
     "label": "Lingua"

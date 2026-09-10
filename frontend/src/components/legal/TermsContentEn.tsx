@@ -9,7 +9,7 @@ export default function TermsContentEn() {
           Expensum is a personal expense tracking and analysis service accessible via a Telegram bot and a web app. The service allows you to record expenses, income and subscriptions, generate reports and view analytics dashboards.
         </p>
         <p>
-          The service is provided by <strong>Michele Pinotti</strong>, Italy — <a href="mailto:expensum.finance@gmail.com">expensum.finance@gmail.com</a>.
+          The service is provided by <strong>Michele Pinotti</strong>, Italy. Email: <a href="mailto:expensum.finance@gmail.com">expensum.finance@gmail.com</a>.
         </p>
       </section>
 
@@ -19,7 +19,7 @@ export default function TermsContentEn() {
           Using Expensum implies full acceptance of these Terms of Service and the <Link href="/privacy">Privacy Policy</Link>. If you do not accept these terms, do not use the service.
         </p>
         <p>
-          The user must be at least 18 years old to use Expensum (Italian Legislative Decree 101/2018 — contractual capacity required for access to the Pro plan).
+          The user must be at least 18 years old to use Expensum (Italian Legislative Decree 101/2018, contractual capacity required for access to the Pro plan).
         </p>
       </section>
 
@@ -73,7 +73,7 @@ export default function TermsContentEn() {
       </section>
 
       <section>
-        <h2>6. Nature of the service — not financial advice</h2>
+        <h2>6. Nature of the service: not financial advice</h2>
         <p>
           <strong>Expensum is a personal expense tracking and organization tool. It does not provide financial, tax, investment or legal advice.</strong>
         </p>

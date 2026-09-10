@@ -64,8 +64,8 @@
 }
 
 .premiumBadge {
-  background: linear-gradient(135deg, #C5A059, #D4B47A);
-  color: #ffffff;
+  background: var(--color-primary);
+  color: #1C363D;
   font-size: 0.7rem;
   font-weight: 800;
   padding: 0.2rem 0.55rem;

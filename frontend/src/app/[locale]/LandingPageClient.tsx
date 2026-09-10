@@ -1,36 +1,34 @@
 "use client";
 
 import React, { useEffect, useState } from "react";
-import Script from "next/script";
 import Image from "next/image";
+import NextLink from "next/link";
 import { useTranslations } from "next-intl";
-import { MessageCircle, BarChart2, CreditCard, FileText, Check, Send, Sparkles, TrendingUp, BellRing, ChevronDown } from "lucide-react";
+import {
+  Check,
+  TrendingUp,
+  ChevronDown,
+  ShieldCheck,
+  Server,
+} from "lucide-react";
 import { Link } from "@/i18n/navigation";
 import LanguageSwitcher from "@/components/LanguageSwitcher";
+import AtomFeatureSection, { type AtomFeature } from "@/components/landing/AtomFeatureSection";
+import HowItWorksSection, { type HowStep } from "@/components/landing/HowItWorksSection";
+import ProductScreenFrame, { type ProductScreenKind } from "@/components/marketing/ProductScreenFrame";
+import { openTallyWaitlist } from "@/lib/tallyWaitlist";
+import { getReferralCode } from "@/lib/waitlist";
 import styles from "./page.module.css";
 
-const FEATURE_ICONS = [
-  <MessageCircle key="chat" size={20} strokeWidth={1.5} />,
-  <BarChart2 key="chart" size={20} strokeWidth={1.5} />,
-  <CreditCard key="card" size={20} strokeWidth={1.5} />,
-  <FileText key="file" size={20} strokeWidth={1.5} />,
-];
-
-const HOW_ICONS = [
-  <Send key="send" size={18} strokeWidth={1.5} />,
-  <Sparkles key="sparkles" size={18} strokeWidth={1.5} />,
-  <TrendingUp key="trend" size={18} strokeWidth={1.5} />,
-  <BellRing key="bell" size={18} strokeWidth={1.5} />,
-];
-
-const TALLY_BASE_SRC = "https://tally.so/embed/44pAAr?alignLeft=1&hideTitle=1&transparentBackground=1&dynamicHeight=1";
+const TALLY_FORM_ID = "44pAAr";
 
 export default function LandingPage() {
   const t = useTranslations("Landing");
-  const [scrolled, setScrolled] = useState(false);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [expensesTracked, setExpensesTracked] = useState<number | null>(null);
-  const [tallySrc, setTallySrc] = useState(TALLY_BASE_SRC);
+  const [referralCode] = useState<string | null>(() => (
+    typeof window === "undefined" ? null : getReferralCode(window.location.search)
+  ));
 
   useEffect(() => {
     let cancelled = false;
@@ -47,24 +45,13 @@ export default function LandingPage() {
     };
   }, []);
 
-  // Passthrough del codice referral (?ref=CODICE) verso il form Tally: nessun
-  // errore visibile se assente o invalido, il form funziona comunque.
-  useEffect(() => {
-    const ref = new URLSearchParams(window.location.search).get("ref");
-    if (ref) {
-      setTallySrc(`${TALLY_BASE_SRC}&ref=${encodeURIComponent(ref)}`);
-    }
-  }, []);
+  const openWaitlist = () => {
+    void openTallyWaitlist(TALLY_FORM_ID, referralCode);
+  };
 
   const scrollToWaitlist = () => {
     document.getElementById("hero-waitlist-form")?.scrollIntoView({ behavior: "smooth", block: "center" });
   };
-
-  useEffect(() => {
-    const onScroll = () => setScrolled(window.scrollY > 20);
-    window.addEventListener("scroll", onScroll, { passive: true });
-    return () => window.removeEventListener("scroll", onScroll);
-  }, []);
 
   useEffect(() => {
     const io = new IntersectionObserver(
@@ -93,24 +80,50 @@ export default function LandingPage() {
   };
 
   const forWhoItems = t.raw("perChi.items") as { title: string; desc: string }[];
-  const featureItems = t.raw("features.items") as { title: string; desc: string }[];
-  const howSteps = t.raw("comeFunziona.steps") as { title: string; desc: string }[];
+  const atomItems = t.raw("features.orbitItems") as AtomFeature[];
+  const howSteps = t.raw("comeFunziona.steps") as HowStep[];
   const freeFeatures = t.raw("pricing.free.features") as string[];
   const premiumFeatures = t.raw("pricing.premium.features") as string[];
+  const journeyScreens: ProductScreenKind[] = ["overview", "goals", "report"];
 
   return (
-    <>
+    <div className={styles.landingRoot}>
+      <div className={styles.persistentVideoBg} aria-hidden="true">
+        <video
+          className={styles.persistentVideo}
+          src="/video/hero-logo.webm"
+          poster="/video/hero-logo-poster.webp"
+          autoPlay
+          loop
+          muted
+          playsInline
+          preload="metadata"
+        />
+        <div className={styles.persistentVideoScrim} />
+      </div>
+
+      {/* Strato decorativo fisso: luci soffuse che restano ferme in viewport
+          mentre le sezioni scorrono sotto, effetto "faretti" sul nero. */}
+      <div className={styles.spotlightLayer} aria-hidden="true">
+        <span className={styles.spot1} />
+        <span className={styles.spot2} />
+        <span className={styles.spot3} />
+      </div>
+
       {/* ── Navbar ── */}
-      <nav className={`${styles.nav} ${scrolled ? styles.navScrolled : ""}`}>
+      <nav className={styles.nav}>
         <div className={styles.navInner}>
           <div className={styles.navLogo}>
-            <Image src="/logo-expensum-icon.png" alt="Expensum" className={styles.navLogoIcon} width={34} height={34} />
-            <Image src="/scritta_expensum.png" alt="Expensum" className={styles.navLogoText} width={116} height={20} />
+            <Image src="/logo-expensum-icon.png" alt="" className={styles.navLogoIcon} width={34} height={34} />
+            <span className={styles.navLogoText}>Expensum</span>
           </div>
           <div className={styles.navLinks}>
             <button className={styles.navLink} onClick={() => scrollToSection("come-funziona")}>
               {t("nav.comeFunziona")}
             </button>
+            <Link href="/funzionalita" className={styles.navLink}>Funzionalità</Link>
+            <Link href="/sicurezza" className={styles.navLink}>Sicurezza</Link>
+            <Link href="/faq" className={styles.navLink}>FAQ</Link>
           </div>
           <div className={styles.navActions}>
             {/* /login è una route Flask (proxata via next.config.ts rewrites),
@@ -118,13 +131,13 @@ export default function LandingPage() {
                 "Registrati" è nascosto finché il prodotto è in beta privata a lista d'attesa:
                 l'unico ingresso pubblico è il form waitlist nell'hero, per non contraddire
                 il posizionamento "accesso esclusivo". */}
-            <a href="/login" className={styles.btnPrimary}>
+            <NextLink href="/login" className={styles.btnPrimary}>
               {t("nav.accedi")}
-            </a>
+            </NextLink>
             <LanguageSwitcher />
             {/* Hamburger — solo mobile */}
-            <button
-              className={styles.hamburger}
+          <button
+            className={styles.hamburger}
               onClick={() => setMobileMenuOpen((o) => !o)}
               aria-label={t("nav.menu")}
             >
@@ -140,6 +153,9 @@ export default function LandingPage() {
             <button className={styles.mobileMenuLink} onClick={() => scrollToSection("come-funziona")}>
               {t("nav.comeFunziona")}
             </button>
+            <Link href="/funzionalita" className={styles.mobileMenuLink} onClick={() => setMobileMenuOpen(false)}>Funzionalità</Link>
+            <Link href="/sicurezza" className={styles.mobileMenuLink} onClick={() => setMobileMenuOpen(false)}>Sicurezza</Link>
+            <Link href="/faq" className={styles.mobileMenuLink} onClick={() => setMobileMenuOpen(false)}>FAQ</Link>
           </div>
         )}
       </nav>
@@ -148,18 +164,17 @@ export default function LandingPage() {
         {/* ── Hero ── */}
         <section className={styles.hero}>
           <div className={styles.heroInner}>
-            <div className={styles.heroLeft}>
-              <div className={styles.heroPillGroup} aria-label="Stato del servizio">
+            <div className={styles.heroContent}>
+              <div className={styles.heroPillGroup}>
                 <p className={`${styles.heroPill} ${styles.heroPillBeta}`}>
-                  Compila il form per provare la beta privata ad accesso esclusivo
+                  {t("hero.betaBadge")}
                 </p>
               </div>
               <h1 className={styles.heroHeadline}>
-                {t("hero.headlineLine1")}<br />{t("hero.headlineLine2")}
+                {t("hero.headlineLine1")} {t("hero.headlineLine2")}
               </h1>
               <p className={styles.heroSub}>
-                {t("hero.subLine1")}<br />
-                {t("hero.subLine2")}
+                {t("hero.subLine1")} {t("hero.subLine2")}
               </p>
               {expensesTracked !== null && expensesTracked > 0 && (
                 <div className={styles.heroStatBadge}>
@@ -168,31 +183,24 @@ export default function LandingPage() {
                 </div>
               )}
               <div className={styles.heroActions}>
-                <div id="hero-waitlist-form" style={{ width: "100%", maxWidth: "450px", marginTop: "0.5rem" }}>
-                  <iframe
-                    data-tally-src={tallySrc}
-                    width="100%"
-                    height="200"
-                    title="Expensum Early Access"
-                    style={{ border: "none", margin: 0, padding: 0 }}
-                  ></iframe>
-                  <Script src="https://tally.so/widgets/embed.js" strategy="lazyOnload" />
+                <div id="hero-waitlist-form" className={styles.heroWaitlistForm}>
+                  <div className={styles.waitlistPrompt}>
+                    <div>
+                      <span className={styles.waitlistEyebrow}>{t("hero.betaEyebrow")}</span>
+                      <p>{t("hero.betaPrompt")}</p>
+                    </div>
+                    <button
+                      type="button"
+                      className={styles.waitlistButton}
+                      onClick={openWaitlist}
+                      data-tally-open={TALLY_FORM_ID}
+                      data-tally-layout="modal"
+                      data-tally-hide-title="1"
+                    >
+                      {t("hero.betaCta")} <span aria-hidden="true">→</span>
+                    </button>
+                  </div>
                 </div>
-              </div>
-            </div>
-
-            <div className={styles.heroRight} id="hero-right">
-              <div className={styles.heroMascotWrap} id="hero-mascot">
-                <Image
-                  src="/moneo/Moneo-base.png"
-                  alt={t("hero.mascotAlt")}
-                  className={styles.heroMascotImg}
-                  width={800}
-                  height={800}
-                  priority
-                  sizes="(max-width: 768px) 100vw, 50vw"
-                  style={{ width: "100%", height: "auto" }}
-                />
               </div>
             </div>
           </div>
@@ -223,9 +231,12 @@ export default function LandingPage() {
                   data-delay={i * 120}
                 >
                   <span className={styles.forWhoNum}>0{i + 1}</span>
-                  <div>
+                  <div className={styles.forWhoCopy}>
                     <strong className={styles.forWhoTitle}>{item.title}</strong>
-                    <span className={styles.forWhoDesc}> {item.desc}</span>
+                    <span className={styles.forWhoDesc}>{item.desc}</span>
+                  </div>
+                  <div className={styles.journeyPreview}>
+                    <ProductScreenFrame kind={journeyScreens[i]} compact />
                   </div>
                 </div>
               ))}
@@ -233,119 +244,50 @@ export default function LandingPage() {
           </div>
         </section>
 
-        {/* ── Features ── */}
-        <section id="features" className={styles.sectionAlt}>
-          <div className={styles.sectionInner}>
-            <h2 className={styles.sectionH2Full} data-reveal>
-              {t("features.titlePart1")}{" "}
-              <span className={styles.h2Muted}>{t("features.titlePart2")}</span>
-              <br />
-              <span className={styles.h2Muted}>{t("features.titlePart3")}</span>
-            </h2>
-            <div className={styles.featureIllustration} data-reveal-scale="">
-              <Image
-                src="/moneo/Moneo-AI-powered.png"
-                alt={t("features.illustrationAlt")}
-                className={styles.featureIllustrationImg}
-                width={1200}
-                height={800}
-                sizes="(max-width: 768px) 100vw, 80vw"
-                style={{ width: "100%", height: "auto" }}
-              />
-            </div>
-            <div className={styles.featureGrid} data-reveal>
-              {featureItems.map((f, i) => (
-                <div key={i} className={styles.featureCard}>
-                  <div className={styles.featureIcon}>{FEATURE_ICONS[i]}</div>
-                  <h3 className={styles.featureTitle}>{f.title}</h3>
-                  <p className={styles.featureDesc}>{f.desc}</p>
-                </div>
-              ))}
-            </div>
-          </div>
-        </section>
+        {/* ── Cosa fa Expensum: sistema atomico scroll-driven ── */}
+        <AtomFeatureSection
+          eyebrow={t("features.atomEyebrow")}
+          title={t("features.atomTitle")}
+          intro={t("features.atomIntro")}
+          scrollHint={t("features.atomScrollHint")}
+          items={atomItems}
+        />
 
         <div className={styles.dividerLine} />
 
-        {/* ── Come funziona (Timeline) ── */}
-        <section id="come-funziona" className={styles.section}>
-          <div className={styles.sectionInner}>
-            <h2 className={styles.sectionH2Center} data-reveal>
-              {t("comeFunziona.titleLine1")}<br />{t("comeFunziona.titleLine2")}
-            </h2>
-
-            <div className={styles.useCaseVisual} data-reveal-scale="">
-              <Image
-                src="/moneo/Expensum-use-case.png"
-                alt={t("comeFunziona.useCaseAlt")}
-                className={styles.useCaseImg}
-                width={460}
-                height={600}
-                sizes="(max-width: 768px) 100vw, 460px"
-                style={{ width: "100%", height: "auto" }}
-              />
-            </div>
-
-            <div className={styles.timeline}>
-              <div className={styles.timelineLine} />
-              {howSteps.map((step, i) => (
-                <div
-                  key={i}
-                  className={`${styles.timelineRow} ${i % 2 === 1 ? styles.timelineRowRight : ""}`}
-                  {...(i % 2 === 0 ? { "data-reveal-left": "" } : { "data-reveal-right": "" })}
-                  data-delay={i * 100}
-                >
-                  <div className={styles.timelineCard}>
-                    <div className={styles.timelineStep}>{i + 1}</div>
-                    <div className={styles.timelineIcon}>{HOW_ICONS[i]}</div>
-                    <div>
-                      <strong className={styles.timelineTitle}>{step.title}</strong>
-                      <span className={styles.timelineDesc}> {step.desc}</span>
-                    </div>
-                  </div>
-                </div>
-              ))}
-            </div>
-          </div>
-        </section>
+        {/* ── Come funziona: sticky scroll, stesso comportamento dell'atomo ── */}
+        <HowItWorksSection
+          titleLine1={t("comeFunziona.titleLine1")}
+          titleLine2={t("comeFunziona.titleLine2")}
+          scrollHint={t("comeFunziona.scrollHint")}
+          steps={howSteps}
+        />
 
         {/* ── Trust strip ── */}
         <section className={styles.trustSection}>
           <div className={styles.sectionInner}>
+            <div className={styles.trustHeader}>
+              <div data-reveal>
+                <span className={styles.trustEyebrow}>{t("trust.eyebrow")}</span>
+                <h2>
+                  {t("trust.titleLine1")}<br />
+                  <span className={styles.trustTitleSecond}>{t("trust.titleLine2")}</span>
+                </h2>
+              </div>
+              <p data-reveal-right="">{t("trust.intro")}</p>
+            </div>
             <div className={styles.trustGrid}>
               <div className={styles.trustCard} data-reveal-left="">
-                <div className={styles.trustCardImgWrap}>
-                  <Image
-                    src="/moneo/Moneo-money-helper.png"
-                    alt={t("trust.dashboardAlt")}
-                    className={styles.trustCardImg}
-                    width={600}
-                    height={500}
-                    sizes="(max-width: 768px) 100vw, 50vw"
-                    style={{ width: "100%", height: "auto" }}
-                  />
-                </div>
-                <div className={styles.trustCardText}>
-                  <strong>{t("trust.dashboardTitle")}</strong>
-                  <span>{t("trust.dashboardDesc")}</span>
-                </div>
+                <span className={styles.trustCardLabel}>{t("trust.controlLabel")}</span>
+                <ShieldCheck className={styles.trustCardIcon} size={25} strokeWidth={1.35} aria-hidden="true" />
+                <h3>{t("trust.dashboardTitle")}</h3>
+                <p>{t("trust.dashboardDesc")}</p>
               </div>
               <div className={styles.trustCard} data-reveal-right="">
-                <div className={styles.trustCardImgWrap}>
-                  <Image
-                    src="/moneo/Moneo-secure.png"
-                    alt={t("trust.secureAlt")}
-                    className={styles.trustCardImg}
-                    width={600}
-                    height={500}
-                    sizes="(max-width: 768px) 100vw, 50vw"
-                    style={{ width: "100%", height: "auto" }}
-                  />
-                </div>
-                <div className={styles.trustCardText}>
-                  <strong>{t("trust.secureTitle")}</strong>
-                  <span>{t("trust.secureDesc")}</span>
-                </div>
+                <span className={styles.trustCardLabel}>{t("trust.portabilityLabel")}</span>
+                <Server className={styles.trustCardIcon} size={25} strokeWidth={1.35} aria-hidden="true" />
+                <h3>{t("trust.secureTitle")}</h3>
+                <p>{t("trust.secureDesc")}</p>
               </div>
             </div>
           </div>
@@ -447,28 +389,7 @@ export default function LandingPage() {
         <div className={styles.footerTopBar}>
           <div className={styles.footerLogoCombo}>
             <Image src="/logo-expensum-icon.png" alt="" className={styles.footerLogoIcon} width={28} height={28} />
-            <Image src="/scritta_expensum.png" alt="Expensum" className={styles.footerLogoText} width={93} height={16} />
-          </div>
-          <div className={styles.footerSocials}>
-            <a href="https://instagram.com/expensum.finance" target="_blank" rel="noopener noreferrer" className={styles.footerSocialIcon} aria-label="Instagram">
-              <svg width="18" height="18" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.8}><rect x="2" y="2" width="20" height="20" rx="5" /><circle cx="12" cy="12" r="5" /><circle cx="17.5" cy="6.5" r="1" fill="currentColor" stroke="none" /></svg>
-            </a>
-            <a href="https://acesse.one/ite4lxk" target="_blank" rel="noopener noreferrer" className={styles.footerSocialIcon} aria-label="Facebook">
-              <svg width="18" height="18" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.8}><path d="M18 2h-3a5 5 0 0 0-5 5v3H7v4h3v8h4v-8h3l1-4h-4V7a1 1 0 0 1 1-1h3z" /></svg>
-            </a>
-            <a href="https://www.linkedin.com/company/expensum/" target="_blank" rel="noopener noreferrer" className={styles.footerSocialIcon} aria-label="LinkedIn">
-              <svg width="18" height="18" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round">
-                <path d="M16 8a6 6 0 0 1 6 6v7h-4v-7a2 2 0 0 0-2-2 2 2 0 0 0-2 2v7h-4v-7a6 6 0 0 1 6-6z" />
-                <rect x="2" y="9" width="4" height="12" />
-                <circle cx="4" cy="4" r="2" />
-              </svg>
-            </a>
-            <a href="https://www.tiktok.com/@expensum" target="_blank" rel="noopener noreferrer" className={styles.footerSocialIcon} aria-label="TikTok">
-              <svg width="18" height="18" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round">
-                <path d="M14 4v10.5a3.5 3.5 0 1 1-3.5-3.5c.35 0 .69.05 1 .14" />
-                <path d="M14 4a4.5 4.5 0 0 0 4.5 4.5" />
-              </svg>
-            </a>
+            <span className={styles.footerLogoText}>Expensum</span>
           </div>
         </div>
 
@@ -480,16 +401,14 @@ export default function LandingPage() {
             <a href="#features" className={styles.footerGridLink}>{t("footer.analytics")}</a>
             <a href="#features" className={styles.footerGridLink}>{t("footer.abbonamenti")}</a>
             <a href="#features" className={styles.footerGridLink}>{t("footer.reportMensili")}</a>
-            <a href="#prezzi" className={styles.footerGridLink}>{t("footer.prezzi")}</a>
-          </div>
-          <div className={styles.footerCol}>
-            <p className={styles.footerColTitle}>{t("footer.perIniziare")}</p>
-            <a href="#prezzi" className={styles.footerGridLink}>{t("footer.pianoFree")}</a>
-            <a href="#prezzi" className={styles.footerGridLink}>{t("footer.pianoPremium")}</a>
+            <Link href="/funzionalita" className={styles.footerGridLink}>Funzionalità</Link>
+            <Link href="/prezzi" className={styles.footerGridLink}>Prezzi</Link>
           </div>
           <div className={styles.footerCol}>
             <p className={styles.footerColTitle}>{t("footer.azienda")}</p>
-            <a href="mailto:expensum.finance@gmail.com" className={styles.footerGridLink}>{t("footer.chiSiamo")}</a>
+            <Link href="/chi-siamo" className={styles.footerGridLink}>Chi siamo</Link>
+            <Link href="/sicurezza" className={styles.footerGridLink}>Sicurezza</Link>
+            <Link href="/faq" className={styles.footerGridLink}>FAQ</Link>
             <Link href="/contatti" className={styles.footerGridLink}>{t("footer.contatti")}</Link>
             <Link href="/come-funziona-moneo" className={styles.footerGridLink}>{t("footer.comeFunzionaAI")}</Link>
             <Link href="/privacy" className={styles.footerGridLink}>{t("footer.privacyPolicy")}</Link>
@@ -510,6 +429,6 @@ export default function LandingPage() {
           <p className={styles.footerCopy}>{t("footer.copy", { year: new Date().getFullYear() })}</p>
         </div>
       </footer>
-    </>
+    </div>
   );
 }

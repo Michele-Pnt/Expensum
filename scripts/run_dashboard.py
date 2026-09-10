@@ -19,7 +19,9 @@ from src.dashboard.app import app
 logging.getLogger('werkzeug').setLevel(logging.WARNING)
 
 if __name__ == "__main__":
-    print("🚀 Avvio della Dashboard Admin di Moneo su http://127.0.0.1:5000 ...")
+    print("🚀 Avvio della Dashboard Admin di Moneo su http://127.0.0.1:5050 ...")
     print("Premi CTRL+C per fermarla.")
     # In produzione si consiglia di usare gunicorn o waitress
-    app.run(host="127.0.0.1", port=5000, debug=False)
+    # 5050 evita il conflitto con AirPlay Receiver di macOS, che di default
+    # occupa la porta 5000 (vedi la stessa nota in src/dashboard/app.py).
+    app.run(host="127.0.0.1", port=5050, debug=False)

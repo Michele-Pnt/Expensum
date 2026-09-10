@@ -7,7 +7,9 @@ import {
   BarChart, Bar, LineChart, Line, PieChart, Pie, Cell,
   XAxis, YAxis, Tooltip, ResponsiveContainer, Legend, CartesianGrid,
 } from "recharts";
+import { Lock } from "lucide-react";
 import styles from "@/app/reports/reports.module.css";
+import { canCreateSavingsGoalFromReport } from "@/lib/contextual-navigation";
 
 // ---------------------------------------------------------------------------
 // Tipi
@@ -29,24 +31,27 @@ export interface ReportDetail {
 // Costanti
 // ---------------------------------------------------------------------------
 
-const PALETTE = ["#1A3673", "#C5A059", "#4B6CB7", "#7C9BD6", "#A8853C", "#2B4FA8", "#D4B47A", "#6B7280", "#9DB4D8"];
+// Stessa palette categoriale validata CVD-safe di analytics/page.tsx (skill
+// dataviz) — ordine fisso, non riordinare. Indicizzata a modulo: una 9a
+// categoria ricicla lo slot 1 invece di generare una tinta non validata.
+const PALETTE = ["#3987e5", "#d95926", "#199e70", "#c98500", "#d55181", "#008300", "#9085e9", "#e66767"];
 
 const TOOLTIP_STYLE = {
-  background: "#FFFFFF",
-  border: "1px solid #E5E2DC",
+  background: "#1C363D",
+  border: "1px solid rgba(176,181,185,0.25)",
   borderRadius: 8,
-  color: "#1A1A1A",
+  color: "#E9F1EA",
   fontSize: 12,
 };
 
-const TICK_STYLE = { fontSize: 10, fill: "#6B7280" };
+const TICK_STYLE = { fontSize: 10, fill: "#B0B5B9" };
 
 const PLACEHOLDER_STYLE: React.CSSProperties = {
   display: "flex",
   alignItems: "center",
   justifyContent: "center",
   height: 180,
-  color: "#6B7280",
+  color: "#B0B5B9",
   fontSize: 13,
   textAlign: "center",
   padding: "0 1rem",
@@ -59,7 +64,10 @@ const PLACEHOLDER_STYLE: React.CSSProperties = {
 export function formatDate(iso: string): string {
   if (!iso) return "";
   const d = new Date(iso);
-  return d.toLocaleDateString("it-IT", { day: "2-digit", month: "long", year: "numeric" });
+  if (Number.isNaN(d.getTime())) return "";
+  const day = String(d.getDate()).padStart(2, "0");
+  const month = String(d.getMonth() + 1).padStart(2, "0");
+  return `${day}-${month}-${d.getFullYear()}`;
 }
 
 export function buildReportSubtitle(report: ReportDetail): string {
@@ -83,6 +91,243 @@ export function buildReportSubtitle(report: ReportDetail): string {
   const monthTitle = monthLabel ? monthLabel.charAt(0).toUpperCase() + monthLabel.slice(1) : "";
   return `Analisi del mese chiuso: ${monthTitle}`;
 }
+
+// ---------------------------------------------------------------------------
+// Schema strutturato (report_schema.py) — sostituisce il vecchio Markdown
+// "per Telegram" in text_content. Un report nuovo ha sempre schema_version=1;
+// i report salvati prima di questa modifica restano Markdown grezzo e vengono
+// mostrati dal renderer legacy più sotto (non esiste retention su
+// saved_reports: vecchi link condivisi possono essere aperti a tempo
+// indeterminato, quindi il fallback resta permanente, non solo transitorio).
+// ---------------------------------------------------------------------------
+
+type Tone = "neutral" | "positive" | "negative" | "warning" | null | undefined;
+
+interface KpiItem {
+  label: string;
+  value: string;
+  tone: Tone;
+}
+
+interface TableColumn {
+  key: string;
+  label: string;
+  align: "left" | "right";
+}
+
+interface TableRow {
+  cells: Record<string, string>;
+  tone: Tone;
+}
+
+interface TableSectionData {
+  type: "table";
+  heading: string;
+  columns: TableColumn[];
+  rows: TableRow[];
+  empty_message: string | null;
+}
+
+interface NarrativeSectionData {
+  type: "narrative";
+  heading: string;
+  paragraphs: string[];
+}
+
+interface ListSectionData {
+  type: "list";
+  heading: string;
+  items: string[];
+  empty_message: string | null;
+}
+
+type SectionData = TableSectionData | NarrativeSectionData | ListSectionData;
+
+interface ReportContentV1 {
+  schema_version: 1;
+  title: string;
+  subtitle: string | null;
+  kpis: KpiItem[];
+  sections: SectionData[];
+  locked_from_section: number | null;
+  footer_note: string | null;
+  referral_url: string | null;
+}
+
+function parseReportContent(text: string): ReportContentV1 | null {
+  try {
+    const parsed = JSON.parse(text);
+    if (
+      parsed &&
+      typeof parsed === "object" &&
+      parsed.schema_version === 1 &&
+      typeof parsed.title === "string" &&
+      Array.isArray(parsed.kpis) &&
+      Array.isArray(parsed.sections)
+    ) {
+      return parsed as ReportContentV1;
+    }
+  } catch {
+    // Non è JSON: report legacy salvato prima dello schema strutturato.
+  }
+  return null;
+}
+
+const toneClass = (tone: Tone): string | undefined => {
+  if (tone === "positive") return styles.rowPositive;
+  if (tone === "negative") return styles.rowNegative;
+  if (tone === "warning") return styles.rowWarning;
+  return undefined;
+};
+
+const kpiToneClass = (tone: Tone): string | undefined => {
+  if (tone === "positive") return styles.kpiPositive;
+  if (tone === "negative") return styles.kpiNegative;
+  if (tone === "warning") return styles.kpiWarning;
+  return undefined;
+};
+
+function KpiGrid({ kpis }: { kpis: KpiItem[] }) {
+  if (kpis.length === 0) return null;
+  return (
+    <div className={styles.kpiGrid}>
+      {kpis.map((k, i) => (
+        <div key={i} className={`${styles.kpiCard} ${kpiToneClass(k.tone) ?? ""}`}>
+          <p className={styles.kpiLabel}>{k.label}</p>
+          <p className={styles.kpiValue}>{k.value}</p>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function TableSectionView({ section }: { section: TableSectionData }) {
+  return (
+    <div className={styles.sectionBlock}>
+      <p className={styles.sectionHeading}>{section.heading}</p>
+      {section.rows.length === 0 ? (
+        <p className={styles.emptyMessage}>{section.empty_message}</p>
+      ) : (
+        <div className={styles.tableWrap}>
+          <table className={styles.dataTable}>
+            <thead>
+              <tr>
+                {section.columns.map((col) => (
+                  <th key={col.key} className={col.align === "right" ? styles.alignRight : undefined}>
+                    {col.label}
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {section.rows.map((row, i) => (
+                <tr key={i} className={toneClass(row.tone)}>
+                  {section.columns.map((col) => (
+                    <td key={col.key} className={col.align === "right" ? styles.alignRight : undefined}>
+                      {row.cells[col.key] ?? ""}
+                    </td>
+                  ))}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function NarrativeSectionView({ section }: { section: NarrativeSectionData }) {
+  return (
+    <div className={styles.sectionBlock}>
+      <p className={styles.sectionHeading}>{section.heading}</p>
+      {section.paragraphs.map((p, i) => (
+        <p key={i} className={styles.narrativeParagraph}>{p}</p>
+      ))}
+    </div>
+  );
+}
+
+function ListSectionView({ section }: { section: ListSectionData }) {
+  return (
+    <div className={styles.sectionBlock}>
+      <p className={styles.sectionHeading}>{section.heading}</p>
+      {section.items.length === 0 ? (
+        <p className={styles.emptyMessage}>{section.empty_message}</p>
+      ) : (
+        <ul className={styles.bulletList}>
+          {section.items.map((item, i) => (
+            <li key={i} className={styles.bulletItem}>{item}</li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
+
+function SectionView({ section }: { section: SectionData }) {
+  if (section.type === "table") return <TableSectionView section={section} />;
+  if (section.type === "list") return <ListSectionView section={section} />;
+  return <NarrativeSectionView section={section} />;
+}
+
+// Renderer del nuovo schema strutturato: KPI sempre visibili, sezioni prima di
+// `locked_from_section` sempre visibili (il "peek" per il piano Free), il
+// resto sfocato con la stessa overlay CTA del report legacy quando `locked`.
+function StructuredReportBody({ content, locked }: { content: ReportContentV1; locked: boolean }) {
+  const total = content.sections.length;
+  const rawLockFrom = content.locked_from_section;
+  // Un valore fuori range (indice negativo o oltre la fine) non deve mai far
+  // "fallire aperto" il paywall: viene sempre bloccato dallo 0 in tal caso,
+  // mai mostrato tutto in chiaro (a differenza di un semplice check `< length`).
+  const hasLockPoint = locked && rawLockFrom !== null && rawLockFrom !== undefined;
+  const lockFrom = hasLockPoint ? Math.max(0, Math.min(rawLockFrom as number, total)) : total;
+  const showLock = hasLockPoint && lockFrom < total;
+  const visibleSections = content.sections.slice(0, lockFrom);
+  const hiddenSections = content.sections.slice(lockFrom);
+
+  return (
+    <div className={styles.reportDoc}>
+      <p className={styles.reportDocHeader}>{content.title}</p>
+      <KpiGrid kpis={content.kpis} />
+      {visibleSections.map((s, i) => (
+        <SectionView key={i} section={s} />
+      ))}
+      {showLock ? (
+        <div className={styles.peekWrap}>
+          <div className={styles.lockedSections} aria-hidden="true">
+            {hiddenSections.map((s, i) => (
+              <SectionView key={i} section={s} />
+            ))}
+          </div>
+          <div className={styles.lockedOverlay}>
+            <p className={styles.lockedOverlayTitle}>
+              <Lock size={16} strokeWidth={2} aria-hidden="true" style={{ verticalAlign: "-2px", marginRight: "0.3rem" }} />
+              Continua a leggere con Premium
+            </p>
+            <p className={styles.lockedOverlayText}>
+              Dal secondo mese i report Free si sfocano, per sbloccarli passa a Premium!
+            </p>
+            <Link href="/abbonamenti#premium" className={styles.lockedCta}>
+              Passa a Premium
+            </Link>
+          </div>
+        </div>
+      ) : null}
+      {content.footer_note && <p className={styles.emptyMessage}>{content.footer_note}</p>}
+      {content.referral_url && (
+        <p className={styles.referralNote}>
+          🎁 <a href={content.referral_url}>Invita un amico e sblocca ricompense</a>
+        </p>
+      )}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Renderer legacy (Markdown "per Telegram") — solo per report salvati prima
+// dello schema strutturato. Non toccare: nessun report nuovo lo attraversa più.
+// ---------------------------------------------------------------------------
 
 export function stripTelegramMarkdown(text: string): string {
   return text
@@ -237,13 +482,13 @@ export function WeeklyCharts({ data }: { data: Record<string, any> }) {
       <div className={styles.chartCard}>
         <div className={styles.chartTitle}>Budget vs Speso (€)</div>
         <ResponsiveContainer width="100%" height={220}>
-          <BarChart data={barData} margin={{ top: 4, right: 8, left: 0, bottom: 40 }}>
+          <BarChart data={barData} margin={{ top: 4, right: 8, left: 0, bottom: 40 }} accessibilityLayer={false}>
             <XAxis dataKey="name" tick={TICK_STYLE} angle={-35} textAnchor="end" interval={0} />
             <YAxis tick={TICK_STYLE} width={40} />
-            <Tooltip contentStyle={TOOLTIP_STYLE} formatter={(v: any) => `€${(v ?? 0).toFixed(2)}`} />
-            <Legend wrapperStyle={{ fontSize: 11, color: "#6B7280" }} />
-            <Bar dataKey="Budget" fill="#1A3673" radius={[3, 3, 0, 0]} />
-            <Bar dataKey="Speso" fill="#C5A059" radius={[3, 3, 0, 0]} />
+            <Tooltip cursor={false} contentStyle={TOOLTIP_STYLE} formatter={(v: any) => `€${(v ?? 0).toFixed(2)}`} />
+            <Legend wrapperStyle={{ fontSize: 11, color: "#B0B5B9" }} />
+            <Bar activeBar={false} dataKey="Budget" fill="#5FC4CB" radius={[3, 3, 0, 0]} />
+            <Bar activeBar={false} dataKey="Speso" fill="#B0B5B9" radius={[3, 3, 0, 0]} />
           </BarChart>
         </ResponsiveContainer>
       </div>
@@ -252,15 +497,15 @@ export function WeeklyCharts({ data }: { data: Record<string, any> }) {
         <div className={styles.chartTitle}>Distribuzione Spesa</div>
         {pieData.length > 0 ? (
           <ResponsiveContainer width="100%" height={220}>
-            <PieChart>
-              <Pie data={pieData} dataKey="value" nameKey="name" cx="50%" cy="50%" outerRadius={80} label={false}>
+            <PieChart accessibilityLayer={false}>
+              <Pie activeShape={false} data={pieData} dataKey="value" nameKey="name" cx="50%" cy="50%" outerRadius={80} label={false}>
                 {pieData.map((_, i) => (
                   <Cell key={i} fill={PALETTE[i % PALETTE.length]} />
                 ))}
               </Pie>
-              <Tooltip contentStyle={TOOLTIP_STYLE} formatter={(v: any) => `€${(v ?? 0).toFixed(2)}`} />
+              <Tooltip cursor={false} contentStyle={TOOLTIP_STYLE} formatter={(v: any) => `€${(v ?? 0).toFixed(2)}`} />
               <Legend
-                wrapperStyle={{ fontSize: 10, color: "#6B7280" }}
+                wrapperStyle={{ fontSize: 10, color: "#B0B5B9" }}
                 formatter={(val) => (val.length > 14 ? val.slice(0, 13) + "." : val)}
               />
             </PieChart>
@@ -285,15 +530,15 @@ export function MonthlyCharts({ data }: { data: Record<string, any> }) {
           <div className={styles.chartTitle}>Spesa mese precedente per categoria</div>
           {pieData.length > 0 ? (
             <ResponsiveContainer width="100%" height={220}>
-              <PieChart>
-                <Pie data={pieData} dataKey="value" nameKey="name" cx="50%" cy="50%" outerRadius={80} label={false}>
+              <PieChart accessibilityLayer={false}>
+                <Pie activeShape={false} data={pieData} dataKey="value" nameKey="name" cx="50%" cy="50%" outerRadius={80} label={false}>
                   {pieData.map((_, i) => (
                     <Cell key={i} fill={PALETTE[i % PALETTE.length]} />
                   ))}
                 </Pie>
-                <Tooltip contentStyle={TOOLTIP_STYLE} formatter={(v: any) => `€${(v ?? 0).toFixed(2)}`} />
+                <Tooltip cursor={false} contentStyle={TOOLTIP_STYLE} formatter={(v: any) => `€${(v ?? 0).toFixed(2)}`} />
                 <Legend
-                  wrapperStyle={{ fontSize: 10, color: "#6B7280" }}
+                  wrapperStyle={{ fontSize: 10, color: "#B0B5B9" }}
                   formatter={(val) => (val.length > 14 ? val.slice(0, 13) + "." : val)}
                 />
               </PieChart>
@@ -311,13 +556,13 @@ export function MonthlyCharts({ data }: { data: Record<string, any> }) {
               {hasSpent ? "Spesa vs Budget per categoria (€)" : "Budget per categoria (€)"}
             </div>
             <ResponsiveContainer width="100%" height={220}>
-              <BarChart data={barRows} margin={{ top: 4, right: 8, left: 0, bottom: 40 }}>
+              <BarChart data={barRows} margin={{ top: 4, right: 8, left: 0, bottom: 40 }} accessibilityLayer={false}>
                 <XAxis dataKey="name" tick={TICK_STYLE} angle={-35} textAnchor="end" interval={0} />
                 <YAxis tick={TICK_STYLE} width={40} />
-                <Tooltip contentStyle={TOOLTIP_STYLE} formatter={(v: any) => `€${(v ?? 0).toFixed(2)}`} />
-                <Legend wrapperStyle={{ fontSize: 11, color: "#8b949e" }} />
-                {hasSpent && <Bar dataKey="Speso" fill="#C5A059" radius={[3, 3, 0, 0]} />}
-                <Bar dataKey="Budget" fill="#1A3673" radius={[3, 3, 0, 0]} />
+                <Tooltip cursor={false} contentStyle={TOOLTIP_STYLE} formatter={(v: any) => `€${(v ?? 0).toFixed(2)}`} />
+                <Legend wrapperStyle={{ fontSize: 11, color: "#B0B5B9" }} />
+                {hasSpent && <Bar activeBar={false} dataKey="Speso" fill="#B0B5B9" radius={[3, 3, 0, 0]} />}
+                <Bar activeBar={false} dataKey="Budget" fill="#5FC4CB" radius={[3, 3, 0, 0]} />
               </BarChart>
             </ResponsiveContainer>
           </div>
@@ -326,23 +571,23 @@ export function MonthlyCharts({ data }: { data: Record<string, any> }) {
 
       {historyData.length > 0 ? (
         <div className={styles.chartCard} style={{ marginTop: 12 }}>
-          <div className={styles.chartTitle}>Storico mensile — Entrate / Spese / Risparmio (€)</div>
+          <div className={styles.chartTitle}>Storico mensile: Entrate / Spese / Risparmio (€)</div>
           <ResponsiveContainer width="100%" height={220}>
-            <LineChart data={historyData} margin={{ top: 4, right: 8, left: 0, bottom: 4 }}>
-              <CartesianGrid strokeDasharray="3 3" stroke="#E5E2DC" />
+            <LineChart data={historyData} margin={{ top: 4, right: 8, left: 0, bottom: 4 }} accessibilityLayer={false}>
+              <CartesianGrid strokeDasharray="3 3" stroke="rgba(176,181,185,0.25)" />
               <XAxis dataKey="month" tick={TICK_STYLE} />
               <YAxis tick={TICK_STYLE} width={48} tickFormatter={(v) => `€${v}`} />
-              <Tooltip contentStyle={TOOLTIP_STYLE} formatter={(v: any) => `€${(v ?? 0).toFixed(2)}`} />
-              <Legend wrapperStyle={{ fontSize: 11, color: "#6B7280" }} />
-              <Line type="monotone" dataKey="income" name="Entrate" stroke="#1A3673" strokeWidth={2} dot={false} />
-              <Line type="monotone" dataKey="expenses" name="Spese" stroke="#C5A059" strokeWidth={2} dot={false} />
-              <Line type="monotone" dataKey="net" name="Risparmio" stroke="#4B6CB7" strokeWidth={2} dot={false} />
+              <Tooltip cursor={false} contentStyle={TOOLTIP_STYLE} formatter={(v: any) => `€${(v ?? 0).toFixed(2)}`} />
+              <Legend wrapperStyle={{ fontSize: 11, color: "#B0B5B9" }} />
+              <Line activeDot={false} type="monotone" dataKey="income" name="Entrate" stroke="#5FC4CB" strokeWidth={2} dot={false} />
+              <Line activeDot={false} type="monotone" dataKey="expenses" name="Spese" stroke="#E66767" strokeWidth={2} dot={false} />
+              <Line activeDot={false} type="monotone" dataKey="net" name="Risparmio" stroke="#B0B5B9" strokeWidth={2} dot={false} />
             </LineChart>
           </ResponsiveContainer>
         </div>
       ) : (
         <div className={styles.chartCard} style={{ marginTop: 12 }}>
-          <div className={styles.chartTitle}>Storico mensile — Entrate / Spese / Risparmio (€)</div>
+          <div className={styles.chartTitle}>Storico mensile: Entrate / Spese / Risparmio (€)</div>
           <div style={PLACEHOLDER_STYLE}>
             Storico mensile non disponibile per questo report.<br />Genera un nuovo piano mensile per vederlo.
           </div>
@@ -362,7 +607,7 @@ export function ReportBody({ report }: { report: ReportDetail }) {
   const hasChartData = report.report_data !== null;
   const isLocked = report.locked === true;
 
-  const { header, body } = splitReportHeader(stripTelegramMarkdown(report.text_content));
+  const structured = parseReportContent(report.text_content);
 
   return (
     <div>
@@ -376,32 +621,54 @@ export function ReportBody({ report }: { report: ReportDetail }) {
 
       <div className={styles.textCard}>
         <div className={styles.textCardTitle}>Informazioni dettagliate:</div>
-        {isLocked ? (() => {
-          const { peek, rest } = splitReportPeek(body);
-          return (
-            <div className={styles.reportDoc}>
-              {header && <p className={styles.reportDocHeader}>{header}</p>}
-              <div className={styles.peekWrap}>
-                {renderReportBody(peek)}
-                {rest && renderReportBody(rest, true)}
-                <div className={styles.lockedOverlay}>
-                  <p className={styles.lockedOverlayTitle}>🔒 Continua a leggere con Premium</p>
-                  <p className={styles.lockedOverlayText}>
-                    Dal secondo mese i report Free si sfocano, per sbloccarli passa a Premium!
-                  </p>
-                  <Link href="/abbonamenti#premium" className={styles.lockedCta}>
-                    Passa a Premium
-                  </Link>
-                </div>
-              </div>
-            </div>
-          );
-        })() : (
-          <div className={styles.reportDoc}>
-            {header && <p className={styles.reportDocHeader}>{header}</p>}
-            {renderReportBody(body)}
-          </div>
+        {structured ? (
+          <StructuredReportBody content={structured} locked={isLocked} />
+        ) : (
+          <LegacyReportBody text={report.text_content} locked={isLocked} />
         )}
+      </div>
+      {canCreateSavingsGoalFromReport(report) && (
+        <div className={styles.savingsGoalCta}>
+          <p>Hai chiuso il mese con un risparmio netto positivo.</p>
+          <Link href="/goals" className={styles.savingsGoalCtaLink}>Crea un obiettivo</Link>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// Report salvati prima dello schema strutturato (Markdown "per Telegram").
+function LegacyReportBody({ text, locked }: { text: string; locked: boolean }) {
+  const { header, body } = splitReportHeader(stripTelegramMarkdown(text));
+
+  if (!locked) {
+    return (
+      <div className={styles.reportDoc}>
+        {header && <p className={styles.reportDocHeader}>{header}</p>}
+        {renderReportBody(body)}
+      </div>
+    );
+  }
+
+  const { peek, rest } = splitReportPeek(body);
+  return (
+    <div className={styles.reportDoc}>
+      {header && <p className={styles.reportDocHeader}>{header}</p>}
+      <div className={styles.peekWrap}>
+        {renderReportBody(peek)}
+        {rest && renderReportBody(rest, true)}
+        <div className={styles.lockedOverlay}>
+          <p className={styles.lockedOverlayTitle}>
+            <Lock size={16} strokeWidth={2} aria-hidden="true" style={{ verticalAlign: "-2px", marginRight: "0.3rem" }} />
+            Continua a leggere con Premium
+          </p>
+          <p className={styles.lockedOverlayText}>
+            Dal secondo mese i report Free si sfocano, per sbloccarli passa a Premium!
+          </p>
+          <Link href="/abbonamenti#premium" className={styles.lockedCta}>
+            Passa a Premium
+          </Link>
+        </div>
       </div>
     </div>
   );

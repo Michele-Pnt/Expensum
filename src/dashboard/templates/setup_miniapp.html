@@ -674,7 +674,7 @@
 
                 var topRow = document.createElement('div');
                 topRow.style.cssText = 'display:flex; justify-content:space-between; align-items:center;';
-                var meta = (sub.amount != null ? ' — €' + sub.amount : '') + (sub.last_billed ? ' — dal ' + sub.last_billed : '');
+                var meta = (sub.amount != null ? ' · €' + sub.amount : '') + (sub.last_billed ? ' · dal ' + sub.last_billed : '');
                 topRow.innerHTML = '<span class="existing-item-name">' + escapeHtml(sub.name)
                     + '<span class="existing-item-meta">' + escapeHtml(meta) + '</span></span>';
 

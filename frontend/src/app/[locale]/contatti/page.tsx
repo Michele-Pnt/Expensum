@@ -18,7 +18,7 @@ export async function generateMetadata({
   const { locale } = await params;
   const isEn = locale === "en";
   return {
-    title: isEn ? "Contact us — Expensum" : "Contatti — Expensum",
+    title: isEn ? "Contact us | Expensum" : "Contatti | Expensum",
     description: isEn
       ? "How to get in touch with the Expensum team: email, feedback and social channels."
       : "Come contattare il team di Expensum: email, feedback e canali social.",

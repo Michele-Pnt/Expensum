@@ -28,7 +28,7 @@ export default function PrivacyContentEn() {
         <p>
           The service is reserved for <strong>adult users (18 or older)</strong>, verified via
           an explicit attestation required at registration. We do not knowingly collect data
-          from minors (Art. 8 GDPR; Italian Legislative Decree 101/2018 — contractual capacity).
+          from minors (Art. 8 GDPR; Italian Legislative Decree 101/2018, contractual capacity).
         </p>
 
         <h3>2.1 Data provided directly by the user</h3>
@@ -57,7 +57,7 @@ export default function PrivacyContentEn() {
           </li>
           <li>
             <strong>Financial data</strong> (amounts, categories, accounts, subscriptions,
-            declared savings goals with their tracked progress — Pro plan only):
+            declared savings goals with their tracked progress, Pro plan only):
             entered voluntarily for managing personal expenses. Legal basis: performance
             of a contract (Art. 6(1)(b)). Providing this data is optional in substance (no
             obligation to log every expense), but necessary to use the service&apos;s features.
@@ -69,7 +69,7 @@ export default function PrivacyContentEn() {
           <li>
             <strong>Technical logs</strong> (timestamp, operation type, IP address, user agent):
             for diagnostics, security and abuse prevention.
-            Legal basis: <em>legitimate interest</em> (Art. 6(1)(f)) — specific interest:
+            Legal basis: <em>legitimate interest</em> (Art. 6(1)(f)); specific interest:
             ensuring system integrity and security and preventing unauthorized access.
             Processing is necessary and proportionate; logs contain no financial data and
             are deleted within 90 days.
@@ -78,9 +78,17 @@ export default function PrivacyContentEn() {
           <li>
             <strong>Aggregated usage data</strong> (number of messages by input type,
             features used): to improve the product and detect malfunctions.
-            Legal basis: <em>legitimate interest</em> (Art. 6(1)(f)) — specific interest:
+            Legal basis: <em>legitimate interest</em> (Art. 6(1)(f)); specific interest:
             continuous improvement of the service. Data is aggregated and does not allow
             identification of the individual user.
+          </li>
+          <li>
+            <strong>Internal quality control of automated features</strong>: to ensure the
+            correct functioning of features that analyze expenses automatically (e.g. grouping
+            similar expense entries in charts), a limited number of people on our team may
+            review, in aggregated form, the expense descriptions written by users. Legal basis:
+            <em> legitimate interest</em> (Art. 6(1)(f)); specific interest: verifying the
+            quality of features that operate without real-time human supervision.
           </li>
           <li>
             <strong>Cookies and analytics identifiers</strong>: only with the user&apos;s
@@ -93,7 +101,7 @@ export default function PrivacyContentEn() {
             service launch. <strong>During the beta phase</strong>, if capacity allows, filling
             in the form may result in the immediate creation of an active Expensum account
             (email, generated password, web app access) and the corresponding credentials
-            being sent by email — in that case the account data is processed under the rules
+            being sent by email; in that case the account data is processed under the rules
             in Section 2.1 (legal basis: contract performance, Art. 6(1)(b)) instead of the
             waitlist rules.
             Legal basis for the waitlist sign-up itself: consent (Art. 6(1)(a)), withdrawable
@@ -124,7 +132,7 @@ export default function PrivacyContentEn() {
           <tbody>
             <tr>
               <td><strong>Telegram Messenger Inc.</strong></td>
-              <td>Main communication channel — independent controller for data on the Telegram platform</td>
+              <td>Main communication channel, independent controller for data on the Telegram platform</td>
               <td>UAE / Dubai</td>
               <td>Contract (Art. 6(1)(b))</td>
               <td>SCC (Art. 46(2)(c) GDPR)</td>
@@ -132,70 +140,70 @@ export default function PrivacyContentEn() {
             <tr>
               <td><strong>Mistral AI</strong></td>
               <td>NLP analysis</td>
-              <td>France 🇫🇷 (EU)</td>
+              <td>France (EU)</td>
               <td>Contract (Art. 6(1)(b))</td>
               <td>No extra-EU transfer</td>
             </tr>
             <tr>
               <td><strong>Mistral AI</strong></td>
               <td>AI conversational agent</td>
-              <td>France 🇫🇷 (EU)</td>
+              <td>France (EU)</td>
               <td>Contract (Art. 6(1)(b))</td>
               <td>No extra-EU transfer</td>
             </tr>
             <tr>
               <td><strong>Google Vertex AI</strong> (Gemini 2.0)</td>
               <td>NLP analysis (Pro plan only), processing restricted to the EU region via the <code>location</code> parameter set in our code</td>
-              <td>Frankfurt 🇩🇪 (EU)</td>
+              <td>Frankfurt (EU)</td>
               <td>Contract (Art. 6(1)(b))</td>
               <td>No extra-EU transfer</td>
             </tr>
             <tr>
               <td><strong>Tesseract OCR</strong></td>
-              <td>Text recognition from receipt photos — local processing on the Netcup server, no data transmitted to third parties</td>
-              <td>Italy 🇮🇹 (Netcup DE server)</td>
+              <td>Text recognition from receipt photos, local processing on the Netcup server, no data transmitted to third parties</td>
+              <td>Italy (Netcup DE server)</td>
               <td>Contract (Art. 6(1)(b))</td>
               <td>Internal EU processing</td>
             </tr>
             <tr>
               <td><strong>Notion Labs Inc.</strong></td>
               <td>Storage of financial data in the user&apos;s Notion workspace; the connection is optional and chosen by the user (alternative available: DBMS on EU servers)</td>
-              <td>USA 🇺🇸</td>
+              <td>USA</td>
               <td>Contract (Art. 6(1)(b))</td>
               <td>SCC (Art. 46(2)(c))</td>
             </tr>
             <tr>
               <td><strong>Netcup GmbH</strong></td>
               <td>VPS hosting, PostgreSQL database, application data storage</td>
-              <td>Germany 🇩🇪 (EU)</td>
-              <td>Legitimate interest (Art. 6(1)(f)) — provision of infrastructure necessary for the service</td>
+              <td>Germany (EU)</td>
+              <td>Legitimate interest (Art. 6(1)(f)); provision of infrastructure necessary for the service</td>
               <td>Internal EU processing</td>
             </tr>
             <tr>
               <td><strong>Google Analytics 4</strong></td>
               <td>Aggregated website usage statistics (with consent only)</td>
-              <td>USA 🇺🇸</td>
+              <td>USA</td>
               <td>Consent (Art. 6(1)(a))</td>
               <td>SCC (Art. 46(2)(c))</td>
             </tr>
             <tr>
               <td><strong>Meta Platforms Inc.</strong> (Meta Pixel)</td>
               <td>Conversion measurement and campaign optimization (with consent only)</td>
-              <td>USA 🇺🇸</td>
+              <td>USA</td>
               <td>Consent (Art. 6(1)(a))</td>
               <td>SCC (Art. 46(2)(c))</td>
             </tr>
             <tr>
               <td><strong>PostHog Inc.</strong></td>
-              <td>Pseudonymized product analytics — funnels, UX events (with consent only)</td>
-              <td>EU 🇪🇺 (EU server region)</td>
+              <td>Pseudonymized product analytics, funnels, UX events (with consent only)</td>
+              <td>EU (EU server region)</td>
               <td>Consent (Art. 6(1)(a))</td>
               <td>Internal EU processing</td>
             </tr>
             <tr>
               <td><strong>Tally.so</strong></td>
               <td>Form development</td>
-              <td>Belgium 🇧🇪 (EU)</td>
+              <td>Belgium (EU)</td>
               <td>Consent (Art. 6(1)(a))</td>
               <td>Internal EU processing</td>
             </tr>
@@ -203,15 +211,15 @@ export default function PrivacyContentEn() {
               <td><strong>Brevo (Sendinblue SA)</strong></td>
               <td>Sends emails to beta waitlist subscribers and, if a beta account is
               created, a transactional email with login credentials</td>
-              <td>France 🇫🇷 (EU)</td>
+              <td>France (EU)</td>
               <td>Consent (Art. 6(1)(a)) for the waitlist email; Contract (Art. 6(1)(b)) for
               the transactional login-credentials email</td>
               <td>Internal EU processing</td>
             </tr>
             <tr>
               <td><strong>Stripe Inc.</strong> (future)</td>
-              <td>Payment management for plans available on the platform — <em>not yet active</em></td>
-              <td>USA/IE 🇺🇸🇮🇪</td>
+              <td>Payment management for plans available on the platform, <em>not yet active</em></td>
+              <td>USA/IE</td>
               <td>Contract (Art. 6(1)(b))</td>
               <td>SCC (Art. 46(2)(c))</td>
             </tr>
@@ -252,7 +260,7 @@ export default function PrivacyContentEn() {
           exclusively in Germany.
         </p>
         <p>
-          <strong>⚠️ Notion backend and residency of financial data.</strong> If you choose to
+          <strong>Notion backend and residency of financial data.</strong> If you choose to
           connect your Notion workspace as the backend for your financial data, that data
           (expenses, income, categories, accounts, etc.) is written to and read directly from
           your workspace via the official Notion API, subject to your OAuth authorization.
@@ -273,9 +281,9 @@ export default function PrivacyContentEn() {
         <ul>
           <li><strong>Account and financial data</strong>: retained until the user voluntarily deletes their account.</li>
           <li><strong>Technical logs</strong> (including IPs): 90 days from the event, then automatically deleted.</li>
-          <li><strong>Original voice messages</strong>: not retained — deleted immediately after transcription.</li>
+          <li><strong>Original voice messages</strong>: not retained, deleted immediately after transcription.</li>
           <li><strong>Cookie consent data</strong>: 6 months (duration of the consent cookie).</li>
-          <li><strong>Waitlist email</strong> (Tally): until the service launch or withdrawal of consent, whichever comes first — unless the form resulted in the creation of a beta account, in which case the &quot;Account and financial data&quot; rule above applies.</li>
+          <li><strong>Waitlist email</strong> (Tally): until the service launch or withdrawal of consent, whichever comes first, unless the form resulted in the creation of a beta account, in which case the &quot;Account and financial data&quot; rule above applies.</li>
           <li><strong>Backups</strong>: database backups are deleted within 30 days of account deletion.</li>
         </ul>
         <p>

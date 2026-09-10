@@ -1,31 +1,48 @@
 :root {
-  /* Brand Kit Expensum */
-  --color-primary: #1A3673;
-  --color-primary-dark: #142959;
-  --color-primary-light: rgba(26, 54, 115, 0.08);
-  --color-accent: #C5A059;
-  --color-accent-dim: #A8853C;
+  /* Brand Kit Expensum — rebrand dark 2026-08-08, font Sora dal 2026-08-16 */
+  --color-primary: #5FC4CB;
+  --color-primary-dark: #4AA7AE;
+  --color-primary-light: rgba(95, 196, 203, 0.10);
+  --color-accent: #5FC4CB;
+  --color-accent-dim: #4AA7AE;
   --color-neutral: #B0B5B9;
 
-  /* Backgrounds */
-  --color-base: #F7F6F2;
-  --color-surface: #FFFFFF;
-  --color-surface-2: #F0EDE8;
-  --color-surface-3: #E8E5DF;
+  /* Backgrounds — dark-first */
+  --color-base: #1C363D;
+  --color-surface: #1C363D;
+  --color-surface-2: rgba(233, 241, 234, 0.04);
+  --color-surface-3: rgba(233, 241, 234, 0.07);
 
-  /* Borders */
-  --color-border: #E5E2DC;
-  --color-border-2: #D4D0C8;
+  /* Borders — Platino attenuato, mai ombre */
+  --color-border: rgba(176, 181, 185, 0.25);
+  --color-border-2: rgba(176, 181, 185, 0.4);
 
   /* Text */
-  --color-text: #1A1A1A;
-  --color-text-2: #6B7280;
-  --color-text-3: #9CA3AF;
+  --color-text: #E9F1EA;
+  --color-text-2: #B0B5B9;
+  --color-text-3: rgba(176, 181, 185, 0.7);
 
-  /* Finance colors */
-  --color-income: #1A3673;
-  --color-expense: #C5A059;
-  --color-net: #4B6CB7;
+  /* Finance colors — polarità entrate/uscite, distinte dall'accento brand.
+     Validati su sfondo #1C363D con scripts/validate_palette.js (skill dataviz):
+     income 3.87:1, expense 3.95:1 (entrambi >= 3:1 per mark/grafico). */
+  --color-income: #16A34A;
+  --color-expense: #E66767;
+  --color-net: #B0B5B9;
+
+  /* Palette categoriale grafici multi-serie (8 tinte, ordine fisso validato
+     CVD-safe su sfondo #1C363D — vedi skill dataviz, non riordinare). */
+  --chart-cat-1: #3987e5;
+  --chart-cat-2: #d95926;
+  --chart-cat-3: #199e70;
+  --chart-cat-4: #c98500;
+  --chart-cat-5: #d55181;
+  --chart-cat-6: #008300;
+  --chart-cat-7: #9085e9;
+  --chart-cat-8: #e66767;
+
+  /* Status (riservati, mai riusati come "serie categoriale") */
+  --status-warning: #fab219;
+  --status-critical: #e66767;
 
   /* Semantic aliases */
   --background: var(--color-base);
@@ -35,12 +52,12 @@
   --sidebar-hover: var(--color-surface-2);
   --sidebar-active: var(--color-primary);
   --accent: var(--color-primary);
-  --accent-foreground: #FFFFFF;
+  --accent-foreground: #1C363D;
   --muted: var(--color-surface-2);
   --muted-foreground: var(--color-text-2);
   --chat-bg: var(--color-base);
   --chat-bubble-user: var(--color-primary);
-  --chat-bubble-bot: var(--color-surface);
+  --chat-bubble-bot: var(--color-surface-2);
   --border: var(--color-border);
   --radius: var(--radius-md);
 
@@ -66,10 +83,24 @@ body {
   box-sizing: border-box;
 }
 
+/* Titoli principali uniformi: il colore identifica la sezione senza icone decorative. */
+h1:not(.visuallyHidden) {
+  color: var(--color-primary);
+  font-weight: 400;
+  letter-spacing: 0.015em;
+}
+
+@media (max-width: 600px) {
+  h1:not(.visuallyHidden) {
+    font-size: 1.5rem;
+    line-height: 1.25;
+  }
+}
+
 body {
   color: var(--color-text);
   background: var(--color-base);
-  font-family: var(--font-inter), 'Inter', system-ui, sans-serif;
+  font-family: var(--font-sora), 'Sora', system-ui, sans-serif;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
 }
@@ -113,9 +144,9 @@ ul {
 }
 
 @keyframes ringPulse {
-  0%   { box-shadow: 0 0 0 0 rgba(197, 160, 89, 0.40); }
-  70%  { box-shadow: 0 0 0 20px rgba(197, 160, 89, 0); }
-  100% { box-shadow: 0 0 0 0 rgba(197, 160, 89, 0); }
+  0%   { box-shadow: 0 0 0 0 rgba(95, 196, 203, 0.40); }
+  70%  { box-shadow: 0 0 0 20px rgba(95, 196, 203, 0); }
+  100% { box-shadow: 0 0 0 0 rgba(95, 196, 203, 0); }
 }
 
 @keyframes gradientShift {

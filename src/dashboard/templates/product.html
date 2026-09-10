@@ -156,6 +156,18 @@
         <div class="stat-value" style="color: var(--success)">{{ tx_success.overall_success_rate_pct }}%</div>
         <span class="stat-label" style="text-transform:none; margin-top:5px">{{ tx_success.overall_total }} tentativi totali</span>
     </div>
+    <div class="stat-card glass-panel" style="border-left: 4px solid var(--danger)">
+        <div class="stat-label">Error rate (AI/salvataggio) {{ ui.info("% di tentativi falliti per un problema tecnico (outcome='failed': errore API del parsing, conto mancante, errore di salvataggio) sul totale negli ultimi " ~ tx_success.days ~ " giorni. Separato dagli annullamenti: qui la causa è un guasto di sistema, non una scelta dell'utente.") }}</div>
+        <div class="stat-value" style="color: var(--danger)">{{ tx_success.overall_error_rate_pct }}%</div>
+    </div>
+    <div class="stat-card glass-panel" style="border-left: 4px solid var(--warning)">
+        <div class="stat-label">Cancel rate (utente) {{ ui.info("% di tentativi annullati deliberatamente dall'utente (outcome='cancelled') sul totale negli ultimi " ~ tx_success.days ~ " giorni. L'utente ha visto la transazione proposta e ha scelto di non salvarla.") }}</div>
+        <div class="stat-value" style="color: var(--warning)">{{ tx_success.overall_cancel_rate_pct }}%</div>
+    </div>
+    <div class="stat-card glass-panel" style="border-left: 4px solid var(--warning)">
+        <div class="stat-label">Categoria corretta prima di salvare {{ ui.info("% delle transazioni CONFERMATE in cui l'utente ha cambiato la categoria proposta dall'AI prima di salvare (reason='category_corrected' su tx_events). Non è un fallimento — la transazione è comunque salvata — ma misura quanto spesso l'AI azzecca importo/tipo ma sbaglia la categoria. Tracciato sia su Telegram sia sulla webapp, per spese ed entrate.") }}</div>
+        <div class="stat-value" style="color: var(--warning)">{{ tx_success.overall_category_corrected_pct }}%</div>
+    </div>
 </div>
 <div class="glass-panel data-table-wrapper" style="margin-top: 1rem;">
     <table class="glass-table">
@@ -195,4 +207,38 @@
         <span class="stat-label" style="text-transform:none; margin-top:5px">{{ subscription_funnel.confirmed }} confermati · {{ subscription_funnel.dismissed }} rifiutati</span>
     </div>
 </div>
+
+<!-- NORMALIZZAZIONE VOCI DI SPESA -->
+<h3 style="margin-top: 2rem; margin-bottom: 1rem; color: var(--text-main);">Normalizzazione voci di spesa {{ ui.info("Metadato di sola aggregazione per i grafici (Analytics -> 'Voci'): raggruppa varianti testuali della stessa voce (\"coca\"/\"coca cola\") sotto un'unica ancora per utente+categoria, senza mai toccare la descrizione originale. Sistema completamente automatico, nessuna conferma utente — questa vista è la rete di sicurezza. Fonte: expense_label_clusters, popolata sia dall'hook live (create_expense) sia dal backfill storico (scripts/backfill_expense_label_clusters.py).") }}</h3>
+<div class="stats-grid">
+    <div class="stat-card glass-panel" style="border-left: 4px solid var(--accent-primary)">
+        <div class="stat-label">Cluster totali {{ ui.info("Numero di voci di spesa normalizzate distinte, su tutti gli utenti Postgres.") }}</div>
+        <div class="stat-value">{{ expense_label_clusters.total_clusters }}</div>
+        <span class="stat-label" style="text-transform:none; margin-top:5px">{{ expense_label_clusters.avg_cluster_size ~ ' spese/cluster in media' if expense_label_clusters.avg_cluster_size is not none else 'n/d' }}</span>
+    </div>
+    <div class="stat-card glass-panel" style="border-left: 4px solid {{ 'var(--danger)' if expense_label_clusters.unlabeled_expenses > 0 else 'var(--success)' }}">
+        <div class="stat-label">Spese senza cluster {{ ui.info("Spese Postgres con label_cluster_id ancora NULL. Deve tendere a zero dopo il backfill — se cresce nel tempo, l'hook live in create_expense ha smesso di girare.") }}</div>
+        <div class="stat-value" style="color: {{ 'var(--danger)' if expense_label_clusters.unlabeled_expenses > 0 else 'var(--success)' }}">{{ expense_label_clusters.unlabeled_expenses }}</div>
+    </div>
+    <div class="stat-card glass-panel" style="border-left: 4px solid var(--warning)">
+        <div class="stat-label">Cluster mai uniti {{ ui.info("Cluster con una sola spesa dentro, mai raggiunti da una variante simile. Non è di per sé un problema (può essere genuina varietà di spesa), ma un rapporto che cresce nel tempo rispetto ai cluster con più membri segnala una soglia di match troppo rigida.") }}</div>
+        <div class="stat-value" style="color: var(--warning)">{{ expense_label_clusters.singleton_clusters }}</div>
+        <span class="stat-label" style="text-transform:none; margin-top:5px">{{ expense_label_clusters.multi_clusters }} cluster con più varianti unite</span>
+    </div>
+    <div class="stat-card glass-panel" style="border-left: 4px solid var(--success)">
+        <div class="stat-label">Ultimi {{ expense_label_clusters.days }}gg {{ ui.info("Nel periodo: quante spese hanno aperto un cluster nuovo contro quante si sono unite a uno già esistente. È il tasso di successo della normalizzazione nel periodo, non solo lo stato cumulativo. Attenzione: subito dopo un backfill storico questo numero è falsato (molti cluster nuovi per spese vecchie), torna affidabile passata la finestra del backfill.") }}</div>
+        <div class="stat-value" style="color: var(--success)">{{ expense_label_clusters.merges_period }}</div>
+        <span class="stat-label" style="text-transform:none; margin-top:5px">unioni · {{ expense_label_clusters.new_clusters_period }} cluster nuovi</span>
+    </div>
+</div>
+{% if expense_label_clusters.top_clusters %}
+<table class="glass-table" style="margin-top: 1rem;">
+    <thead><tr><th>Cluster più grandi {{ ui.info("Le 10 voci di spesa normalizzate con più varianti/spese unite, su tutti gli utenti — un rapido controllo a occhio per individuare eventuali merge sospetti.") }}</th><th>Spese unite</th></tr></thead>
+    <tbody>
+        {% for cluster in expense_label_clusters.top_clusters %}
+        <tr><td>{{ cluster.anchor_text }}</td><td>{{ cluster.size }}</td></tr>
+        {% endfor %}
+    </tbody>
+</table>
+{% endif %}
 {% endblock %}

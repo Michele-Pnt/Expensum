@@ -22,6 +22,17 @@ from src.storage import rls
 
 logger = logging.getLogger("financial_agent.category_sync")
 
+_CATEGORY_AVERAGES_QUERY = text(
+    "SELECT category_name, SUM(amount) AS total, "
+    "COUNT(DISTINCT TO_CHAR(DATE_TRUNC('month', expense_date), 'YYYY-MM')) AS months "
+    "FROM expenses WHERE user_id = :uid GROUP BY category_name"
+)
+_CATEGORY_AVERAGES_FOR_CATEGORY_QUERY = text(
+    "SELECT category_name, SUM(amount) AS total, "
+    "COUNT(DISTINCT TO_CHAR(DATE_TRUNC('month', expense_date), 'YYYY-MM')) AS months "
+    "FROM expenses WHERE user_id = :uid AND category_name = :cat GROUP BY category_name"
+)
+
 
 def sync_categories_to_local(
     client,  # NotionFinanceClient
@@ -121,30 +132,15 @@ def compute_category_averages(
     La formula replica quella Notion: totale_spese / numero_mesi_unici_con_spese.
     Se category_filter è specificato, aggiorna solo quella categoria.
     """
-    month_expr = "TO_CHAR(DATE_TRUNC('month', expense_date), 'YYYY-MM')"
     try:
         if category_filter:
             rows = session.execute(
-                text(
-                    "SELECT category_name, "
-                    "SUM(amount) as total, "
-                    f"COUNT(DISTINCT {month_expr}) as months "
-                    "FROM expenses "
-                    "WHERE user_id = :uid AND category_name = :cat "
-                    "GROUP BY category_name"
-                ),
+                _CATEGORY_AVERAGES_FOR_CATEGORY_QUERY,
                 {"uid": user_id, "cat": category_filter},
             ).fetchall()
         else:
             rows = session.execute(
-                text(
-                    "SELECT category_name, "
-                    "SUM(amount) as total, "
-                    f"COUNT(DISTINCT {month_expr}) as months "
-                    "FROM expenses "
-                    "WHERE user_id = :uid "
-                    "GROUP BY category_name"
-                ),
+                _CATEGORY_AVERAGES_QUERY,
                 {"uid": user_id},
             ).fetchall()
 

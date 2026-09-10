@@ -66,6 +66,50 @@ def _month_bounds(ref: date) -> tuple[date, date]:
     return ref.replace(day=1), ref.replace(day=last_day)
 
 
+def classify_budget_band(spent: float, budget: Optional[float]) -> Optional[str]:
+    """Classifica lo stato budget per il centro notifiche: "reached" (100-120%),
+    "exceeded" (>120%), o `None` (sotto soglia/senza budget/solo banda 80% warning
+    — quest'ultima resta solo feedback inline, non genera una notifica)."""
+    if not budget or budget <= 0:
+        return None
+    ratio = spent / budget
+    if ratio >= 1.20:
+        return "exceeded"
+    if ratio >= 1.00:
+        return "reached"
+    return None
+
+
+def get_category_spent_and_budget(
+    storage, category: str, ref: date
+) -> Optional[tuple[float, float]]:
+    """Speso month-to-date e budget mensile per `category`, o `None` senza budget.
+
+    Pubblica (non solo uso interno a questo modulo): i chiamanti con bisogno sia
+    del messaggio alert sia della banda per il centro notifiche (es. bot.py) la
+    invocano una volta sola e derivano entrambi da `evaluate_budget_alert`/
+    `classify_budget_band`, evitando un secondo giro di chiamate a `storage`
+    (costose su Notion, soggetto a rate limit).
+    """
+    budget: Optional[float] = None
+    for cat in storage.get_categories():
+        if cat.get("name") == category:
+            raw = cat.get("monthly_budget")
+            budget = float(raw) if raw is not None else None
+            break
+    if not budget or budget <= 0:
+        return None
+
+    start, end = _month_bounds(ref)
+    txns = storage.fetch_all_transactions(start, end)
+    spent = sum(
+        abs(float(t.get("amount") or 0.0))
+        for t in txns
+        if t.get("category") == category
+    )
+    return spent, budget
+
+
 def check_expense_budget_alert(
     storage, category: Optional[str], ref: Optional[date] = None
 ) -> Optional[str]:
@@ -89,23 +133,28 @@ def check_expense_budget_alert(
         return None
     ref = ref or date.today()
 
-    # Budget della categoria (None se non impostato → nessun alert).
-    budget: Optional[float] = None
-    for cat in storage.get_categories():
-        if cat.get("name") == category:
-            raw = cat.get("monthly_budget")
-            budget = float(raw) if raw is not None else None
-            break
-    if not budget or budget <= 0:
+    result = get_category_spent_and_budget(storage, category, ref)
+    if result is None:
         return None
-
-    # Speso month-to-date per la categoria nel mese di riferimento.
-    start, end = _month_bounds(ref)
-    txns = storage.fetch_all_transactions(start, end)
-    spent = sum(
-        abs(float(t.get("amount") or 0.0))
-        for t in txns
-        if t.get("category") == category
-    )
-
+    spent, budget = result
     return evaluate_budget_alert(category, spent, budget)
+
+
+def check_expense_budget_status(
+    storage, category: Optional[str], ref: Optional[date] = None
+) -> Optional[dict]:
+    """Come `check_expense_budget_alert`, ma per il centro notifiche: ritorna
+    `{"category", "spent", "budget", "band"}` solo quando `band` è "reached" o
+    "exceeded" (mai per la sola banda 80% warning), o `None`."""
+    if not category:
+        return None
+    ref = ref or date.today()
+
+    result = get_category_spent_and_budget(storage, category, ref)
+    if result is None:
+        return None
+    spent, budget = result
+    band = classify_budget_band(spent, budget)
+    if band is None:
+        return None
+    return {"category": category, "spent": spent, "budget": budget, "band": band}

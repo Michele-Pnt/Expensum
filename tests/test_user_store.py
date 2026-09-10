@@ -1,13 +1,14 @@
 import pytest
 from datetime import date, datetime, timedelta
 from src.user_store import (
-    User, DailyMetrics, Feedback, OAuthSession, PlanChange, UserPlan, ChatMessage,
+    User, UserStore, DailyMetrics, Feedback, OAuthSession, PlanChange, UserPlan, ChatMessage,
     LlmUsageEvent, LlmTokenReservation, DatabaseSchema, AuditLog, DataBreach,
     TrialLifecycleEvent, TallyLead, ReferralReward,
 )
 from src.storage.models import (
     Expense, Income, Account, UserCategory, UserCategoryNotionLink,
     Subscription, SavedReport, SavingsGoal, SavingsGoalEvaluation, SubscriptionCandidate,
+    UserIncomeCategory, UserIncomeCategoryNotionLink,
 )
 import src.storage.models  # registra UserCategory e tabelle storage nella Base condivisa
 
@@ -38,6 +39,61 @@ def test_update_existing_user(mock_db_session):
     user = store.get_user(chat_id)
     assert user.username == "new_name"
     assert user.income_db_id == "inc_456"
+
+def test_add_user_seeds_default_income_categories_with_descriptions(mock_db_session):
+    """add_user popola description_summary per le 8 categorie entrata di default."""
+    from src.income_categories import DEFAULT_INCOME_CATEGORIES, INCOME_CATEGORY_DESCRIPTIONS
+
+    store = mock_db_session
+    chat_id = "income_desc_new_user"
+
+    store.add_user(chat_id=chat_id)
+
+    with store.Session() as s:
+        rows = s.query(UserIncomeCategory).filter_by(user_id=chat_id).all()
+        by_name = {row.name: row.description_summary for row in rows}
+
+    assert len(rows) == len(DEFAULT_INCOME_CATEGORIES)
+    for name in DEFAULT_INCOME_CATEGORIES:
+        assert by_name[name] == INCOME_CATEGORY_DESCRIPTIONS[name]
+
+
+def test_ensure_default_income_categories_backfills_missing_description(mock_db_session):
+    """Le righe preesistenti senza description_summary vengono aggiornate in place."""
+    from src.income_categories import INCOME_CATEGORY_DESCRIPTIONS
+
+    store = mock_db_session
+    chat_id = "income_desc_backfill_user"
+
+    with store.Session() as s:
+        s.add(UserIncomeCategory(user_id=chat_id, name="Stipendio", description_summary=None))
+        s.commit()
+
+    store._ensure_default_income_categories(chat_id)
+
+    with store.Session() as s:
+        row = s.query(UserIncomeCategory).filter_by(user_id=chat_id, name="Stipendio").first()
+        assert row.description_summary == INCOME_CATEGORY_DESCRIPTIONS["Stipendio"]
+
+
+def test_ensure_default_income_categories_never_overwrites_user_description(mock_db_session):
+    """Una description_summary gia' scritta dall'utente non viene mai sovrascritta."""
+    store = mock_db_session
+    chat_id = "income_desc_custom_user"
+    custom_description = "Descrizione personalizzata scritta dall'utente"
+
+    with store.Session() as s:
+        s.add(UserIncomeCategory(
+            user_id=chat_id, name="Stipendio", description_summary=custom_description,
+        ))
+        s.commit()
+
+    store._ensure_default_income_categories(chat_id)
+
+    with store.Session() as s:
+        row = s.query(UserIncomeCategory).filter_by(user_id=chat_id, name="Stipendio").first()
+        assert row.description_summary == custom_description
+
 
 def test_increment_usage(mock_db_session):
     store = mock_db_session
@@ -70,6 +126,70 @@ def test_bump_token_version_increments_and_returns_new_value(mock_db_session):
 def test_bump_token_version_missing_user_returns_none(mock_db_session):
     store = mock_db_session
     assert store.bump_token_version("nope") is None
+
+
+def test_sqlite_runtime_income_category_upgrade_adds_unique_index_and_tenant_guard(tmp_path):
+    """Legacy SQLite receives the same case/tenant protection without table destruction."""
+    from sqlalchemy import create_engine, text
+
+    database = tmp_path / "legacy-income.db"
+    url = f"sqlite:///{database}"
+    with create_engine(url).begin() as connection:
+        connection.execute(text("CREATE TABLE users (chat_id VARCHAR PRIMARY KEY)"))
+        connection.execute(text("INSERT INTO users (chat_id) VALUES ('runtime-a'), ('runtime-b')"))
+        # Deliberately predecessor-shaped: no functional unique index and no
+        # declared FKs.  The runtime path must upgrade it non-destructively.
+        connection.execute(text(
+            "CREATE TABLE user_income_categories (id INTEGER PRIMARY KEY, user_id VARCHAR NOT NULL, "
+            "name VARCHAR NOT NULL, monthly_budget REAL, description TEXT, "
+            "description_summary TEXT, is_archived BOOLEAN DEFAULT 0, created_at TIMESTAMP, "
+            "updated_at TIMESTAMP, UNIQUE(user_id, name))"
+        ))
+        connection.execute(text(
+            "CREATE TABLE user_income_category_notion_links (category_id INTEGER PRIMARY KEY, "
+            "notion_page_id VARCHAR UNIQUE, synced_at TIMESTAMP, average REAL)"
+        ))
+        connection.execute(text(
+            "CREATE TABLE incomes (id INTEGER PRIMARY KEY, user_id VARCHAR NOT NULL, "
+            "income_type VARCHAR, income_date DATE, amount REAL, name VARCHAR, account_id INTEGER, "
+            "created_at TIMESTAMP)"
+        ))
+        connection.execute(text(
+            "INSERT INTO incomes (id, user_id, income_type, income_date, amount, name) "
+            "VALUES (1, 'runtime-a', 'Consulenza', '2026-09-01', 10, 'Cliente')"
+        ))
+
+    store = UserStore(db_url=url)
+    with store.engine.begin() as connection:
+        index_sql = connection.execute(text(
+            "SELECT sql FROM sqlite_master WHERE type = 'index' "
+            "AND name = 'uq_user_income_categories_user_lower_name'"
+        )).scalar_one()
+        category_id = connection.execute(text(
+            "SELECT income_category_id FROM incomes WHERE id = 1"
+        )).scalar_one()
+        connection.execute(text(
+            "INSERT INTO user_income_categories (user_id, name) VALUES ('runtime-b', 'Privata')"
+        ))
+        foreign_id = connection.execute(text(
+            "SELECT id FROM user_income_categories WHERE user_id = 'runtime-b' AND name = 'Privata'"
+        )).scalar_one()
+        with pytest.raises(Exception):
+            connection.execute(text(
+                "UPDATE incomes SET income_category_id = :category_id WHERE id = 1"
+            ), {"category_id": foreign_id})
+        with pytest.raises(Exception):
+            connection.execute(text(
+                "INSERT INTO user_income_categories (user_id, name) VALUES ('runtime-b', 'privata')"
+            ))
+        with pytest.raises(Exception):
+            connection.execute(text(
+                "INSERT INTO user_income_category_notion_links (category_id, notion_page_id) "
+                "VALUES (999, 'orphan-page')"
+            ))
+
+    assert "lower(name)" in index_sql
+    assert category_id is not None
 
 
 def test_update_password_bumps_token_version(mock_db_session):
@@ -258,6 +378,12 @@ def test_delete_user_completely_removes_all_tables(mock_db_session):
         s.flush()
         # UserCategoryNotionLink
         s.add(UserCategoryNotionLink(category_id=cat.id, notion_page_id="notion-page-abc"))
+        income_category = UserIncomeCategory(user_id=chat_id, name="Consulenza")
+        s.add(income_category)
+        s.flush()
+        s.add(UserIncomeCategoryNotionLink(
+            category_id=income_category.id, notion_page_id="notion-income-page-abc"
+        ))
         # Expense
         s.add(Expense(
             user_id=chat_id,
@@ -274,6 +400,7 @@ def test_delete_user_completely_removes_all_tables(mock_db_session):
             amount=2000.00,
             name="Stipendio",
             account_id=acc.id,
+            income_category_id=income_category.id,
         ))
         # Subscription
         s.add(Subscription(user_id=chat_id, name="Netflix", amount=12.99, account_id=acc.id))
@@ -323,6 +450,7 @@ def test_delete_user_completely_removes_all_tables(mock_db_session):
         (Account,                 "user_id"),
         (Subscription,            "user_id"),
         (UserCategory,            "user_id"),
+        (UserIncomeCategory,      "user_id"),
         (SavedReport,             "user_id"),
         (SavingsGoal,             "user_id"),
         (SavingsGoalEvaluation,   "user_id"),
@@ -345,6 +473,12 @@ def test_delete_user_completely_removes_all_tables(mock_db_session):
         assert remaining_links == 0, (
             f"GDPR gap: user_category_notion_links contiene ancora {remaining_links} record"
         )
+        remaining_income_links = (
+            s.query(UserIncomeCategoryNotionLink)
+            .filter(UserIncomeCategoryNotionLink.notion_page_id == "notion-income-page-abc")
+            .count()
+        )
+        assert remaining_income_links == 0, "Income category Notion links must not survive deletion"
 
         # AuditLog deve restare (accountability GDPR Art. 30 — no FK intenzionale)
         audit_count = s.query(AuditLog).filter(AuditLog.user_id == chat_id).count()
@@ -463,7 +597,10 @@ def test_reassign_user_chat_id_respects_foreign_keys(mock_db_session):
     """
     from sqlalchemy import event
     from src.user_store import LlmTokenReservation, LlmUsageEvent, DatabaseSchema
-    from src.storage.models import Expense, Income, Account, Subscription, UserCategory, SavedReport
+    from src.storage.models import (
+        Account, Expense, Income, SavedReport, Subscription, UserCategory,
+        UserIncomeCategory, UserIncomeCategoryNotionLink,
+    )
 
     store = mock_db_session
 
@@ -488,6 +625,10 @@ def test_reassign_user_chat_id_respects_foreign_keys(mock_db_session):
         s.add(Income(user_id=old_chat_id, income_date=datetime.utcnow().date(), amount=10, name="Entrata", account_id=acc.id))
         s.add(Subscription(user_id=old_chat_id, name="Netflix", amount=10))
         s.add(UserCategory(user_id=old_chat_id, name="Cibo"))
+        income_category = UserIncomeCategory(user_id=old_chat_id, name="Consulenza")
+        s.add(income_category)
+        s.flush()
+        s.add(UserIncomeCategoryNotionLink(category_id=income_category.id, notion_page_id="income-link-old"))
         s.add(SavedReport(
             user_id=old_chat_id, report_type="weekly",
             report_date=datetime.utcnow().date(), text_content="report",
@@ -505,6 +646,7 @@ def test_reassign_user_chat_id_respects_foreign_keys(mock_db_session):
             (UserPlan, "chat_id"), (Account, "user_id"),
             (Expense, "user_id"), (Income, "user_id"),
             (Subscription, "user_id"), (UserCategory, "user_id"),
+            (UserIncomeCategory, "user_id"),
             (SavedReport, "user_id"),
         ]:
             assert s.query(model).filter(getattr(model, col) == old_chat_id).first() is None, (
@@ -517,6 +659,7 @@ def test_reassign_user_chat_id_respects_foreign_keys(mock_db_session):
         new_user = s.query(User).filter_by(chat_id=new_chat_id).first()
         assert new_user.email == "reassign-fk@example.com"
         assert s.query(User).filter_by(chat_id=old_chat_id).first() is None
+        assert s.query(UserIncomeCategoryNotionLink).filter_by(notion_page_id="income-link-old").count() == 1
 
 
 def test_reassign_user_chat_id_cleans_up_placeholder_target_children(mock_db_session):
@@ -525,7 +668,7 @@ def test_reassign_user_chat_id_cleans_up_placeholder_target_children(mock_db_ses
     seedate) falliva con UNIQUE/PK violation sul bulk update, perche' le righe
     figlie del placeholder cancellato non venivano ripulite prima dello spostamento.
     """
-    from src.storage.models import UserCategory
+    from src.storage.models import UserCategory, UserIncomeCategory, UserIncomeCategoryNotionLink
 
     store = mock_db_session
 
@@ -545,6 +688,11 @@ def test_reassign_user_chat_id_cleans_up_placeholder_target_children(mock_db_ses
     store.get_user_plan(new_chat_id)
     with store.Session() as s:
         s.add(UserCategory(user_id=new_chat_id, name="Cibo"))
+        placeholder_income_category = s.query(UserIncomeCategory).filter_by(user_id=new_chat_id).first()
+        assert placeholder_income_category is not None
+        s.add(UserIncomeCategoryNotionLink(
+            category_id=placeholder_income_category.id, notion_page_id="placeholder-income-link"
+        ))
         s.commit()
 
     result = store.reassign_user_chat_id(old_chat_id, new_chat_id)
@@ -553,6 +701,10 @@ def test_reassign_user_chat_id_cleans_up_placeholder_target_children(mock_db_ses
     with store.Session() as s:
         categories = s.query(UserCategory).filter_by(user_id=new_chat_id).all()
         assert [c.name for c in categories] == ["Cibo"]
+        assert s.query(UserIncomeCategory).filter_by(user_id=new_chat_id).count() == 8
+        assert s.query(UserIncomeCategoryNotionLink).filter_by(
+            notion_page_id="placeholder-income-link"
+        ).count() == 0
 
         plan = s.query(UserPlan).filter_by(chat_id=new_chat_id).one()
         assert plan is not None

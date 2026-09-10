@@ -1,0 +1,8 @@
+.list { border-top: 1px solid rgba(211, 232, 229, 0.16); }
+.item { border-bottom: 1px solid rgba(211, 232, 229, 0.16); }
+.item summary { display: flex; align-items: center; justify-content: space-between; gap: 24px; padding: 25px 0; color: #eaf4f2; cursor: pointer; list-style: none; text-align: left; font-size: clamp(1rem, 1.7vw, 1.25rem); }
+.item summary::-webkit-details-marker { display: none; }
+.item summary:focus-visible { outline: 2px solid #f6c65b; outline-offset: 5px; }
+.item summary svg { flex: 0 0 auto; color: #65cfd2; transition: transform 180ms ease; }.item[open] summary svg { transform: rotate(45deg); }
+.answer { max-width: 720px; padding: 0 46px 26px 0; color: rgba(224, 237, 235, 0.61); font-size: 1rem; line-height: 1.65; }
+@media (prefers-reduced-motion: reduce) { .item summary svg { transition: none; } }

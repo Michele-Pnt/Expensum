@@ -44,7 +44,9 @@ function formatResetDate(value?: string | null): string {
   if (!value) return "n/d";
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return "n/d";
-  return date.toLocaleDateString("it-IT");
+  const day = String(date.getDate()).padStart(2, "0");
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  return `${day}-${month}-${date.getFullYear()}`;
 }
 
 export default function ImpostazioniPage() {
@@ -103,7 +105,7 @@ export default function ImpostazioniPage() {
   return (
     <Box sx={{ p: { xs: 2, md: 4 }, maxWidth: 980 }}>
       <Box sx={{ mb: 4 }}>
-        <Typography variant="h4" fontWeight={800} color="primary.main" gutterBottom>
+        <Typography component="h1" variant="h4" fontWeight={300} color="primary.main" gutterBottom>
           Impostazioni
         </Typography>
         <Typography color="text.secondary">
@@ -121,7 +123,7 @@ export default function ImpostazioniPage() {
         <Stack spacing={3}>
           <Card sx={{ borderRadius: 4 }}>
             <CardContent>
-              <Typography variant="h6" fontWeight={700} gutterBottom>
+              <Typography variant="h6" fontWeight={500} gutterBottom>
                 Accesso
               </Typography>
               <Stack spacing={1.5}>
@@ -157,7 +159,7 @@ export default function ImpostazioniPage() {
 
           <Card sx={{ borderRadius: 4 }}>
             <CardContent>
-              <Typography variant="h6" fontWeight={700} gutterBottom>
+              <Typography variant="h6" fontWeight={500} gutterBottom>
                 Piano
               </Typography>
               <Stack spacing={1.5}>
@@ -190,7 +192,7 @@ export default function ImpostazioniPage() {
 
           <Card sx={{ borderRadius: 4 }}>
             <CardContent>
-              <Typography variant="h6" fontWeight={700} gutterBottom>
+              <Typography variant="h6" fontWeight={500} gutterBottom>
                 Privacy e dati
               </Typography>
               <Typography color="text.secondary">

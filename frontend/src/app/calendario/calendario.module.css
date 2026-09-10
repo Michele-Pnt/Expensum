@@ -12,9 +12,11 @@
 }
 
 .monthLabel {
+  margin: 0;
   font-size: 1.25rem;
-  font-weight: 700;
-  color: var(--color-text);
+  font-weight: 300;
+  letter-spacing: 0.015em;
+  color: var(--color-primary);
   text-transform: capitalize;
 }
 
@@ -24,8 +26,8 @@
 }
 
 .navButton {
-  width: 36px;
-  height: 36px;
+  width: 44px;
+  height: 44px;
   border-radius: 50%;
   border: 1px solid var(--color-border);
   background: var(--color-surface);
@@ -38,6 +40,12 @@
 
 .navButton:hover {
   background: var(--color-surface-2);
+}
+
+.navButton:focus-visible,
+.cell:focus-visible {
+  outline: 2px solid var(--color-primary);
+  outline-offset: 2px;
 }
 
 .weekdayRow {
@@ -67,6 +75,8 @@
   align-items: center;
   gap: 4px;
   padding: 6px 0;
+  min-width: 44px;
+  min-height: 56px;
   cursor: pointer;
   border: none;
   background: transparent;
@@ -98,7 +108,7 @@
 
 .dayNumberSelected {
   background: var(--color-primary);
-  color: #FFFFFF;
+  color: #1C363D;
 }
 
 .dots {
@@ -136,7 +146,7 @@
 
 .sheetTitle {
   font-size: 1rem;
-  font-weight: 700;
+  font-weight: 500;
   color: var(--color-text);
   text-transform: capitalize;
 }
@@ -169,7 +179,7 @@
 }
 
 .itemIconSubscription {
-  background: rgba(197, 160, 89, 0.12);
+  background: rgba(95, 196, 203, 0.12);
   color: var(--color-accent-dim);
 }
 

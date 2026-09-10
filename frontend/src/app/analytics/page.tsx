@@ -2,8 +2,8 @@
 
 import { useEffect, useState, useCallback, type ReactNode } from "react";
 import {
-  Box, Card, CardContent, CardHeader, CircularProgress, Tab, Tabs,
-  Typography, Slider, Alert, Chip, Select, MenuItem, FormControl,
+  Box, Button, Card, CardContent, CardHeader, Tab, Tabs,
+  Typography, Slider, Chip, Select, MenuItem, FormControl,
   InputLabel, Table, TableBody, TableCell, TableContainer, TableHead,
   TableRow, TablePagination, LinearProgress, TextField, ToggleButton, ToggleButtonGroup,
 } from "@mui/material";
@@ -14,24 +14,33 @@ import {
 } from "recharts";
 import { formatDateIt } from "@/lib/date";
 import SavingsGoalsProgress from "@/components/SavingsGoalsProgress";
+import { TrendingUp, CreditCard, Wallet, Target, Lock } from "lucide-react";
+import AnalyticsExperience from "./components/AnalyticsExperience";
+import AdvancedCharts from "./components/AdvancedCharts";
+import InfoButton from "../../components/InfoButton";
+import { buildIncomeBreakdown, type IncomeTransaction } from "./advancedViewModels";
+import { apiFetch } from "@/lib/api";
+import ErrorBanner from "@/components/feedback/ErrorBanner";
+import PageLoader from "@/components/feedback/PageLoader";
 
 // ---------------------------------------------------------------------------
 // Tipi
 // ---------------------------------------------------------------------------
 
-interface SavingsEntry { month: string; income: number; expenses: number; net: number }
-interface AccountMonthEntry { month: string; account: string; amount: number }
-interface CategoryEntry { month: string; name: string; amount: number; budget?: number }
+interface SavingsEntry { month: string; income: number; expenses: number; net: number; period_key?: string; period_label?: string; is_partial?: boolean; months_included?: number }
+interface AccountMonthEntry { month: string; account: string; amount: number; period_key?: string; period_label?: string; is_partial?: boolean; months_included?: number }
+interface CategoryEntry { month: string; name: string; amount: number; budget?: number; period_key?: string; period_label?: string; is_partial?: boolean; months_included?: number }
 interface CategoryAvg { name: string; avg: number }
-interface IncomeEntry { month: string; total: number }
+interface IncomeEntry { month: string; total: number; period_key?: string; period_label?: string; is_partial?: boolean; months_included?: number }
 interface AccountBalance { name: string; balance: number }
 
 interface OverviewData { savings: SavingsEntry[]; totals_by_account: AccountMonthEntry[]; plan_type: string }
 interface CategoriesData { by_category: CategoryEntry[]; averages: CategoryAvg[]; plan_type: string }
 interface IncomeData { monthly: IncomeEntry[]; plan_type: string }
+interface IncomeBreakdownData { incomes: IncomeTransaction[]; total: number }
 interface WealthData { accounts: AccountBalance[]; plan_type: string }
 
-interface CapitalTrendEntry { month: string; total: number; [key: string]: string | number }
+interface CapitalTrendEntry { month: string; total: number; period_key?: string; period_label?: string; is_partial?: boolean; months_included?: number; [key: string]: string | number | boolean | undefined }
 interface CapitalTrendData { capital_trend: CapitalTrendEntry[]; plan_type: string; accounts?: string[] }
 
 interface TransactionEntry {
@@ -44,8 +53,8 @@ interface TransactionsData {
   plan_type: string;
 }
 
-interface TopMerchant { name: string; total: number; count: number; category: string }
-interface TopMerchantsData { merchants: TopMerchant[]; plan_type: string }
+interface TopMerchant { name: string; total: number; count: number; category: string; cluster_id?: number | null; category_id?: number | null }
+interface TopMerchantsData { merchants: TopMerchant[]; plan_type: string; grouped?: boolean }
 
 interface BudgetStatusEntry { category: string; budget: number; spent: number; remaining: number; percentage: number }
 interface BudgetStatusData { budget_status: BudgetStatusEntry[]; month: string; total_income: number; total_spent: number; plan_type: string; error?: string }
@@ -60,29 +69,30 @@ interface MonthComparisonData { comparisons: MonthComparisonEntry[]; plan_type: 
 // Colori
 // ---------------------------------------------------------------------------
 
-const PALETTE = ["#1A3673", "#C5A059", "#4B6CB7", "#7C9BD6", "#A8853C", "#2B4FA8", "#D4B47A", "#6B7280"];
+// Palette categoriale a 8 tinte, ordine fisso validato CVD-safe su sfondo
+// #1C363D (skill dataviz — scripts/validate_palette.js). Non riordinare:
+// l'ordine è il meccanismo di sicurezza CVD, non un dettaglio estetico.
+const PALETTE = ["#3987e5", "#d95926", "#199e70", "#c98500", "#d55181", "#008300", "#9085e9", "#e66767"];
 
-const INCOME_COLOR = "#1A3673";
-const EXPENSE_COLOR = "#C5A059";
-const NET_COLOR = "#4B6CB7";
-const SAVINGS_COLOR = "#7C9BD6";
+const INCOME_COLOR = "#16A34A";
+const EXPENSE_COLOR = "#E66767";
+const NET_COLOR = "#5FC4CB";
+const SAVINGS_COLOR = "#B0B5B9";
 
 const TOOLTIP_STYLE = {
-  background: "#FFFFFF",
-  border: "1px solid #E5E2DC",
+  background: "#1C363D",
+  border: "1px solid rgba(176,181,185,0.25)",
   borderRadius: 8,
-  color: "#1A1A1A",
+  color: "#E9F1EA",
   fontSize: 12,
 };
 
-const TICK_STYLE = { fontSize: 11, fill: "#6B7280" };
-const LEGEND_STYLE = { color: "#6B7280", fontSize: 12 };
+const TICK_STYLE = { fontSize: 11, fill: "#B0B5B9" };
+const LEGEND_STYLE = { color: "#B0B5B9", fontSize: 12 };
 
 // ---------------------------------------------------------------------------
 // Fetch helper
 // ---------------------------------------------------------------------------
-
-const API_BASE = process.env.NEXT_PUBLIC_API_URL ?? "";
 
 type TelegramWebApp = {
   initData?: string;
@@ -95,24 +105,6 @@ type TelegramWindow = Window & {
     WebApp?: TelegramWebApp;
   };
 };
-
-function makeHeaders(initData: string | null): HeadersInit {
-  return initData ? { "X-Telegram-Init-Data": initData } : {};
-}
-
-async function fetchApi<T>(path: string, initData: string | null, extraParams: Record<string, string> = {}): Promise<T> {
-  const params = new URLSearchParams(extraParams);
-  const url = `${API_BASE}${path}?${params.toString()}`;
-  const headers = makeHeaders(initData);
-  console.log("fetchApi:", url);
-  const res = await fetch(url, { headers });
-  if (!res.ok) {
-    console.error("fetchApi failed:", res.status, await res.text());
-    if (res.status === 401) throw new Error("auth_401");
-    throw new Error(`Errore API ${res.status}`);
-  }
-  return res.json() as Promise<T>;
-}
 
 // ---------------------------------------------------------------------------
 // Aggregazioni lato client
@@ -176,6 +168,7 @@ function PeriodSlider({ value, onChange, maxMonths, actualMonths }: {
         )}
       </Typography>
       <Slider
+        aria-label="Numero di mesi nello storico"
         value={value}
         min={1} max={maxMonths} step={1}
         marks={marks}
@@ -202,15 +195,21 @@ function PremiumGate({ isPro, children, featureName }: { isPro: boolean; childre
         flexDirection: "column", alignItems: "center", justifyContent: "center",
         background: "rgba(3, 7, 18, 0.55)", zIndex: 10,
       }}>
-        <Typography fontWeight={700} fontSize="1rem" color="text.primary" mb={0.5}>
-          🔒 {featureName}
+        <Typography
+          fontWeight={700}
+          fontSize="1rem"
+          color="text.primary"
+          mb={0.5}
+          sx={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 0.5 }}
+        >
+          <Lock size={16} strokeWidth={1.5} aria-hidden="true" /> {featureName}
         </Typography>
         <Chip
           label="PRO"
           size="small"
           sx={{
-            background: "linear-gradient(135deg, #C5A059, #D4B47A)",
-            color: "#ffffff",
+            background: "var(--color-primary)",
+            color: "#0a0a0a",
             fontWeight: 800,
             fontSize: "0.7rem",
           }}
@@ -229,11 +228,11 @@ function ChartCard({ title, children, badge }: { title: string; children: ReactN
     <Card sx={{ mb: 2, borderRadius: 2 }}>
       <CardHeader
         title={badge ? <Box sx={{ display: "flex", alignItems: "center", gap: 1 }}>{title}{badge}</Box> : title}
-        titleTypographyProps={{ variant: "subtitle2", fontWeight: 700 }}
+        titleTypographyProps={{ variant: "subtitle2", fontWeight: 500 }}
         sx={{ pb: 1 }}
       />
       <CardContent sx={{ pt: 0, pb: "8px !important" }}>
-        <Box sx={{ width: "100%", height: { xs: 200, sm: 260 }, minWidth: 0 }}>
+        <Box sx={{ width: "100%", height: { xs: 280, sm: 260 }, minWidth: 0 }}>
           {children}
         </Box>
       </CardContent>
@@ -245,14 +244,14 @@ function SavingsChart({ data }: { data: SavingsEntry[] }) {
   return (
     <ChartCard title="Risparmio mensile">
       <ResponsiveContainer width="100%" height="100%" minWidth={0}>
-        <BarChart data={data} barCategoryGap="15%" maxBarSize={60}>
+        <BarChart data={data} barCategoryGap="15%" maxBarSize={60} accessibilityLayer={false}>
           <XAxis dataKey="month" tick={TICK_STYLE} />
           <YAxis tick={TICK_STYLE} tickFormatter={(v) => `€${v}`} />
-          <Tooltip formatter={(v: unknown) => `€${((v as number) ?? 0).toFixed(2)}`} contentStyle={TOOLTIP_STYLE} />
+          <Tooltip cursor={false} formatter={(v: unknown) => `€${((v as number) ?? 0).toFixed(2)}`} contentStyle={TOOLTIP_STYLE} />
           <Legend wrapperStyle={LEGEND_STYLE} />
-          <Bar dataKey="income" name="Entrate" fill={INCOME_COLOR} radius={[4, 4, 0, 0]}  />
-          <Bar dataKey="expenses" name="Uscite" fill={EXPENSE_COLOR} radius={[4, 4, 0, 0]}  />
-          <Bar dataKey="net" name="Netto" fill={NET_COLOR} radius={[4, 4, 0, 0]}  />
+          <Bar activeBar={false} dataKey="income" name="Entrate" fill={INCOME_COLOR} radius={[4, 4, 0, 0]}  />
+          <Bar activeBar={false} dataKey="expenses" name="Uscite" fill={EXPENSE_COLOR} radius={[4, 4, 0, 0]}  />
+          <Bar activeBar={false} dataKey="net" name="Netto" fill={NET_COLOR} radius={[4, 4, 0, 0]}  />
         </BarChart>
       </ResponsiveContainer>
     </ChartCard>
@@ -261,12 +260,13 @@ function SavingsChart({ data }: { data: SavingsEntry[] }) {
 
 function CapitalTrendChart({ data, isPro }: { data: CapitalTrendData; isPro: boolean }) {
   // Colori per linee account
-  const accPalette = ["#4B6CB7", "#7C9BD6", "#C5A059", "#1A3673", "#A8853C", "#2B4FA8"];
-  
+  const accPalette = ["#3987e5", "#d95926", "#199e70", "#c98500", "#d55181", "#9085e9"];
+
   // Costruisci le linee basandoti sull'elenco accounts ritornato dal backend
   const accountLines = isPro && data.accounts
     ? data.accounts.map((accountName, i) => (
         <Line
+          activeDot={false}
           key={`acc-line-${i}-${accountName}`}
           type="monotone"
           dataKey={accountName}
@@ -278,23 +278,23 @@ function CapitalTrendChart({ data, isPro }: { data: CapitalTrendData; isPro: boo
         />
       ))
     : null;
-  
+
   return (
     <ChartCard title="Andamento Capitale">
       <ResponsiveContainer width="100%" height="100%" minWidth={0}>
-        <ComposedChart data={data.capital_trend}>
+        <ComposedChart data={data.capital_trend} accessibilityLayer={false}>
           <defs>
             <linearGradient id="capitalGradient" x1="0" y1="0" x2="0" y2="1">
-              <stop offset="5%" stopColor="#1A3673" stopOpacity={0.25} />
-              <stop offset="95%" stopColor="#1A3673" stopOpacity={0.03} />
+              <stop offset="5%" stopColor="#5FC4CB" stopOpacity={0.25} />
+              <stop offset="95%" stopColor="#5FC4CB" stopOpacity={0.03} />
             </linearGradient>
           </defs>
-          <CartesianGrid strokeDasharray="3 3" stroke="#E5E2DC" />
+          <CartesianGrid strokeDasharray="3 3" stroke="rgba(176,181,185,0.25)" />
           <XAxis dataKey="month" tick={TICK_STYLE} />
           <YAxis tick={TICK_STYLE} tickFormatter={(v) => `€${v}`} />
-          <Tooltip formatter={(v: unknown) => `€${((v as number) ?? 0).toFixed(2)}`} contentStyle={TOOLTIP_STYLE} />
+          <Tooltip cursor={false} formatter={(v: unknown) => `€${((v as number) ?? 0).toFixed(2)}`} contentStyle={TOOLTIP_STYLE} />
           <Legend wrapperStyle={LEGEND_STYLE} />
-          <Area type="monotone" dataKey="total" name="Totale" fill="url(#capitalGradient)" stroke="#1A3673" strokeWidth={2} />
+          <Area activeDot={false} type="monotone" dataKey="total" name="Totale" fill="url(#capitalGradient)" stroke="#5FC4CB" strokeWidth={2} />
           {accountLines}
         </ComposedChart>
       </ResponsiveContainer>
@@ -303,11 +303,12 @@ function CapitalTrendChart({ data, isPro }: { data: CapitalTrendData; isPro: boo
 }
 
 function CategoryTrendChart({
-  rows, categories, isPro,
+  rows, categories, isPro, initialCategory,
 }: {
   rows: CategoryEntry[];
   categories: string[];
   isPro: boolean;
+  initialCategory: string | null;
 }) {
   // Categoria con spesa totale più alta (usata per utenti Free)
   const topCategory = (() => {
@@ -317,7 +318,9 @@ function CategoryTrendChart({
   })();
 
   const [selectedCats, setSelectedCats] = useState<string[]>(
-    isPro ? categories : (topCategory ? [topCategory] : [])
+    isPro
+      ? (initialCategory && categories.includes(initialCategory) ? [initialCategory] : categories)
+      : (topCategory ? [topCategory] : [])
   );
 
   // Pivot: mese -> { cat: amount }
@@ -336,9 +339,9 @@ function CategoryTrendChart({
       <CardHeader
         title={
           <Box sx={{ display: "flex", alignItems: "center", gap: 2, flexWrap: "wrap" }}>
-            <Typography variant="subtitle2" fontWeight={700}>Andamento per Categoria</Typography>
+            <Typography variant="subtitle2" fontWeight={500}>Andamento per Categoria</Typography>
             {isPro ? (
-              <FormControl size="small" sx={{ minWidth: 200 }}>
+              <FormControl size="small" sx={{ minWidth: 160, maxWidth: "100%", width: { xs: "100%", sm: "auto" } }}>
                 <InputLabel sx={{ fontSize: "0.75rem" }}>Categorie</InputLabel>
                 <Select
                   multiple
@@ -346,7 +349,11 @@ function CategoryTrendChart({
                   onChange={(e) => setSelectedCats(e.target.value as string[])}
                   label="Categorie"
                   sx={{ fontSize: "0.75rem" }}
-                  renderValue={(s) => (s as string[]).join(", ")}
+                  renderValue={(s) => {
+                    const arr = s as string[];
+                    return arr.length > 2 ? `${arr.length} categorie selezionate` : arr.join(", ");
+                  }}
+                  MenuProps={{ PaperProps: { sx: { maxHeight: 320 } } }}
                 >
                   {categories.map((c) => (
                     <MenuItem key={c} value={c} sx={{ fontSize: "0.75rem" }}>{c}</MenuItem>
@@ -355,11 +362,11 @@ function CategoryTrendChart({
               </FormControl>
             ) : (
               <Chip
-                label="PRO — vedi tutte le categorie"
+                label="PRO: vedi tutte le categorie"
                 size="small"
                 sx={{
-                  background: "linear-gradient(135deg, #C5A059, #D4B47A)",
-                  color: "#fff",
+                  background: "var(--color-primary)",
+                  color: "#0a0a0a",
                   fontWeight: 700,
                   fontSize: "0.65rem",
                   cursor: "default",
@@ -373,14 +380,15 @@ function CategoryTrendChart({
       <CardContent sx={{ pt: 0, pb: "8px !important" }}>
         <Box sx={{ width: "100%", height: { xs: 220, sm: 280 }, minWidth: 0 }}>
         <ResponsiveContainer width="100%" height="100%" minWidth={0}>
-          <LineChart data={data}>
-            <CartesianGrid strokeDasharray="3 3" stroke="#E5E2DC" />
+          <LineChart data={data} accessibilityLayer={false}>
+            <CartesianGrid strokeDasharray="3 3" stroke="rgba(176,181,185,0.25)" />
             <XAxis dataKey="month" tick={TICK_STYLE} />
             <YAxis tick={TICK_STYLE} tickFormatter={(v) => `€${v}`} />
-            <Tooltip formatter={(v: unknown) => `€${((v as number) ?? 0).toFixed(2)}`} contentStyle={TOOLTIP_STYLE} />
+            <Tooltip cursor={false} formatter={(v: unknown) => `€${((v as number) ?? 0).toFixed(2)}`} contentStyle={TOOLTIP_STYLE} />
             <Legend wrapperStyle={LEGEND_STYLE} />
             {selectedCats.map((cat, i) => (
               <Line
+                activeDot={false}
                 key={cat}
                 type="monotone"
                 dataKey={cat}
@@ -388,7 +396,6 @@ function CategoryTrendChart({
                 stroke={PALETTE[i % PALETTE.length]}
                 strokeWidth={2}
                 dot={{ r: 4 }}
-                activeDot={{ r: 6 }}
               />
             ))}
           </LineChart>
@@ -415,12 +422,12 @@ function TransactionsTable({ data, isPro, initData }: { data: TransactionsData; 
     if (isPro && startDate) params.start = startDate;
     if (isPro && endDate) params.end = endDate;
     try {
-      const d = await fetchApi<TransactionsData>("/api/analytics/transactions", initData, params);
+      const d = await apiFetch<TransactionsData>("/api/analytics/transactions", { params });
       setTxData(d);
     } catch (e) {
       console.error("Error loading transactions:", e);
     }
-  }, [page, rowsPerPage, categoryFilter, accountFilter, startDate, endDate, isPro, initData]);
+  }, [page, rowsPerPage, categoryFilter, accountFilter, startDate, endDate, isPro]);
 
   useEffect(() => {
     const timer = window.setTimeout(() => {
@@ -437,10 +444,10 @@ function TransactionsTable({ data, isPro, initData }: { data: TransactionsData; 
     <Card sx={{ mb: 2, borderRadius: 2 }}>
       <CardHeader
         title="Operazioni"
-        titleTypographyProps={{ variant: "subtitle2", fontWeight: 700 }}
+        titleTypographyProps={{ variant: "subtitle2", fontWeight: 500 }}
         action={
           <Typography variant="body2" color="text.secondary">
-            {txData.total} tx — €{txData.total_amount.toFixed(2)}
+            {txData.total} tx (€{txData.total_amount.toFixed(2)})
           </Typography>
         }
         sx={{ pb: 0 }}
@@ -492,11 +499,11 @@ function TransactionsTable({ data, isPro, initData }: { data: TransactionsData; 
           <Table size="small">
             <TableHead>
               <TableRow>
-                <TableCell sx={{ fontSize: "0.75rem", fontWeight: 700 }}>Data</TableCell>
-                <TableCell sx={{ fontSize: "0.75rem", fontWeight: 700 }}>Nome</TableCell>
-                <TableCell sx={{ fontSize: "0.75rem", fontWeight: 700 }} align="right">Importo</TableCell>
-                <TableCell sx={{ fontSize: "0.75rem", fontWeight: 700 }}>Categoria</TableCell>
-                <TableCell sx={{ fontSize: "0.75rem", fontWeight: 700 }}>Conto</TableCell>
+                <TableCell sx={{ fontSize: "0.75rem", fontWeight: 500 }}>Data</TableCell>
+                <TableCell sx={{ fontSize: "0.75rem", fontWeight: 500 }}>Nome</TableCell>
+                <TableCell sx={{ fontSize: "0.75rem", fontWeight: 500 }} align="right">Importo</TableCell>
+                <TableCell sx={{ fontSize: "0.75rem", fontWeight: 500 }}>Categoria</TableCell>
+                <TableCell sx={{ fontSize: "0.75rem", fontWeight: 500 }}>Conto</TableCell>
               </TableRow>
             </TableHead>
             <TableBody>
@@ -544,13 +551,13 @@ function MonthlyByAccountChart({ rows }: { rows: AccountMonthEntry[] }) {
   return (
     <ChartCard title="Spesa mensile per conto">
       <ResponsiveContainer width="100%" height="100%" minWidth={0}>
-        <BarChart data={data} barCategoryGap="15%" maxBarSize={60}>
+        <BarChart data={data} barCategoryGap="15%" maxBarSize={60} accessibilityLayer={false}>
           <XAxis dataKey="month" tick={TICK_STYLE} />
           <YAxis tick={TICK_STYLE} tickFormatter={(v) => `€${v}`} />
-          <Tooltip formatter={(v: unknown) => `€${((v as number) ?? 0).toFixed(2)}`} contentStyle={TOOLTIP_STYLE} />
+          <Tooltip cursor={false} formatter={(v: unknown) => `€${((v as number) ?? 0).toFixed(2)}`} contentStyle={TOOLTIP_STYLE} />
           <Legend wrapperStyle={LEGEND_STYLE} />
           {accounts.map((acc, i) => (
-            <Bar key={acc} dataKey={acc} stackId="a" fill={PALETTE[i % PALETTE.length]}  />
+            <Bar activeBar={false} key={acc} dataKey={acc} stackId="a" fill={PALETTE[i % PALETTE.length]}  />
           ))}
         </BarChart>
       </ResponsiveContainer>
@@ -564,12 +571,12 @@ function CategoryPieChart({ rows }: { rows: CategoryEntry[] }) {
   return (
     <ChartCard title={`Spese per categoria (${lastMonth ?? "—"})`}>
       <ResponsiveContainer width="100%" height="100%" minWidth={0}>
-        <PieChart>
-          <Pie data={slice} dataKey="amount" nameKey="name" cx="50%" cy="50%"
-            innerRadius={55} outerRadius={90} paddingAngle={3}>
+        <PieChart accessibilityLayer={false}>
+          <Pie activeShape={false} data={slice} dataKey="amount" nameKey="name" cx="50%" cy="50%"
+            innerRadius={38} outerRadius={62} paddingAngle={3}>
             {slice.map((_, i) => <Cell key={i} fill={PALETTE[i % PALETTE.length]} />)}
           </Pie>
-          <Tooltip formatter={(v: unknown) => `€${((v as number) ?? 0).toFixed(2)}`} contentStyle={TOOLTIP_STYLE} />
+          <Tooltip cursor={false} formatter={(v: unknown) => `€${((v as number) ?? 0).toFixed(2)}`} contentStyle={TOOLTIP_STYLE} />
           <Legend iconType="circle" iconSize={10} wrapperStyle={LEGEND_STYLE} />
         </PieChart>
       </ResponsiveContainer>
@@ -582,13 +589,13 @@ function CategoryHistoryChart({ rows }: { rows: CategoryEntry[] }) {
   return (
     <ChartCard title="Top 5 categorie (storico)">
       <ResponsiveContainer width="100%" height="100%" minWidth={0}>
-        <BarChart data={data} barCategoryGap="15%" maxBarSize={60}>
+        <BarChart data={data} barCategoryGap="15%" maxBarSize={60} accessibilityLayer={false}>
           <XAxis dataKey="month" tick={TICK_STYLE} />
           <YAxis tick={TICK_STYLE} tickFormatter={(v) => `€${v}`} />
-          <Tooltip formatter={(v: unknown) => `€${((v as number) ?? 0).toFixed(2)}`} contentStyle={TOOLTIP_STYLE} />
+          <Tooltip cursor={false} formatter={(v: unknown) => `€${((v as number) ?? 0).toFixed(2)}`} contentStyle={TOOLTIP_STYLE} />
           <Legend wrapperStyle={LEGEND_STYLE} />
           {cats.map((cat, i) => (
-            <Bar key={cat} dataKey={cat} fill={PALETTE[i % PALETTE.length]} radius={[3, 3, 0, 0]}  />
+            <Bar activeBar={false} key={cat} dataKey={cat} fill={PALETTE[i % PALETTE.length]} radius={[3, 3, 0, 0]}  />
           ))}
         </BarChart>
       </ResponsiveContainer>
@@ -600,11 +607,11 @@ function CategoryAvgChart({ avgs }: { avgs: CategoryAvg[] }) {
   return (
     <ChartCard title="Spesa media per categoria">
       <ResponsiveContainer width="100%" height="100%" minWidth={0}>
-        <BarChart data={avgs} layout="vertical" barCategoryGap="15%" maxBarSize={40}>
+        <BarChart data={avgs} layout="vertical" barCategoryGap="15%" maxBarSize={40} accessibilityLayer={false}>
           <XAxis type="number" tick={TICK_STYLE} tickFormatter={(v) => `€${v}`} />
           <YAxis type="category" dataKey="name" tick={TICK_STYLE} width={90} />
-          <Tooltip formatter={(v: unknown) => `€${((v as number) ?? 0).toFixed(2)}`} contentStyle={TOOLTIP_STYLE} />
-          <Bar dataKey="avg" name="Media" fill="#1A3673" radius={[0, 4, 4, 0]}  />
+          <Tooltip cursor={false} formatter={(v: unknown) => `€${((v as number) ?? 0).toFixed(2)}`} contentStyle={TOOLTIP_STYLE} />
+          <Bar activeBar={false} dataKey="avg" name="Media" fill="#5FC4CB" radius={[0, 4, 4, 0]}  />
         </BarChart>
       </ResponsiveContainer>
     </ChartCard>
@@ -615,13 +622,60 @@ function IncomeChart({ data }: { data: IncomeEntry[] }) {
   return (
     <ChartCard title="Entrate mensili">
       <ResponsiveContainer width="100%" height="100%" minWidth={0}>
-        <BarChart data={data} barCategoryGap="15%" maxBarSize={60}>
+        <BarChart data={data} barCategoryGap="15%" maxBarSize={60} accessibilityLayer={false}>
           <XAxis dataKey="month" tick={TICK_STYLE} />
           <YAxis tick={TICK_STYLE} tickFormatter={(v) => `€${v}`} />
-          <Tooltip formatter={(v: unknown) => `€${((v as number) ?? 0).toFixed(2)}`} contentStyle={TOOLTIP_STYLE} />
-          <Bar dataKey="total" name="Entrate" fill={INCOME_COLOR} radius={[4, 4, 0, 0]}  />
+          <Tooltip cursor={false} formatter={(v: unknown) => `€${((v as number) ?? 0).toFixed(2)}`} contentStyle={TOOLTIP_STYLE} />
+          <Bar activeBar={false} dataKey="total" name="Entrate" fill={INCOME_COLOR} radius={[4, 4, 0, 0]}  />
         </BarChart>
       </ResponsiveContainer>
+    </ChartCard>
+  );
+}
+
+interface LoanSummaryEntry { id: number; status: string; residual_balance: number }
+
+/**
+ * Sottrae ai conti positivi i debiti residui dei mutui/finanziamenti attivi:
+ * senza questo, "Capitale per conto" mostra solo il lordo, non il patrimonio
+ * netto reale. Nessuna chiamata se l'utente non ha mai avuto un loan (evita un
+ * 403 rumoroso per i piani Free/Notion, per cui il gate è lo stesso di /mutuo).
+ */
+function NetWorthSummary({ accounts, initData }: { accounts: AccountBalance[]; initData: string | null }) {
+  const [loans, setLoans] = useState<LoanSummaryEntry[] | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    apiFetch<{ loans: LoanSummaryEntry[] }>("/api/loans")
+      .then((data) => { if (!cancelled) setLoans(data.loans || []); })
+      .catch(() => { if (!cancelled) setLoans([]); });
+    return () => { cancelled = true; };
+  }, [initData]);
+
+  if (!loans || loans.length === 0) return null;
+
+  const totalAssets = accounts.filter((a) => a.balance > 0).reduce((sum, a) => sum + a.balance, 0);
+  const totalDebt = loans.filter((l) => l.status === "active").reduce((sum, l) => sum + l.residual_balance, 0);
+  if (totalDebt === 0) return null;
+  const netWorth = totalAssets - totalDebt;
+  const fmt = (n: number) => n.toLocaleString("it-IT", { style: "currency", currency: "EUR" });
+
+  return (
+    <ChartCard title="Patrimonio netto">
+      <div style={{ display: "flex", flexDirection: "column", gap: 8, justifyContent: "center", height: "100%" }}>
+        <div style={{ display: "flex", justifyContent: "space-between" }}>
+          <span style={{ color: "#B0B5B9" }}>Capitale sui conti</span>
+          <span>{fmt(totalAssets)}</span>
+        </div>
+        <div style={{ display: "flex", justifyContent: "space-between" }}>
+          <span style={{ color: "#B0B5B9" }}>Debiti residui (mutui/finanziamenti)</span>
+          <span>-{fmt(totalDebt)}</span>
+        </div>
+        <div style={{ display: "flex", justifyContent: "space-between", fontWeight: 600, fontSize: "1.1em", marginTop: 4 }}>
+          <span>Patrimonio netto</span>
+          <span>{fmt(netWorth)}</span>
+        </div>
+      </div>
     </ChartCard>
   );
 }
@@ -632,7 +686,7 @@ function WealthPieChart({ accounts }: { accounts: AccountBalance[] }) {
   if (positiveAccounts.length === 0) {
     return (
       <ChartCard title="Capitale per conto">
-        <div style={{ display: "flex", alignItems: "center", justifyContent: "center", height: "100%", color: "var(--text-secondary)" }}>
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "center", height: "100%", color: "var(--color-text-2)" }}>
           Non è possibile visualizzare il grafico perché i saldi sono nulli o negativi
         </div>
       </ChartCard>
@@ -642,48 +696,14 @@ function WealthPieChart({ accounts }: { accounts: AccountBalance[] }) {
   return (
     <ChartCard title="Capitale per conto">
       <ResponsiveContainer width="100%" height="100%" minWidth={0}>
-        <PieChart>
-          <Pie data={positiveAccounts} dataKey="balance" nameKey="name" cx="50%" cy="50%"
-            innerRadius={55} outerRadius={90} paddingAngle={3}>
+        <PieChart accessibilityLayer={false}>
+          <Pie activeShape={false} data={positiveAccounts} dataKey="balance" nameKey="name" cx="50%" cy="50%"
+            innerRadius={38} outerRadius={62} paddingAngle={3}>
             {positiveAccounts.map((_, i) => <Cell key={i} fill={PALETTE[i % PALETTE.length]} />)}
           </Pie>
-          <Tooltip formatter={(v: unknown) => `€${((v as number) ?? 0).toFixed(2)}`} contentStyle={TOOLTIP_STYLE} />
+          <Tooltip cursor={false} formatter={(v: unknown) => `€${((v as number) ?? 0).toFixed(2)}`} contentStyle={TOOLTIP_STYLE} />
           <Legend iconType="circle" iconSize={10} wrapperStyle={LEGEND_STYLE} />
         </PieChart>
-      </ResponsiveContainer>
-    </ChartCard>
-  );
-}
-
-function TopMerchantsChart({ data }: { data: TopMerchantsData }) {
-  if (data.merchants.length === 0) {
-    return (
-      <ChartCard title="Dove spendi di piu">
-        <div style={{ display: "flex", alignItems: "center", justifyContent: "center", height: "100%", color: "var(--text-secondary)" }}>
-          Nessun dato disponibile
-        </div>
-      </ChartCard>
-    );
-  }
-  return (
-    <ChartCard title="Dove spendi di piu">
-      <ResponsiveContainer width="100%" height="100%" minWidth={0}>
-        <BarChart data={data.merchants} layout="vertical" barCategoryGap="15%" maxBarSize={40}>
-          <XAxis type="number" tick={TICK_STYLE} tickFormatter={(v) => `€${v}`} />
-          <YAxis type="category" dataKey="name" tick={TICK_STYLE} width={120} />
-          <Tooltip
-            formatter={(v: unknown, _name: unknown, item: unknown) => {
-              const p = (item as { payload?: { count: number; category: string } }).payload;
-              return [`€${((v as number) ?? 0).toFixed(2)} (x${p?.count ?? 0})`, p?.category ?? ""] as [string, string];
-            }}
-            contentStyle={TOOLTIP_STYLE}
-          />
-          <Bar dataKey="total" name="Spesa" radius={[0, 4, 4, 0]}>
-            {data.merchants.map((_, i) => (
-              <Cell key={i} fill={PALETTE[i % PALETTE.length]} />
-            ))}
-          </Bar>
-        </BarChart>
       </ResponsiveContainer>
     </ChartCard>
   );
@@ -692,8 +712,8 @@ function TopMerchantsChart({ data }: { data: TopMerchantsData }) {
 function BudgetGaugeList({ data }: { data: BudgetStatusData }) {
   if (data.error) {
     return (
-      <ChartCard title="Stato Budget">
-        <div style={{ display: "flex", alignItems: "center", justifyContent: "center", height: "100%", color: "var(--text-secondary)" }}>
+      <ChartCard title="Stato Budget" badge={<InfoButton explanation="Stato dei budget per categoria del mese corrente. Include categorie con budget e transazioni regsitrate su Expensum nel mese corrente, esclude categorie senza budget." /> }>
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "center", height: "100%", color: "var(--color-text-2)" }}>
           {data.error}
         </div>
       </ChartCard>
@@ -701,8 +721,8 @@ function BudgetGaugeList({ data }: { data: BudgetStatusData }) {
   }
   if (data.budget_status.length === 0) {
     return (
-      <ChartCard title="Stato Budget">
-        <div style={{ display: "flex", alignItems: "center", justifyContent: "center", height: "100%", color: "var(--text-secondary)" }}>
+      <ChartCard title="Stato Budget" badge={<InfoButton explanation="Stato dei budget per categoria del mese corrente. Include categorie con budget e transazioni regsitrate su Expensum nel mese corrente, esclude categorie senza budget." /> }>
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "center", height: "100%", color: "var(--color-text-2)" }}>
           Nessun budget impostato. Imposta un budget mensile alle tue categorie.
         </div>
       </ChartCard>
@@ -711,8 +731,8 @@ function BudgetGaugeList({ data }: { data: BudgetStatusData }) {
   return (
     <Card sx={{ mb: 2, borderRadius: 2 }}>
       <CardHeader
-        title={`Stato Budget — ${data.month}`}
-        titleTypographyProps={{ variant: "subtitle2", fontWeight: 700 }}
+        title={<Box sx={{ display: "flex", alignItems: "center" }}>Stato Budget: {data.month}<InfoButton explanation="Stato dei budget per categoria del mese corrente. Include categorie con budget e transazioni regsitrate su Expensum nel mese corrente, esclude categorie senza budget." /></Box>}
+        titleTypographyProps={{ variant: "subtitle2", fontWeight: 500 }}
         action={
           <Typography variant="body2" color="text.secondary">
             Entrate: €{data.total_income.toFixed(2)} | Speso: €{data.total_spent.toFixed(2)}
@@ -729,14 +749,14 @@ function BudgetGaugeList({ data }: { data: BudgetStatusData }) {
           // altrove nel grafico, cosi' i tre stati restano distinguibili a colpo d'occhio.
           const isOver = item.percentage >= 100;
           const isWarning = item.percentage >= 85 && item.percentage < 100;
-          const barColor = isOver ? "#d03b3b" : isWarning ? "#A8853C" : "#1A3673";
+          const barColor = isOver ? "var(--status-critical)" : isWarning ? "var(--status-warning)" : "var(--color-primary)";
           return (
             <Box key={item.category} sx={{ mb: 1.5 }}>
               <Box sx={{ display: "flex", justifyContent: "space-between", mb: 0.5 }}>
                 <Typography variant="body2" fontWeight={600} component="div">
                   {item.category}
                   {isOver && <Chip label="Sforato" size="small" sx={{ ml: 1, bgcolor: "#d03b3b", color: "#fff", fontSize: "0.65rem", height: 18 }} />}
-                  {isWarning && <Chip label="Quasi finito" size="small" sx={{ ml: 1, bgcolor: "#A8853C", color: "#fff", fontSize: "0.65rem", height: 18 }} />}
+                  {isWarning && <Chip label="Quasi finito" size="small" sx={{ ml: 1, bgcolor: "var(--status-warning)", color: "#1C363D", fontSize: "0.65rem", height: 18 }} />}
                 </Typography>
                 <Typography variant="body2" color="text.secondary">
                   €{item.spent.toFixed(2)} / €{item.budget.toFixed(2)}
@@ -748,12 +768,12 @@ function BudgetGaugeList({ data }: { data: BudgetStatusData }) {
                 sx={{
                   height: 8,
                   borderRadius: 4,
-                  bgcolor: "#F0EDE8",
+                  bgcolor: "rgba(233,241,234,0.06)",
                   "& .MuiLinearProgress-bar": { bgcolor: barColor, borderRadius: 4 },
                 }}
               />
               <Typography variant="caption" color="text.secondary" sx={{ mt: 0.25, display: "block" }}>
-                {item.percentage.toFixed(0)}% — {isOver ? `€${Math.abs(item.remaining).toFixed(2)} oltre` : `€${item.remaining.toFixed(2)} rimanenti`}
+                {item.percentage.toFixed(0)}% ({isOver ? `€${Math.abs(item.remaining).toFixed(2)} oltre` : `€${item.remaining.toFixed(2)} rimanenti`})
               </Typography>
             </Box>
           );
@@ -769,7 +789,7 @@ function SavingsRateChart({ data }: { data: SavingsRateData }) {
   if (data.error || data.savings_rate.length === 0) {
     return (
       <ChartCard title="Tasso di Risparmio">
-        <div style={{ display: "flex", alignItems: "center", justifyContent: "center", height: "100%", color: "var(--text-secondary)" }}>
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "center", height: "100%", color: "var(--color-text-2)" }}>
           {data.error || "Nessun dato disponibile"}
         </div>
       </ChartCard>
@@ -782,7 +802,7 @@ function SavingsRateChart({ data }: { data: SavingsRateData }) {
     <Card sx={{ mb: 2, borderRadius: 2 }}>
       <CardHeader
         title="Tasso di Risparmio"
-        titleTypographyProps={{ variant: "subtitle2", fontWeight: 700 }}
+        titleTypographyProps={{ variant: "subtitle2", fontWeight: 500 }}
         action={
           <Box sx={{ display: "flex", alignItems: "center", gap: 2 }}>
             <Typography variant="body2" color="text.secondary">
@@ -796,10 +816,10 @@ function SavingsRateChart({ data }: { data: SavingsRateData }) {
               aria-label="view mode"
               sx={{ height: 28 }}
             >
-              <ToggleButton value="absolute" aria-label="absolute" sx={{ px: 1, fontSize: "0.75rem", py: 0 }}>
+              <ToggleButton value="absolute" aria-label="absolute" sx={{ minWidth: 44, minHeight: 44, fontSize: "0.75rem" }}>
                 €
               </ToggleButton>
-              <ToggleButton value="percentage" aria-label="percentage" sx={{ px: 1, fontSize: "0.75rem", py: 0 }}>
+              <ToggleButton value="percentage" aria-label="percentage" sx={{ minWidth: 44, minHeight: 44, fontSize: "0.75rem" }}>
                 %
               </ToggleButton>
             </ToggleButtonGroup>
@@ -808,22 +828,22 @@ function SavingsRateChart({ data }: { data: SavingsRateData }) {
         sx={{ pb: 1 }}
       />
       <CardContent sx={{ pt: 0, pb: "8px !important" }}>
-        <Box sx={{ width: "100%", height: { xs: 200, sm: 260 }, minWidth: 0 }}>
+        <Box sx={{ width: "100%", height: { xs: 280, sm: 260 }, minWidth: 0 }}>
         <ResponsiveContainer width="100%" height="100%" minWidth={0}>
-          <ComposedChart data={data.savings_rate}>
-            <CartesianGrid strokeDasharray="3 3" stroke="#E5E2DC" />
+          <ComposedChart data={data.savings_rate} accessibilityLayer={false}>
+            <CartesianGrid strokeDasharray="3 3" stroke="rgba(176,181,185,0.25)" />
             <XAxis dataKey="month" tick={TICK_STYLE} />
             {viewMode === "percentage" ? (
               <YAxis tick={TICK_STYLE} tickFormatter={(v) => `${v}%`} />
             ) : (
               <YAxis tick={TICK_STYLE} tickFormatter={(v) => `€${v}`} />
             )}
-            <Tooltip contentStyle={TOOLTIP_STYLE} />
+            <Tooltip cursor={false} contentStyle={TOOLTIP_STYLE} />
             <Legend wrapperStyle={LEGEND_STYLE} />
             {viewMode === "percentage" ? (
-              <Area type="monotone" dataKey="rate" name="Tasso %" fill={SAVINGS_COLOR} stroke={SAVINGS_COLOR} fillOpacity={0.2} />
+              <Area activeDot={false} type="monotone" dataKey="rate" name="Tasso %" fill={SAVINGS_COLOR} stroke={SAVINGS_COLOR} fillOpacity={0.2} />
             ) : (
-              <Bar dataKey="savings" name="Risparmio €" fill={INCOME_COLOR} radius={[4, 4, 0, 0]}  />
+              <Bar activeBar={false} dataKey="savings" name="Risparmio €" fill={INCOME_COLOR} radius={[4, 4, 0, 0]}  />
             )}
           </ComposedChart>
         </ResponsiveContainer>
@@ -837,7 +857,7 @@ function MonthComparisonChart({ data }: { data: MonthComparisonData }) {
   if (data.error || data.comparisons.length === 0) {
     return (
       <ChartCard title="Confronto Mensile">
-        <div style={{ display: "flex", alignItems: "center", justifyContent: "center", height: "100%", color: "var(--text-secondary)" }}>
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "center", height: "100%", color: "var(--color-text-2)" }}>
           {data.error || "Nessun dato disponibile"}
         </div>
       </ChartCard>
@@ -846,14 +866,14 @@ function MonthComparisonChart({ data }: { data: MonthComparisonData }) {
   return (
     <ChartCard title="Confronto Spese per Categoria">
       <ResponsiveContainer width="100%" height="100%" minWidth={0}>
-        <BarChart data={data.comparisons} barCategoryGap="15%" maxBarSize={60}>
+        <BarChart data={data.comparisons} barCategoryGap="15%" maxBarSize={60} accessibilityLayer={false}>
           <XAxis dataKey="category" tick={TICK_STYLE} />
           <YAxis tick={TICK_STYLE} tickFormatter={(v) => `€${v}`} />
-          <Tooltip formatter={(v: unknown) => `€${((v as number) ?? 0).toFixed(2)}`} contentStyle={TOOLTIP_STYLE} />
+          <Tooltip cursor={false} formatter={(v: unknown) => `€${((v as number) ?? 0).toFixed(2)}`} contentStyle={TOOLTIP_STYLE} />
           <Legend wrapperStyle={LEGEND_STYLE} />
-          <Bar dataKey="avg_3m" name="Media 3m" fill="#4B6CB7" radius={[3, 3, 0, 0]}  />
-          <Bar dataKey="last_month" name="Mese scorso" fill="#C5A059" radius={[3, 3, 0, 0]}  />
-          <Bar dataKey="current_month" name="Questo mese" fill="#1A3673" radius={[3, 3, 0, 0]}  />
+          <Bar activeBar={false} dataKey="avg_3m" name="Media 3m" fill="#B0B5B9" radius={[3, 3, 0, 0]}  />
+          <Bar activeBar={false} dataKey="last_month" name="Mese scorso" fill="#B0B5B9" radius={[3, 3, 0, 0]}  />
+          <Bar activeBar={false} dataKey="current_month" name="Questo mese" fill="#5FC4CB" radius={[3, 3, 0, 0]}  />
         </BarChart>
       </ResponsiveContainer>
     </ChartCard>
@@ -864,9 +884,10 @@ function MonthComparisonChart({ data }: { data: MonthComparisonData }) {
 // Pagina principale
 // ---------------------------------------------------------------------------
 
-export default function AnalyticsPage() {
+export function LegacyAnalyticsPage() {
   const [tab, setTab] = useState(0);
   const [months, setMonths] = useState(3);
+  const [granularity, setGranularity] = useState<"auto" | "monthly" | "quarterly" | "yearly">("auto");
   const [initData, setInitData] = useState<string | null>(null);
   const [isTelegram, setIsTelegram] = useState(false);
   const [mounted, setMounted] = useState(false);
@@ -877,11 +898,18 @@ export default function AnalyticsPage() {
   const [overview, setOverview] = useState<OverviewData | null>(null);
   const [categories, setCategories] = useState<CategoriesData | null>(null);
   const [income, setIncome] = useState<IncomeData | null>(null);
+  const [incomeBreakdown, setIncomeBreakdown] = useState(() => buildIncomeBreakdown([]));
+  const [incomeOperations, setIncomeOperations] = useState<IncomeTransaction[]>([]);
   const [wealth, setWealth] = useState<WealthData | null>(null);
 
   // Nuovi dati
   const [capitalTrend, setCapitalTrend] = useState<CapitalTrendData | null>(null);
   const [topMerchants, setTopMerchants] = useState<TopMerchantsData | null>(null);
+  // Raggruppamento voci di spesa: preferenza persistita lato server (vedi
+  // analytics_group_labels), letta dalla risposta di top-merchants per non
+  // aggiungere una chiamata dedicata. `null` finché non è nota: il parametro `group`
+  // va omesso, altrimenti sovrascriverebbe la preferenza salvata con il default.
+  const [groupLabels, setGroupLabels] = useState<boolean | null>(null);
   const [budgetStatus, setBudgetStatus] = useState<BudgetStatusData | null>(null);
   const [savingsRate, setSavingsRate] = useState<SavingsRateData | null>(null);
   const [monthComparison, setMonthComparison] = useState<MonthComparisonData | null>(null);
@@ -891,6 +919,9 @@ export default function AnalyticsPage() {
 
   // Max months slider
   const maxMonths = isPro ? 24 : 6;
+  const effectiveGranularity = granularity === "auto"
+    ? (months <= 12 ? "monthly" : "quarterly")
+    : granularity;
 
   // Rileva contesto Telegram al mount
   useEffect(() => {
@@ -906,19 +937,29 @@ export default function AnalyticsPage() {
     setMounted(true);
   }, []);
 
-  const loadData = useCallback(async (m: number, id: string | null) => {
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    if (params.get("tab") === "expenses") setTab(1);
+    if (params.get("months") === "1") setMonths(1);
+  }, []);
+
+  const loadData = useCallback(async (m: number, id: string | null, aggregation: "monthly" | "quarterly" | "yearly") => {
     setLoading(true);
     setError(null);
     try {
       const monthStr = String(m);
       // Richiedi sempre il limite Pro (10) — il backend lo capperà per utenti Free
-      const [ov, cat, inc, wea, cap, mer] = await Promise.all([
-        fetchApi<OverviewData>("/api/analytics/overview", id, { months: monthStr }),
-        fetchApi<CategoriesData>("/api/analytics/categories-expense", id, { months: monthStr }),
-        fetchApi<IncomeData>("/api/analytics/income", id, { months: monthStr }),
-        fetchApi<WealthData>("/api/analytics/wealth", id, {}),
-        fetchApi<CapitalTrendData>("/api/analytics/capital-trend", id, { months: monthStr }),
-        fetchApi<TopMerchantsData>("/api/analytics/top-merchants", id, { months: monthStr, limit: "10" }),
+      const today = new Date();
+      const startDate = new Date(today.getFullYear(), today.getMonth() - m + 1, 1).toISOString().slice(0, 10);
+      const endDate = today.toISOString().slice(0, 10);
+      const [ov, cat, inc, wea, cap, mer, incomeRows] = await Promise.all([
+        apiFetch<OverviewData>("/api/analytics/overview", { params: { months: monthStr, granularity: aggregation } }),
+        apiFetch<CategoriesData>("/api/analytics/categories-expense", { params: { months: monthStr, granularity: aggregation } }),
+        apiFetch<IncomeData>("/api/analytics/income", { params: { months: monthStr, granularity: aggregation } }),
+        apiFetch<WealthData>("/api/analytics/wealth"),
+        apiFetch<CapitalTrendData>("/api/analytics/capital-trend", { params: { months: monthStr, granularity: aggregation } }),
+        apiFetch<TopMerchantsData>("/api/analytics/top-merchants", { params: { months: monthStr, limit: "10", granularity: aggregation, ...(groupLabels === null ? {} : { group: groupLabels ? "1" : "0" }) } }),
+        apiFetch<IncomeBreakdownData>("/api/space/incomes", { params: { limit: "500", offset: "0", start: startDate, end: endDate } }),
       ]);
       setOverview(ov);
       setCategories(cat);
@@ -926,6 +967,9 @@ export default function AnalyticsPage() {
       setWealth(wea);
       setCapitalTrend(cap);
       setTopMerchants(mer);
+      if (mer.grouped !== undefined) setGroupLabels(mer.grouped);
+      setIncomeBreakdown(buildIncomeBreakdown(incomeRows.incomes ?? []));
+      setIncomeOperations(incomeRows.incomes ?? []);
 
       // Mesi effettivi = mesi distinti presenti nei dati overview
       const distinctMonths = new Set([
@@ -941,9 +985,9 @@ export default function AnalyticsPage() {
       // Carica dati Pro-only se l'utente è Pro
       if (pt === "pro") {
         const [bud, sr, mc] = await Promise.all([
-          fetchApi<BudgetStatusData>("/api/analytics/budget-status", id, {}),
-          fetchApi<SavingsRateData>("/api/analytics/savings-rate", id, { months: monthStr }),
-          fetchApi<MonthComparisonData>("/api/analytics/month-comparison", id, {}),
+          apiFetch<BudgetStatusData>("/api/analytics/budget-status"),
+          apiFetch<SavingsRateData>("/api/analytics/savings-rate", { params: { months: monthStr, granularity: aggregation } }),
+          apiFetch<MonthComparisonData>("/api/analytics/month-comparison", { params: { granularity: aggregation } }),
         ]);
         setBudgetStatus(bud);
         setSavingsRate(sr);
@@ -954,7 +998,21 @@ export default function AnalyticsPage() {
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [groupLabels]);
+
+  /** Salva la preferenza di raggruppamento (ottimistica) e ricarica i grafici. */
+  const handleGroupedChange = useCallback(async (next: boolean) => {
+    const previous = groupLabels;
+    setGroupLabels(next);
+    try {
+      await apiFetch("/api/user/preferences", {
+        method: "PUT",
+        body: { analytics_group_labels: next },
+      });
+    } catch {
+      setGroupLabels(previous);
+    }
+  }, [groupLabels]);
 
   useEffect(() => {
     if (!mounted) return;
@@ -963,12 +1021,12 @@ export default function AnalyticsPage() {
         setError("auth_401");
         setLoading(false);
       } else {
-        loadData(months, initData);
+        loadData(months, initData, effectiveGranularity);
       }
     } else {
-      loadData(months, null);
+      loadData(months, null, effectiveGranularity);
     }
-  }, [isTelegram, initData, months, loadData, mounted]);
+  }, [isTelegram, initData, months, effectiveGranularity, loadData, mounted]);
 
   const handleMonthsChange = (v: number) => {
     setMonths(v);
@@ -978,9 +1036,6 @@ export default function AnalyticsPage() {
 
   const isNgrok = typeof window !== "undefined" && window.location.hostname.includes("ngrok-free.app");
   const showHeader = !isTelegram && !isNgrok;
-
-  // Categorie uniche per il filtro
-  const uniqueCategories = [...new Set((categories?.by_category ?? []).map((e) => e.name))].sort();
 
   return (
     <Box sx={{
@@ -992,8 +1047,15 @@ export default function AnalyticsPage() {
     }}>
       {showHeader && (
         <>
-          <Typography variant="h5" fontWeight={700} color="primary" mb={1}>
-            📊 Analytics
+          <Typography
+            component="h1"
+            variant="h5"
+            fontWeight={300}
+            color="primary"
+            mb={1}
+            sx={{ display: "flex", alignItems: "center", gap: 1 }}
+          >
+            Analytics
           </Typography>
           <Typography variant="body2" color="text.secondary" mb={3}>
             Analisi delle tue finanze con Moneo
@@ -1001,32 +1063,65 @@ export default function AnalyticsPage() {
         </>
       )}
 
-      <PeriodSlider value={months} onChange={handleMonthsChange} maxMonths={maxMonths} actualMonths={actualMonths} />
+      <Box sx={{ display: "flex", alignItems: "end", gap: 2, flexWrap: "wrap" }}>
+        <Box sx={{ flex: "1 1 260px", minWidth: 0 }}>
+          <PeriodSlider value={months} onChange={handleMonthsChange} maxMonths={maxMonths} actualMonths={actualMonths} />
+        </Box>
+        <FormControl size="small" sx={{ minWidth: 150, mb: 3, minHeight: 44 }}>
+          <InputLabel id="advanced-granularity-label">Aggregazione</InputLabel>
+          <Select labelId="advanced-granularity-label" value={granularity} label="Aggregazione" onChange={(event) => setGranularity(event.target.value as typeof granularity)} sx={{ minHeight: 44 }}>
+            <MenuItem value="auto">Auto</MenuItem>
+            <MenuItem value="monthly">Mensile</MenuItem>
+            <MenuItem value="quarterly">Trimestrale</MenuItem>
+            <MenuItem value="yearly">Annuale</MenuItem>
+          </Select>
+        </FormControl>
+      </Box>
 
       <Tabs
         value={tab}
         onChange={(_, v) => setTab(v)}
-        sx={{ mb: 2, minHeight: 40 }}
+        sx={{ mb: 2, minHeight: 44 }}
         variant="scrollable"
         scrollButtons="auto"
         allowScrollButtonsMobile
         data-tour="analytics-tabs"
       >
-        <Tab label="📈 Panoramica" sx={{ fontSize: "0.75rem", minHeight: 40 }} />
-        <Tab label="💳 Spese" sx={{ fontSize: "0.75rem", minHeight: 40 }} />
-        <Tab label="💰 Entrate" sx={{ fontSize: "0.75rem", minHeight: 40 }} />
-        <Tab label="📋 Lista" sx={{ fontSize: "0.75rem", minHeight: 40 }} />
         <Tab
           label={
             <Box sx={{ display: "flex", alignItems: "center", gap: 0.5 }}>
-              🎯 Budget
+              <TrendingUp size={14} strokeWidth={1.5} aria-hidden="true" /> Panoramica
+            </Box>
+          }
+          sx={{ fontSize: "0.75rem", minHeight: 44 }}
+        />
+        <Tab
+          label={
+            <Box sx={{ display: "flex", alignItems: "center", gap: 0.5 }}>
+              <CreditCard size={14} strokeWidth={1.5} aria-hidden="true" /> Spese
+            </Box>
+          }
+          sx={{ fontSize: "0.75rem", minHeight: 44 }}
+        />
+        <Tab
+          label={
+            <Box sx={{ display: "flex", alignItems: "center", gap: 0.5 }}>
+              <Wallet size={14} strokeWidth={1.5} aria-hidden="true" /> Entrate
+            </Box>
+          }
+          sx={{ fontSize: "0.75rem", minHeight: 44 }}
+        />
+        <Tab
+          label={
+            <Box sx={{ display: "flex", alignItems: "center", gap: 0.5 }}>
+              <Target size={14} strokeWidth={1.5} aria-hidden="true" /> Budget
               {!isPro && (
                 <Chip
                   label="PRO"
                   size="small"
                   sx={{
-                    background: "linear-gradient(135deg, #C5A059, #D4B47A)",
-                    color: "#ffffff",
+                    background: "var(--color-primary)",
+                    color: "#0a0a0a",
                     fontWeight: 800,
                     fontSize: "0.6rem",
                     height: 18,
@@ -1035,24 +1130,24 @@ export default function AnalyticsPage() {
               )}
             </Box>
           }
-          sx={{ fontSize: "0.75rem", minHeight: 40 }}
+          sx={{ fontSize: "0.75rem", minHeight: 44 }}
         />
       </Tabs>
 
-      {loading && (
-        <Box display="flex" justifyContent="center" py={6}>
-          <CircularProgress color="primary" />
-        </Box>
-      )}
+      {loading && <PageLoader sx={{ py: 6 }} />}
 
-      {error && !loading && (
-        <Alert severity="error" sx={{ mb: 2 }}>
-          {error === "auth_401"
-            ? (isTelegram
-              ? "Sessione Telegram scaduta — riapri la mini-app dal bot."
-              : "Apri questa pagina dalla mini-app Telegram.")
-            : error}
-        </Alert>
+      {!loading && (
+        <ErrorBanner
+          message={
+            !error
+              ? null
+              : error === "auth_401"
+                ? (isTelegram
+                  ? "Sessione Telegram scaduta: riapri la mini-app dal bot."
+                  : "Apri questa pagina dalla mini-app Telegram.")
+                : error
+          }
+        />
       )}
 
       {!loading && !error && overview && categories && income && wealth && capitalTrend && topMerchants && (
@@ -1060,38 +1155,45 @@ export default function AnalyticsPage() {
           {/* Tab 0: Panoramica */}
           {tab === 0 && (
             <>
-              <CapitalTrendChart data={capitalTrend} isPro={isPro} />
-              <SavingsChart data={overview.savings} />
-              {isPro && savingsRate && (
-                <SavingsRateChart data={savingsRate} />
-              )}
+              <AdvancedCharts
+                mode="overview"
+                savings={overview.savings.map((row) => ({ ...row, savings: row.net }))}
+                capitalTrend={capitalTrend.capital_trend}
+                accountRows={overview.totals_by_account}
+                savingsRate={isPro && savingsRate && savingsRate.savings_rate.length > 0 ? savingsRate.savings_rate : undefined}
+                categories={[]}
+                merchants={[]}
+                accounts={wealth.accounts}
+                comparisons={[]}
+              />
               {!isPro && (
                 <PremiumGate isPro={false} featureName="Tasso di Risparmio">
-                  <SavingsRateChart data={{ savings_rate: [], plan_type: "free", error: "Pro required" }} />
+                  <Box sx={{ minHeight: 100, display: "grid", placeItems: "center" }}>Tasso di Risparmio disponibile per Pro</Box>
                 </PremiumGate>
               )}
-              <MonthlyByAccountChart rows={overview.totals_by_account} />
             </>
           )}
 
           {/* Tab 1: Spese */}
           {tab === 1 && (
             <>
-              <CategoryTrendChart
-                rows={categories.by_category}
-                categories={uniqueCategories}
-                isPro={isPro}
+              <AdvancedCharts
+                categories={categories.by_category.map((row) => ({
+                  ...row,
+                  period_key: row.period_key ?? row.month,
+                  period_label: row.period_label ?? row.month,
+                }))}
+                merchants={topMerchants.merchants}
+                accounts={wealth.accounts}
+                comparisons={monthComparison?.comparisons ?? []}
+                months={months}
+                grouped={groupLabels ?? true}
+                onGroupedChange={(next) => void handleGroupedChange(next)}
+                onReload={() => loadData(months, initData, effectiveGranularity)}
               />
-              <CategoryPieChart rows={categories.by_category} />
-              <CategoryHistoryChart rows={categories.by_category} />
-              {topMerchants && <TopMerchantsChart data={topMerchants} />}
-              <CategoryAvgChart avgs={categories.averages} />
-              {isPro && monthComparison && (
-                <MonthComparisonChart data={monthComparison} />
-              )}
               {!isPro && (
                 <PremiumGate isPro={false} featureName="Confronto Mensile">
-                  <MonthComparisonChart data={{ comparisons: [], plan_type: "free", error: "Pro required" }} />
+                  <Box sx={{ minHeight: 100, display: "grid", placeItems: "center" }}>Confronto Mensile disponibile per Pro</Box>
                 </PremiumGate>
               )}
             </>
@@ -1100,24 +1202,24 @@ export default function AnalyticsPage() {
           {/* Tab 2: Entrate */}
           {tab === 2 && (
             <>
-              <IncomeChart data={income.monthly} />
-              <WealthPieChart accounts={wealth.accounts} />
+              <AdvancedCharts
+                mode="income"
+                income={income.monthly.map((row) => ({ ...row, income: row.total, expenses: 0, savings: row.total }))}
+                categories={[]}
+                merchants={[]}
+                accounts={wealth.accounts}
+                comparisons={[]}
+                incomeCategories={incomeBreakdown.byCategory}
+                incomeNature={incomeBreakdown.byNature}
+                incomeOperations={incomeOperations}
+              />
             </>
           )}
 
-          {/* Tab 3: Lista Transazioni */}
+          {/* Tab 3: Budget (Pro) */}
           {tab === 3 && (
-            <TransactionsTable
-              data={{ transactions: [], total: 0, total_amount: 0, offset: 0, limit: 50, plan_type: planType }}
-              isPro={isPro}
-              initData={initData}
-            />
-          )}
-
-          {/* Tab 4: Budget (Pro) */}
-          {tab === 4 && (
             <>
-              {isPro && <SavingsGoalsProgress />}
+              {isPro && <Box><Box sx={{ display: "flex", justifyContent: "flex-end", minHeight: 44 }}><InfoButton explanation="Obiettivi di risparmio: avanzamento degli obiettivi attivi rispetto al target. Include gli obiettivi collegati e i progressi registrati; esclude obiettivi archiviati." /></Box><SavingsGoalsProgress /></Box>}
               {isPro && budgetStatus ? (
                 <BudgetGaugeList data={budgetStatus} />
               ) : (
@@ -1129,6 +1231,27 @@ export default function AnalyticsPage() {
           )}
         </>
       )}
+      <Button href="/spazio" variant="text" sx={{ minHeight: 44, mt: 1 }}>Apri Gestisci</Button>
     </Box>
   );
+}
+
+/** Punto di ingresso del redesign progressivo; la vecchia implementazione resta temporaneamente isolata sopra. */
+export default function AnalyticsPage() {
+  const [showAdvanced, setShowAdvanced] = useState(false);
+
+  if (showAdvanced) {
+    return (
+      <>
+        <Box sx={{ width: "100%", maxWidth: 960, mx: "auto", pt: 2, px: { xs: 1.5, sm: 3 } }}>
+          <Button variant="text" onClick={() => setShowAdvanced(false)} sx={{ minHeight: 44 }}>
+            Torna alla sintesi
+          </Button>
+        </Box>
+        <LegacyAnalyticsPage />
+      </>
+    );
+  }
+
+  return <AnalyticsExperience onOpenAdvanced={() => setShowAdvanced(true)} />;
 }

@@ -1,8 +1,11 @@
 "use client";
 
 import { useEffect, useState, useCallback, useMemo } from "react";
-import { Box, Drawer, CircularProgress, Alert } from "@mui/material";
+import { Box, Drawer, Alert } from "@mui/material";
 import { ChevronLeft, ChevronRight, Receipt, RefreshCw } from "lucide-react";
+import { apiFetch } from "@/lib/api";
+import ErrorBanner from "@/components/feedback/ErrorBanner";
+import PageLoader from "@/components/feedback/PageLoader";
 import styles from "./calendario.module.css";
 
 // ---------------------------------------------------------------------------
@@ -37,8 +40,6 @@ interface CalendarMonthResponse {
 // Auth Telegram (stesso pattern di analytics/page.tsx)
 // ---------------------------------------------------------------------------
 
-const API_BASE = process.env.NEXT_PUBLIC_API_URL ?? "";
-
 type TelegramWebApp = {
   initData?: string;
   ready: () => void;
@@ -48,18 +49,6 @@ type TelegramWebApp = {
 type TelegramWindow = Window & {
   Telegram?: { WebApp?: TelegramWebApp };
 };
-
-async function fetchApi<T>(path: string, initData: string | null, params: Record<string, string> = {}): Promise<T> {
-  const qs = new URLSearchParams(params);
-  const url = `${API_BASE}${path}?${qs.toString()}`;
-  const headers: HeadersInit = initData ? { "X-Telegram-Init-Data": initData } : {};
-  const res = await fetch(url, { headers });
-  if (!res.ok) {
-    if (res.status === 401) throw new Error("auth_401");
-    throw new Error(`Errore API ${res.status}`);
-  }
-  return res.json() as Promise<T>;
-}
 
 // ---------------------------------------------------------------------------
 // Helper calendario
@@ -136,13 +125,12 @@ export default function CalendarioPage() {
     setMounted(true);
   }, []);
 
-  const loadMonth = useCallback(async (y: number, m: number, id: string | null) => {
+  const loadMonth = useCallback(async (y: number, m: number) => {
     setLoading(true);
     setError(null);
     try {
-      const res = await fetchApi<CalendarMonthResponse>("/api/calendar/month", id, {
-        year: String(y),
-        month: String(m),
+      const res = await apiFetch<CalendarMonthResponse>("/api/calendar/month", {
+        params: { year: String(y), month: String(m) },
       });
       setData(res);
     } catch (e: unknown) {
@@ -159,7 +147,7 @@ export default function CalendarioPage() {
       setLoading(false);
       return;
     }
-    loadMonth(year, month, initData);
+    loadMonth(year, month);
   }, [mounted, isTelegram, initData, year, month, loadMonth]);
 
   const grid = useMemo(() => buildMonthGrid(year, month), [year, month]);
@@ -179,7 +167,7 @@ export default function CalendarioPage() {
   return (
     <Box className={styles.page}>
       <div className={styles.headerRow}>
-        <span className={styles.monthLabel}>{MONTH_LABELS[month - 1]} {year}</span>
+        <h1 className={styles.monthLabel}>{MONTH_LABELS[month - 1]} {year}</h1>
         <div className={styles.navButtons}>
           <button className={styles.navButton} onClick={goPrevMonth} aria-label="Mese precedente">
             <ChevronLeft size={18} />
@@ -195,14 +183,10 @@ export default function CalendarioPage() {
           Sessione non valida. Riapri la pagina da Telegram.
         </Alert>
       )}
-      {error && error !== "auth_401" && (
-        <Alert severity="error" sx={{ mb: 2 }}>{error}</Alert>
-      )}
+      <ErrorBanner message={error && error !== "auth_401" ? error : null} sx={{ mb: 2 }} />
 
       {loading && !data ? (
-        <Box sx={{ display: "flex", justifyContent: "center", py: 6 }}>
-          <CircularProgress size={28} />
-        </Box>
+        <PageLoader size={28} sx={{ mt: 0, py: 6 }} />
       ) : (
         <>
           <div className={styles.weekdayRow}>
@@ -251,7 +235,15 @@ export default function CalendarioPage() {
         anchor="bottom"
         open={Boolean(selectedIso)}
         onClose={() => setSelectedIso(null)}
-        PaperProps={{ sx: { borderTopLeftRadius: 16, borderTopRightRadius: 16, maxHeight: "70vh" } }}
+        PaperProps={{
+          sx: {
+            borderTopLeftRadius: 16,
+            borderTopRightRadius: 16,
+            maxHeight: "70vh",
+            boxShadow: "none",
+            borderTop: "1px solid var(--color-border)",
+          },
+        }}
       >
         <div className={styles.sheetHandle} />
         {selectedIso && (

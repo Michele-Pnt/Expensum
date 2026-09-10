@@ -18,10 +18,11 @@ export default function Feedback() {
         <p>Aiutaci a migliorare Moneo. Inviaci suggerimenti o segnalazioni di bug.</p>
       </header>
 
-      <form className={styles.form} onClick={(e) => handleSubmit(e)}>
+      <form className={styles.form} onSubmit={handleSubmit}>
         <div className={styles.formGroup}>
-          <label className={styles.label}>Il tuo messaggio</label>
+          <label className={styles.label} htmlFor="feedback-message">Il tuo messaggio</label>
           <textarea 
+            id="feedback-message"
             className={styles.textarea} 
             placeholder="Scrivi qui il tuo feedback..."
             required

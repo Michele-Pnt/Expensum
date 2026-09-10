@@ -13,7 +13,7 @@
   font-size: 1.5rem;
   font-weight: 700;
   margin: 0 0 0.5rem 0;
-  color: var(--color-text);
+  color: var(--color-primary);
 }
 
 .header p {
@@ -65,27 +65,24 @@
 .textarea:focus {
   outline: none;
   border-color: var(--color-primary);
-  box-shadow: 0 0 0 3px rgba(26, 54, 115, 0.08);
 }
 
 .submitBtn {
   background: var(--color-primary);
-  color: #ffffff;
+  color: #1C363D;
   padding: 0.85rem;
   border-radius: var(--radius-md);
   font-weight: 700;
   font-size: 0.95rem;
-  transition: transform var(--duration-fast), box-shadow var(--duration-fast), opacity var(--duration-fast);
+  transition: background var(--duration-fast), opacity var(--duration-fast);
   display: flex;
   align-items: center;
   justify-content: center;
   gap: 0.5rem;
-  box-shadow: 0 2px 12px rgba(26, 54, 115, 0.20);
 }
 
 .submitBtn:hover {
-  transform: translateY(-1px);
-  box-shadow: 0 4px 20px rgba(26, 54, 115, 0.30);
+  background: var(--color-primary-dark);
 }
 
 .submitBtn:active {

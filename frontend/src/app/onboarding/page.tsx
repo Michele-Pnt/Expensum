@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useCallback } from "react";
 import { useRouter } from "next/navigation";
-import { getCsrfToken } from "@/lib/csrf";
+import { apiFetch } from "@/lib/api";
 import { trackOnboardingStepCompleted, trackOnboardingCompleted, trackReferralLinkGenerated } from "@/lib/analytics";
 import {
   Box,
@@ -10,7 +10,6 @@ import {
   Button,
   CircularProgress,
   LinearProgress,
-  TextField,
   ToggleButton,
   ToggleButtonGroup,
   Switch,
@@ -25,7 +24,6 @@ interface WizardState {
   timezone: string;
   hobbies: string[];
   notificationsEnabled: boolean;
-  notificationTime: string;
 }
 
 function detectLocaleDefaults(): { timezone: string; currency: string } {
@@ -38,26 +36,12 @@ function detectLocaleDefaults(): { timezone: string; currency: string } {
   return { timezone: tz, currency };
 }
 
-function getTelegramInitData(): string {
-  if (typeof window === "undefined") return "";
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  return (window as any).Telegram?.WebApp?.initData ?? "";
-}
-
-async function buildHeaders(): Promise<HeadersInit> {
-  const init = getTelegramInitData();
-  const csrfToken = await getCsrfToken();
-  const headers: Record<string, string> = { "X-CSRFToken": csrfToken };
-  if (init) headers["X-Telegram-Init-Data"] = init;
-  return headers;
-}
-
 // ─── Step components ──────────────────────────────────────────────────────────
 
 function WelcomeStep({ onNext }: { onNext: () => void }) {
   return (
     <Box sx={{ textAlign: "center", py: 4 }}>
-      <Typography variant="h4" fontWeight={700} sx={{ mb: 2, color: "var(--color-primary)" }}>
+      <Typography component="h1" variant="h4" fontWeight={700} sx={{ mb: 2, color: "var(--color-primary)" }}>
         👋 Benvenuto su Expensum!
       </Typography>
       <Typography variant="body1" sx={{ mb: 4, color: "var(--color-text-2)", maxWidth: 340, mx: "auto" }}>
@@ -210,40 +194,29 @@ function LifestyleStep({
 
 function NotificationsStep({
   enabled,
-  time,
   onEnabledChange,
-  onTimeChange,
   onNext,
   onBack,
   onSkip,
 }: {
   enabled: boolean;
-  time: string;
   onEnabledChange: (v: boolean) => void;
-  onTimeChange: (v: string) => void;
   onNext: () => void;
   onBack: () => void;
   onSkip: () => void;
 }) {
   return (
-    <StepWrapper title="Riepilogo giornaliero" onNext={onNext} onBack={onBack} onSkip={onSkip} canNext>
+    <StepWrapper title="Notifiche" onNext={onNext} onBack={onBack} onSkip={onSkip} canNext>
+      <Typography variant="caption" sx={{ color: "var(--color-text-2)", mb: 1, display: "block" }}>
+        Ti avvisiamo su cose utili come report periodici e obiettivi raggiunti.
+        Puoi cambiare idea in qualsiasi momento dalle impostazioni.
+      </Typography>
       <FormControlLabel
         control={
           <Switch checked={enabled} onChange={(e) => onEnabledChange(e.target.checked)} />
         }
-        label="Ricevi un riepilogo giornaliero"
-        sx={{ mb: 2 }}
+        label="Abilita le notifiche"
       />
-      {enabled && (
-        <TextField
-          type="time"
-          label="Orario notifica"
-          value={time}
-          onChange={(e) => onTimeChange(e.target.value)}
-          size="small"
-          sx={{ maxWidth: 160 }}
-        />
-      )}
     </StepWrapper>
   );
 }
@@ -268,10 +241,7 @@ function ConfirmStep({
     { label: "Valuta", value: `${state.currency} (auto-rilevata)` },
     { label: "Timezone", value: `${state.timezone} (auto-rilevata)` },
     ...(hobbyLabels.length ? [{ label: "Interessi", value: hobbyLabels.join(", ") }] : []),
-    {
-      label: "Notifiche",
-      value: state.notificationsEnabled ? `✅ Alle ${state.notificationTime}` : "🔕 Disabilitate",
-    },
+    { label: "Notifiche", value: state.notificationsEnabled ? "✅ Abilitate" : "🔕 Disabilitate" },
   ];
 
   return (
@@ -331,9 +301,7 @@ function InviteStep({ onContinue }: { onContinue: () => void }) {
 
   useEffect(() => {
     let cancelled = false;
-    buildHeaders()
-      .then((headers) => fetch("/api/referral/link", { headers, credentials: "same-origin" }))
-      .then((r) => (r.ok ? r.json() : null))
+    apiFetch<ReferralLinkData>("/api/referral/link")
       .then((json) => {
         if (!cancelled && json) {
           setData(json);
@@ -391,7 +359,7 @@ function InviteStep({ onContinue }: { onContinue: () => void }) {
           <Typography variant="caption" sx={{ display: "block", mb: 1, color: "var(--color-text-2)" }}>
             {data.referred_count > 0
               ? `Hai già invitato ${data.referred_count} ${data.referred_count === 1 ? "persona" : "persone"}.`
-              : "Nessun invito ancora — condividi il link per iniziare."}
+              : "Nessun invito ancora: condividi il link per iniziare."}
           </Typography>
           <Typography variant="caption" sx={{ display: "block", mb: 3, color: "var(--color-text-2)" }}>
             Ritrovi sempre il link nella tab &quot;Invita amici&quot;.
@@ -485,7 +453,7 @@ const toggleBtnSx = {
     bgcolor: "var(--color-primary-light)",
     borderColor: "var(--color-primary) !important",
     color: "var(--color-primary)",
-    fontWeight: 700,
+    fontWeight: 600,
   },
 };
 
@@ -517,7 +485,6 @@ export default function OnboardingPage() {
     timezone: detectedTz,
     hobbies: [],
     notificationsEnabled: true,
-    notificationTime: "08:00",
   });
 
   const update = useCallback((partial: Partial<WizardState>) => {
@@ -526,12 +493,7 @@ export default function OnboardingPage() {
 
   const saveStep = useCallback(async (stepName: string, data: Record<string, unknown>) => {
     try {
-      await fetch("/api/onboarding/step", {
-        method: "POST",
-        headers: { ...(await buildHeaders()), "Content-Type": "application/json" },
-        credentials: "same-origin",
-        body: JSON.stringify({ step: stepName, data }),
-      });
+      await apiFetch("/api/onboarding/step", { method: "POST", body: { step: stepName, data } });
     } catch {
       // non-bloccante
     }
@@ -557,13 +519,7 @@ export default function OnboardingPage() {
   const handleAgeConfirm = useCallback(async () => {
     setAgeLoading(true);
     try {
-      const headers = await buildHeaders();
-      await fetch("/api/onboarding/age-confirm", {
-        method: "POST",
-        headers: { ...headers, "Content-Type": "application/json" },
-        credentials: "same-origin",
-        body: JSON.stringify({ confirmed: true }),
-      });
+      await apiFetch("/api/onboarding/age-confirm", { method: "POST", body: { confirmed: true } });
       goNext("age_gate", { confirmed: true });
     } catch {
       // procedi comunque — il log verrà riscritto al complete
@@ -576,27 +532,19 @@ export default function OnboardingPage() {
   const handleComplete = useCallback(async () => {
     setSubmitting(true);
     try {
-      const headers = await buildHeaders();
-      await fetch("/api/onboarding/complete", {
+      await apiFetch("/api/onboarding/complete", {
         method: "POST",
-        headers: { ...(headers as Record<string, string>), "Content-Type": "application/json" },
-        credentials: "same-origin",
-        body: JSON.stringify({
+        body: {
           language: state.language,
           currency: state.currency,
           timezone: state.timezone,
           hobbies: state.hobbies,
           notifications_enabled: state.notificationsEnabled,
-          notification_time: state.notificationsEnabled ? state.notificationTime : null,
-        }),
+        },
       });
       trackOnboardingCompleted();
       // Carica demo data in background (fire-and-forget)
-      fetch("/api/demo/load", {
-        method: "POST",
-        headers: headers as Record<string, string>,
-        credentials: "same-origin",
-      }).catch(() => {});
+      apiFetch("/api/demo/load", { method: "POST" }).catch(() => {});
       // Setta flag tour + demo; rimuove "done" per chi si ri-registra
       try {
         localStorage.removeItem("expensum_tour_done");
@@ -614,18 +562,21 @@ export default function OnboardingPage() {
     }
   }, [state]);
 
-  const goToChat = useCallback(() => {
-    // Hard reload: TourProvider deve rimontarsi su /chat per leggere i flag
-    window.location.assign("/chat");
+  const goToApp = useCallback(() => {
+    // Hard reload: TourProvider deve rimontarsi sulla app per leggere i flag
+    window.location.assign("/home");
   }, []);
 
   // Controlla se l'onboarding è già completato
   useEffect(() => {
-    buildHeaders()
-      .then((headers) => fetch("/api/onboarding/status", { headers, credentials: "same-origin" }))
-      .then((r) => r.json())
+    apiFetch<{
+      onboarding_completed_at?: string | null;
+      preferred_language?: string;
+      currency?: string;
+      timezone?: string;
+    }>("/api/onboarding/status")
       .then((data) => {
-        if (data.onboarding_completed_at) router.replace("/chat");
+        if (data.onboarding_completed_at) router.replace("/home");
         if (data.preferred_language) update({ language: data.preferred_language });
         if (data.currency) update({ currency: data.currency });
         if (data.timezone) update({ timezone: data.timezone });
@@ -718,14 +669,9 @@ export default function OnboardingPage() {
           {step === 4 && (
             <NotificationsStep
               enabled={state.notificationsEnabled}
-              time={state.notificationTime}
               onEnabledChange={(v) => update({ notificationsEnabled: v })}
-              onTimeChange={(v) => update({ notificationTime: v })}
               onNext={() =>
-                goNext("notifications", {
-                  notifications_enabled: state.notificationsEnabled,
-                  notification_time: state.notificationTime,
-                })
+                goNext("notifications", { notifications_enabled: state.notificationsEnabled })
               }
               onBack={goBack}
               onSkip={() => goNext("notifications_skipped")}
@@ -741,7 +687,7 @@ export default function OnboardingPage() {
             />
           )}
 
-          {step === 6 && <InviteStep onContinue={goToChat} />}
+          {step === 6 && <InviteStep onContinue={goToApp} />}
 
         </Box>
       </Box>

@@ -213,10 +213,6 @@ def test_handle_callback_confirm_transfer_saves_and_skips_account_picker(monkeyp
     monkeypatch.setattr(bot._user_store, "log_message", lambda *a, **k: None)
     monkeypatch.setattr(bot.analytics, "track", lambda *a, **k: None)
 
-    async def _fake_refresh(*a, **k):
-        return None
-    monkeypatch.setattr(bot, "_refresh_pinned_dashboard", _fake_refresh)
-
     pending = {
         "type": "transfer", "date": "2026-07-13", "amount": 100.0, "name": "Trasferimento",
         "from_account_id": 1, "to_account_id": 2,

@@ -1,0 +1,198 @@
+.page {
+  display: flex;
+  flex-direction: column;
+  gap: 1.25rem;
+  width: 100%;
+  max-width: 1100px;
+  margin: 0 auto;
+  padding: 1.25rem 1.15rem 2rem;
+}
+
+.header {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+.month {
+  margin: 0;
+  color: var(--color-text-2);
+  font-size: 0.78rem;
+  font-weight: 500;
+  letter-spacing: 0.12em;
+}
+
+.title {
+  margin: 0;
+  color: var(--color-primary);
+  font-size: 2rem;
+  font-weight: 300;
+  letter-spacing: 0.015em;
+  line-height: 1.15;
+}
+
+.cards {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 0.9rem;
+}
+
+@media (min-width: 900px) {
+  .cards {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+.card {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+  padding: 1.1rem;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg, 16px);
+  background: var(--color-surface);
+}
+
+.cardLabel {
+  margin: 0;
+  color: var(--color-text-2);
+  font-size: 0.85rem;
+}
+
+.amount {
+  margin: 0;
+  color: var(--color-text);
+  font-size: 2.1rem;
+  font-weight: 500;
+  line-height: 1.1;
+  font-variant-numeric: tabular-nums;
+}
+
+.progressTrack {
+  height: 8px;
+  border-radius: 999px;
+  background: var(--color-surface-2);
+  overflow: hidden;
+}
+
+.progressFill {
+  height: 100%;
+  border-radius: 999px;
+  background: var(--color-primary);
+}
+
+.positive {
+  margin: 0;
+  color: var(--color-success, #6bcf9a);
+  font-size: 0.9rem;
+}
+
+.negative {
+  margin: 0;
+  color: var(--color-danger, #e2574c);
+  font-size: 0.9rem;
+}
+
+.muted {
+  margin: 0;
+  color: var(--color-text-2);
+  font-size: 0.85rem;
+}
+
+.sectionHeader {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.sectionTitle {
+  margin: 0;
+  color: var(--color-text-2);
+  font-size: 0.9rem;
+  font-weight: 500;
+}
+
+.sectionLink {
+  display: inline-flex;
+  align-items: center;
+  min-height: 44px;
+  padding: 0 0.5rem;
+  color: var(--color-primary);
+  font-size: 0.85rem;
+  text-decoration: none;
+}
+
+.sectionLink:focus-visible {
+  outline: 2px solid var(--color-primary);
+  outline-offset: 2px;
+  border-radius: var(--radius-md);
+}
+
+.movements {
+  display: flex;
+  flex-direction: column;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.movement {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  min-height: 56px;
+  padding: 0.75rem 0;
+  border-bottom: 1px solid var(--color-border);
+}
+
+.movement:last-child {
+  border-bottom: none;
+}
+
+.movementName {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  min-width: 0;
+  color: var(--color-text);
+  font-size: 0.95rem;
+  font-weight: 500;
+}
+
+.movementCategory {
+  color: var(--color-text-2);
+  font-size: 0.8rem;
+  font-weight: 400;
+}
+
+.movementAmount {
+  flex-shrink: 0;
+  font-size: 0.95rem;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.amountOut {
+  color: var(--color-danger, #e2574c);
+}
+
+.amountIn {
+  color: var(--color-success, #6bcf9a);
+}
+
+.empty {
+  margin: 0;
+  padding: 1.5rem 0;
+  color: var(--color-text-2);
+  font-size: 0.9rem;
+  text-align: center;
+}
+
+.skeleton {
+  height: 96px;
+  border-radius: var(--radius-lg, 16px);
+  background: var(--color-surface-2);
+}

@@ -1,66 +1,62 @@
 import type { NextConfig } from "next";
-import fs from "fs";
-import path from "path";
 import createNextIntlPlugin from "next-intl/plugin";
 
 const withNextIntl = createNextIntlPlugin("./src/i18n/request.ts");
 
-// Carica l'URL di ngrok dal .env della root
-const envPath = path.resolve(process.cwd(), "../.env");
-let ngrokHost = "";
-if (fs.existsSync(envPath)) {
-  const envContent = fs.readFileSync(envPath, "utf-8");
-  const match = envContent.match(/^WEBAPP_BASE_URL=https:\/\/([^/\s]+)/m);
-  if (match) ngrokHost = match[1];
-}
+// Host pubblico usato soltanto da `next dev`, senza accedere ai segreti backend.
+const developmentHost = process.env.NEXT_DEV_ALLOWED_HOST?.trim();
+// Il default preserva sviluppo locale; il twin Docker inietta il nome del servizio interno.
+const backendOrigin = process.env.INTERNAL_BACKEND_ORIGIN?.trim() || "http://localhost:5050";
 
 const nextConfig: NextConfig = {
-  allowedDevOrigins: ngrokHost ? [ngrokHost, "*.ngrok-free.app"] : ["*.ngrok-free.app"],
+  allowedDevOrigins: developmentHost
+    ? [developmentHost, "*.ngrok-free.app"]
+    : ["*.ngrok-free.app"],
   async rewrites() {
     return [
       {
         source: "/api/:path*",
-        destination: "http://localhost:5000/api/:path*",
+        destination: `${backendOrigin}/api/:path*`,
       },
       {
         source: "/auth/:path*",
-        destination: "http://localhost:5000/auth/:path*",
+        destination: `${backendOrigin}/auth/:path*`,
       },
       {
         source: "/webhooks/:path*",
-        destination: "http://localhost:5000/webhooks/:path*",
+        destination: `${backendOrigin}/webhooks/:path*`,
       },
       {
         source: "/admin/:path*",
-        destination: "http://localhost:5000/admin/:path*",
+        destination: `${backendOrigin}/admin/:path*`,
       },
       {
         source: "/login",
-        destination: "http://localhost:5000/login",
+        destination: `${backendOrigin}/login`,
       },
       {
         source: "/register",
-        destination: "http://localhost:5000/register",
+        destination: `${backendOrigin}/register`,
       },
       {
         source: "/logout",
-        destination: "http://localhost:5000/logout",
+        destination: `${backendOrigin}/logout`,
       },
       {
         source: "/users",
-        destination: "http://localhost:5000/users",
+        destination: `${backendOrigin}/users`,
       },
       {
         source: "/feedbacks",
-        destination: "http://localhost:5000/feedbacks",
+        destination: `${backendOrigin}/feedbacks`,
       },
       {
         source: "/logs",
-        destination: "http://localhost:5000/logs",
+        destination: `${backendOrigin}/logs`,
       },
       {
         source: "/setup",
-        destination: "http://localhost:5000/setup",
+        destination: `${backendOrigin}/setup`,
       },
     ];
   },

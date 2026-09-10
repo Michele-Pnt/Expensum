@@ -3,8 +3,17 @@ src/mistral_client.py — Client Mistral Small 3.1 per report mensile.
 
 Drop-in replacement di GeminiClient: stessa interfaccia pubblica,
 stesso prompt template Chain-of-Thought, retry identico.
+
+I metodi di generazione report/piani (`analyze_and_generate_report`,
+`generate_weekly_plan`, `generate_monthly_plan`) chiedono a Mistral SOLO la
+narrazione (paragrafi di commento e consigli), mai numeri o tabelle: quelli
+sono sempre costruiti deterministicamente da `src/report_builder.py` a partire
+dai dati reali. Questo riduce drasticamente la superficie di errore (l'AI non
+può più disallineare una tabella o inventare una cifra) e la latenza (JSON
+compatto invece di un intero report Markdown formattato).
 """
 
+import json
 import logging
 import httpx
 
@@ -22,8 +31,14 @@ from config import Config
 logger = logging.getLogger("financial_agent.mistral")
 
 
-def _normalize_usage_metadata(response) -> dict:
-    """Normalizza le usage metadata di Mistral in un formato stabile."""
+def _normalize_usage_metadata(response, model: str = Config.MISTRAL_SMALL_MODEL) -> dict:
+    """Normalizza le usage metadata di Mistral in un formato stabile.
+
+    `model` deve essere il modello EFFETTIVAMENTE chiamato per generare `response`:
+    il ledger token usa questo valore per il lookup del prezzo (vedi
+    `UserStore._seed_default_pricing`), quindi un valore hardcoded diverso dalla
+    chiamata reale attribuirebbe il costo al modello sbagliato.
+    """
     usage = {}
     if response.usage:
         prompt_tokens = response.usage.prompt_tokens or 0
@@ -36,7 +51,7 @@ def _normalize_usage_metadata(response) -> dict:
             "completion_tokens": completion_tokens,
             "total_tokens": total_tokens,
             "provider": "mistral",
-            "model": Config.MISTRAL_SMALL_MODEL,
+            "model": model,
         }
     return usage
 
@@ -55,9 +70,7 @@ Hai ricevuto i seguenti dati strutturati sulle spese mensili di un cliente:
 
 # ISTRUZIONI DI RAGIONAMENTO (Chain of Thought)
 
-Prima di produrre il report finale, esegui i seguenti passaggi di ragionamento
-internamente (puoi mostrarli come "RAGIONAMENTO:"):
-
+Prima di produrre la risposta finale, analizza internamente:
 1. Verifica che i totali per categoria sommino al totale mensile dichiarato.
 2. Controlla che le variazioni percentuali siano coerenti con i dati.
 3. Valuta le anomalie: sono significative o rumore?
@@ -66,81 +79,74 @@ internamente (puoi mostrarli come "RAGIONAMENTO:"):
 
 # OUTPUT RICHIESTO
 
-Produci ESATTAMENTE il seguente report in formato Markdown per Telegram.
-USA questi emoji esatti nelle intestazioni.
-NON inventare numeri non presenti nei dati.
-NON ricalcolare il "Denaro sui conti": usa ESATTAMENTE il valore già fornito.
-Usa *grassetto* solo con singolo asterisco (esempio: *testo*), MAI con doppio asterisco.
-Per la tabella risparmio: usa un blocco di codice (``` ``` ```) con colonne allineate a spazi. La colonna "Var. %" è la variazione rispetto al mese precedente nella serie; se è il primo mese disponibile scrivi "—".
+Rispondi SOLO con un oggetto JSON valido, nessun testo prima o dopo, nessun
+blocco di codice Markdown attorno. Struttura ESATTA:
 
----
+{{
+  "trend_paragraphs": [
+    "un paragrafo (1-2 frasi) sul confronto spesa mese corrente vs media storica",
+    "un paragrafo sul confronto entrate mese corrente vs media storica",
+    "un paragrafo sul trend del risparmio netto rispetto alla media storica",
+    "un paragrafo sulle categorie con lo scostamento più rilevante rispetto alla media"
+  ],
+  "tips": [
+    "consiglio specifico basato su un numero reale dai dati",
+    "consiglio specifico basato su un numero reale dai dati",
+    "consiglio specifico basato su un numero reale dai dati"
+  ]
+}}
 
-📊 *Riepilogo {current_month}*
-Spesa totale: *€{total_amount}*
-Entrate totali: *€{total_income}*
-🏦 Denaro sui conti: *€{total_accounts_balance}*
-Risparmio mensile: *{net_savings}*
-
-*Spesa per categorie:*
-[Lista completa di tutte le categorie di spesa del mese attuale con relativo importo e percentuale]
-
----
-
-📉 *Analisi e Confronto Trend*
-
-💸 *Spese*
-[Confronto numerico del totale speso: mese corrente vs media storica, con variazione % e una frase di contesto]
-
-💵 *Entrate*
-[Confronto entrate mese corrente vs media storica: importi, variazione %, e commento sulla stabilità]
-
-💾 *Risparmio — storico mensile*
-```
-Mese              Risparmio    Var. %
-----------------  -----------  ------
-[Mese più vecchio disponibile nei dati Monthly Balance, formato "Mmm YYYY"]  €[importo]   [+/-X%]
-...una riga per ogni mese disponibile nel Monthly Balance...
-[Mese corrente]   €[importo]   [+/-X%]
-```
-[Una frase che commenta il trend del risparmio: miglioramento, peggioramento, stabilità rispetto alla media storica di risparmio netto]
-
-📂 *Categorie*
-[Per ogni categoria con scostamento rilevante: nome, spesa attuale, media storica, variazione %. Evidenzia chiari sforamenti e virtuosismi. Ignora categorie con scostamento minimo.]
-
----
-
-🔮 *Previsione {next_month}*
-
-Stima ottimistica: *€[valore]*
-Stima base: *€[valore]*
-Stima pessimistica: *€[valore]*
-
-[Spiega brevemente i fattori principali che influenzano la previsione]
-
----
-
-💡 *3 Consigli Azionabili*
-
-Basati ESCLUSIVAMENTE sulle anomalie e i trend nei dati:
-
-1️⃣ [Consiglio specifico con numero reale dai dati]
-2️⃣ [Consiglio specifico con numero reale dai dati]
-3️⃣ [Consiglio specifico con numero reale dai dati]
-
----
-✨ _Generato con AI — verifica sempre i numeri_
+Regole:
+- NON inventare numeri non presenti nei dati forniti sopra.
+- NON includere KPI, tabelle o il riepilogo: quelli sono già gestiti altrove.
+- Testo semplice, senza Markdown (niente *, niente emoji, niente elenchi puntati dentro le stringhe).
+- Lingua italiana.
 """
 
 
+def _parse_json_object(raw_text: str) -> dict:
+    """Estrae e valida un oggetto JSON dalla risposta di Mistral.
+
+    Difensivo per costruzione: l'output del modello è un confine esterno non
+    fidato, anche con `response_format={"type": "json_object"}" può arrivare
+    circondato da testo o code fence se il modello non lo rispetta esattamente.
+    """
+    text = raw_text.strip()
+    if text.startswith("```"):
+        text = text.strip("`")
+        if text.lower().startswith("json"):
+            text = text[4:]
+        text = text.strip()
+
+    start, end = text.find("{"), text.rfind("}")
+    if start == -1 or end == -1 or end <= start:
+        raise ValueError("Nessun oggetto JSON trovato nella risposta Mistral")
+
+    parsed = json.loads(text[start : end + 1])
+    if not isinstance(parsed, dict):
+        raise ValueError("La risposta Mistral non è un oggetto JSON")
+    return parsed
+
+
 def _is_retryable(exc: Exception) -> bool:
-    """Ritorna True se l'eccezione è retryable (rate limit, server error, timeout)."""
+    """Ritorna True se l'eccezione è retryable (rate limit, server/gateway error, timeout)."""
     if isinstance(exc, httpx.HTTPStatusError):
-        return exc.response.status_code in (429, 500, 503)
+        return exc.response.status_code in (429, 500, 502, 503, 504)
     if isinstance(exc, (httpx.ConnectError, httpx.TimeoutException, ConnectionError, TimeoutError)):
         return True
     # Mistral SDK wrappa spesso gli errori API come SDKError con status code nel messaggio
     msg = str(exc).lower()
-    return any(code in msg for code in ("429", "500", "503", "rate limit", "too many requests"))
+    return any(code in msg for code in ("429", "500", "502", "503", "504", "rate limit", "too many requests"))
+
+
+def _sdk_error_status_code(exc: Exception) -> int | None:
+    """Estrae lo status code HTTP da un'eccezione del SDK Mistral, se presente.
+
+    Il SDK espone `status_code` sulle sue `SDKError`; per le altre eccezioni (httpx,
+    timeout di rete) non c'è un codice numerico. Nessun dato utente coinvolto: solo un
+    intero, sicuro da loggare a livello ERROR.
+    """
+    return getattr(exc, "status_code", None)
 
 
 class MistralClient:
@@ -167,12 +173,15 @@ class MistralClient:
         total_amount: str,
         total_accounts_balance: str,
         net_savings: str = "n/d",
-    ) -> tuple[str, dict]:
+    ) -> tuple[dict, dict]:
         """
-        Genera il report mensile con Mistral Small 3.1.
+        Genera la narrazione del report mensile (modello configurato in
+        MISTRAL_EXPENSE_PARSER_MODEL) — KPI e tabelle restano a carico di
+        `ReportBuilder.build_content`.
 
         Returns:
-            (report_markdown, usage_metadata) dove usage_metadata è:
+            (narrative, usage_metadata) dove narrative è
+            `{"trend_paragraphs": [...], "tips": [...]}` e usage_metadata è
             {prompt_tokens, completion_tokens, total_tokens, provider, model}
         """
         prompt = _PROMPT_TEMPLATE.format(
@@ -188,32 +197,28 @@ class MistralClient:
         )
 
         logger.info(
-            f"Invio prompt a Mistral ({Config.MISTRAL_SMALL_MODEL}), "
+            f"Invio prompt a Mistral ({Config.MISTRAL_EXPENSE_PARSER_MODEL}), "
             f"~{len(prompt)} caratteri"
         )
 
         response = self._client.chat.complete(
-            model=Config.MISTRAL_SMALL_MODEL,
+            model=Config.MISTRAL_EXPENSE_PARSER_MODEL,
             messages=[{"role": "user", "content": prompt}],
             temperature=0.2,
-            max_tokens=8192,
+            max_tokens=1024,
+            response_format={"type": "json_object"},
         )
 
         raw_text = response.choices[0].message.content
         if not raw_text:
             raise ValueError("Mistral ha restituito una risposta vuota")
 
-        logger.info(f"Risposta Mistral ricevuta: {len(raw_text)} caratteri")
+        narrative = _parse_json_object(raw_text)
+        logger.info(f"Narrazione report mensile Mistral ricevuta: {len(raw_text)} caratteri")
 
-        # Estrai usage metadata
-        usage = _normalize_usage_metadata(response)
+        usage = _normalize_usage_metadata(response, model=Config.MISTRAL_EXPENSE_PARSER_MODEL)
 
-        # Rimuovi eventuale ragionamento pre-report (Chain of Thought)
-        parts = raw_text.split("📊", 1)
-        if len(parts) == 2:
-            raw_text = "📊" + parts[1]
-
-        return raw_text.strip(), usage
+        return narrative, usage
 
     @retry(
         retry=retry_if_exception(_is_retryable),
@@ -222,16 +227,18 @@ class MistralClient:
         before_sleep=before_sleep_log(logger, logging.WARNING),
         reraise=True,
     )
-    def generate_weekly_plan(self, plan_data_text: str, week_label: str) -> tuple[str, dict]:
+    def generate_weekly_plan(self, plan_data_text: str, week_label: str) -> tuple[dict, dict]:
         """
-        Genera il piano settimanale con Mistral Small 3.1.
+        Genera la narrazione del piano settimanale (modello configurato in
+        MISTRAL_EXPENSE_PARSER_MODEL) — KPI, abbonamenti e tabella budget
+        restano a carico di `WeeklyPlanBuilder.build_content`.
 
         Args:
             plan_data_text: output di WeeklyPlanData.to_prompt_text()
             week_label: es. "15/05 → 21/05"
 
         Returns:
-            (piano_markdown, usage_metadata)
+            (narrative, usage_metadata) dove narrative è `{"tips": [...]}`
         """
         prompt = _WEEKLY_PLAN_PROMPT_TEMPLATE.format(
             plan_data=plan_data_text,
@@ -239,30 +246,27 @@ class MistralClient:
         )
 
         logger.info(
-            f"Invio prompt piano settimanale a Mistral ({Config.MISTRAL_SMALL_MODEL}), "
+            f"Invio prompt piano settimanale a Mistral ({Config.MISTRAL_EXPENSE_PARSER_MODEL}), "
             f"~{len(prompt)} caratteri"
         )
 
         response = self._client.chat.complete(
-            model=Config.MISTRAL_SMALL_MODEL,
+            model=Config.MISTRAL_EXPENSE_PARSER_MODEL,
             messages=[{"role": "user", "content": prompt}],
             temperature=0.4,
-            max_tokens=4096,
+            max_tokens=512,
+            response_format={"type": "json_object"},
         )
 
         raw_text = response.choices[0].message.content
         if not raw_text:
             raise ValueError("Mistral ha restituito una risposta vuota per il piano settimanale")
 
-        usage = _normalize_usage_metadata(response)
+        narrative = _parse_json_object(raw_text)
+        usage = _normalize_usage_metadata(response, model=Config.MISTRAL_EXPENSE_PARSER_MODEL)
 
-        # Rimuovi eventuale ragionamento pre-piano
-        parts = raw_text.split("📅", 1)
-        if len(parts) == 2:
-            raw_text = "📅" + parts[1]
-
-        logger.info(f"Piano settimanale Mistral ricevuto: {len(raw_text)} caratteri")
-        return raw_text.strip(), usage
+        logger.info(f"Narrazione piano settimanale Mistral ricevuta: {len(raw_text)} caratteri")
+        return narrative, usage
 
     @retry(
         retry=retry_if_exception(_is_retryable),
@@ -271,16 +275,18 @@ class MistralClient:
         before_sleep=before_sleep_log(logger, logging.WARNING),
         reraise=True,
     )
-    def generate_monthly_plan(self, plan_data_text: str, month_label: str) -> tuple[str, dict]:
+    def generate_monthly_plan(self, plan_data_text: str, month_label: str) -> tuple[dict, dict]:
         """
-        Genera il piano mensile con Mistral Small 3.1.
+        Genera la narrazione del piano mensile previsionale (modello configurato
+        in MISTRAL_EXPENSE_PARSER_MODEL) — KPI, abbonamenti e tabella target
+        restano a carico di `MonthlyPlanBuilder.build_content`.
 
         Args:
             plan_data_text: output di MonthlyPlanData.to_prompt_text()
             month_label: es. "Giugno 2026"
 
         Returns:
-            (piano_markdown, usage_metadata)
+            (narrative, usage_metadata) dove narrative è `{"tips": [...]}`
         """
         prompt = _MONTHLY_PLAN_PROMPT_TEMPLATE.format(
             plan_data=plan_data_text,
@@ -288,30 +294,27 @@ class MistralClient:
         )
 
         logger.info(
-            f"Invio prompt piano mensile a Mistral ({Config.MISTRAL_SMALL_MODEL}), "
+            f"Invio prompt piano mensile a Mistral ({Config.MISTRAL_EXPENSE_PARSER_MODEL}), "
             f"~{len(prompt)} caratteri"
         )
 
         response = self._client.chat.complete(
-            model=Config.MISTRAL_SMALL_MODEL,
+            model=Config.MISTRAL_EXPENSE_PARSER_MODEL,
             messages=[{"role": "user", "content": prompt}],
             temperature=0.4,
-            max_tokens=4096,
+            max_tokens=512,
+            response_format={"type": "json_object"},
         )
 
         raw_text = response.choices[0].message.content
         if not raw_text:
             raise ValueError("Mistral ha restituito una risposta vuota per il piano mensile")
 
-        usage = _normalize_usage_metadata(response)
+        narrative = _parse_json_object(raw_text)
+        usage = _normalize_usage_metadata(response, model=Config.MISTRAL_EXPENSE_PARSER_MODEL)
 
-        # Rimuovi eventuale ragionamento pre-piano
-        parts = raw_text.split("📅", 1)
-        if len(parts) == 2:
-            raw_text = "📅" + parts[1]
-
-        logger.info(f"Piano mensile Mistral ricevuto: {len(raw_text)} caratteri")
-        return raw_text.strip(), usage
+        logger.info(f"Narrazione piano mensile Mistral ricevuta: {len(raw_text)} caratteri")
+        return narrative, usage
 
     def generate_lifestyle_categories(self, lifestyle: dict) -> list[str]:
         """Suggerisce categorie di spesa personalizzate basandosi sul profilo lifestyle.
@@ -347,12 +350,12 @@ class MistralClient:
         )
 
         logger.info(
-            "Generazione categorie lifestyle con Mistral (%s)", Config.MISTRAL_SMALL_MODEL
+            "Generazione categorie lifestyle con Mistral (%s)", Config.MISTRAL_EXPENSE_PARSER_MODEL
         )
 
         try:
             response = self._client.chat.complete(
-                model=Config.MISTRAL_SMALL_MODEL,
+                model=Config.MISTRAL_EXPENSE_PARSER_MODEL,
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0.3,
                 max_tokens=512,
@@ -372,7 +375,7 @@ class MistralClient:
 
         return list(DEFAULT_CATEGORIES)
 
-    def synthesize_category_description(self, raw_description: str) -> str:
+    def synthesize_category_description(self, raw_description: str) -> str | None:
         """Sintetizza la descrizione di una categoria scritta dall'utente in una
         frase breve, chiamata una tantum quando l'utente crea/modifica una
         categoria (non ad ogni parsing spesa — vedi `ExpenseParser`, che riusa
@@ -382,11 +385,10 @@ class MistralClient:
         naturale, non parole chiave): serve a comprimere descrizioni verbose in
         una forma compatta senza perdere il criterio comportamentale espresso.
 
-        Fallback: se Mistral non risponde, ritorna `raw_description` troncata
-        (mai bloccare il salvataggio della categoria per un errore Mistral).
+        Se Mistral non risponde non produce un fallback dal testo originale: la
+        descrizione resta salvata per l'utente, ma non viene mai promossa a
+        contesto del system prompt senza una sintesi validata.
         """
-        fallback = raw_description.strip()[:200]
-
         prompt = (
             "Sintetizza in UNA sola frase breve (massimo 20 parole), in italiano "
             "naturale e nello stesso registro discorsivo dell'originale, la seguente "
@@ -398,16 +400,23 @@ class MistralClient:
 
         try:
             response = self._client.chat.complete(
-                model=Config.MISTRAL_SMALL_MODEL,
+                model=Config.MISTRAL_EXPENSE_PARSER_MODEL,
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0.3,
                 max_tokens=128,
             )
             summary = (response.choices[0].message.content or "").strip().strip('"')
-            return summary or fallback
-        except Exception as e:
-            logger.warning("Errore sintesi descrizione categoria: %s — uso fallback troncato", e)
-            return fallback
+            if not summary:
+                return None
+            from src.input_sanitizer import sanitize_category_metadata
+            return sanitize_category_metadata(summary, "system", field="description")
+        except Exception as exc:
+            logger.warning(
+                "category_description_synthesis_failed",
+                extra={"domain": "financial", "event": "category_description_synthesis_failed",
+                       "meta": {"error_type": type(exc).__name__}},
+            )
+            return None
 
     def generate_category_description_from_name(
         self, category_name: str, example_expense_name: str | None = None,
@@ -432,7 +441,7 @@ class MistralClient:
         )
         try:
             response = self._client.chat.complete(
-                model=Config.MISTRAL_SMALL_MODEL,
+                model=Config.MISTRAL_EXPENSE_PARSER_MODEL,
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0.3,
                 max_tokens=128,
@@ -448,77 +457,41 @@ class MistralClient:
 
 _WEEKLY_PLAN_PROMPT_TEMPLATE = """
 Sei un Coach Finanziario Personale specializzato in finanza quotidiana.
-Hai ricevuto i seguenti dati sull'andamento finanziario settimanale e mensile di un cliente:
+Hai ricevuto i seguenti dati sull'andamento finanziario settimanale e mensile di un cliente
+per la settimana {week_label}:
 
 --- DATI ANALIZZATI ---
 {plan_data}
 
 # ISTRUZIONI DI RAGIONAMENTO (Chain of Thought)
 
-Prima di produrre il piano, analizza internamente:
+Prima di produrre i consigli, analizza internamente:
 1. Quali categorie sono critiche (status=attenzione o sforato: proiezione a fine mese supera il budget)?
 2. Quali categorie mostrano miglioramento: rinforza il comportamento positivo.
-3. Gli abbonamenti in scadenza riducono il budget netto: tienine conto nei consigli.
-4. I pattern giornalieri indicano quando l'utente spende di più: sfruttali per i consigli.
-5. Se l'utente ha indicato vincoli espliciti, rispettali e costruisci attorno a loro.
-6. Se la spesa della settimana scorsa per una categoria è €0.00 (indicato nel dato con [spesa=0: non mostrare avvisi negativi]), NON mostrare avvisi negativi per quella categoria — usa ⬜ nella tabella.
+3. Gli abbonamenti in scadenza riducono il budget netto: tienine conto.
+4. I pattern giornalieri indicano quando l'utente spende di più: sfruttali.
+5. Se la spesa della settimana scorsa per una categoria è €0.00 (indicato nel dato
+   con [spesa=0: non mostrare avvisi negativi]), NON generare un consiglio negativo
+   su quella categoria.
 
 # OUTPUT RICHIESTO
 
-Produci ESATTAMENTE il seguente piano settimanale in Markdown per Telegram.
-Usa *grassetto* solo con singolo asterisco.
-NON inventare numeri non presenti nei dati.
-Il linguaggio deve essere in italiano, il tono deve essere amichevole e informale. 
-Sii spiritoso e simpatico MA NON MENTIRE MAI SUI DATI.
-Sii specifico e concreto: USA I DATI FORNITI E REALI, non consigli generici.
-Tono prospettico: "questa settimana punta a...", non retrospettivo.
+Rispondi SOLO con un oggetto JSON valido, nessun testo prima o dopo, nessun
+blocco di codice Markdown attorno. Struttura ESATTA:
 
----
+{{
+  "tips": [
+    "consiglio specifico per questa settimana con giorno/categoria/importo reale dai dati",
+    "consiglio specifico",
+    "consiglio specifico"
+  ]
+}}
 
-📅 *Piano Settimana {week_label}*
-
-🔔 *Abbonamenti in uscita questa settimana:*
-[Se ci sono abbonamenti nei dati: elencali con importo e data di scadenza]
-[Se NON ci sono abbonamenti in scadenza: scrivi "Nessun abbonamento in scadenza questa settimana. 🎉"]
-
----
-
-🎯 *Obiettivi per categoria*
-_Gli obiettivi sono calcolati sul budget mensile impostato dall'utente. Può cambiarlo con /modify_ 🎛️
-
-Genera una tabella in code block (```) con ESATTAMENTE 4 colonne e larghezza MASSIMA 34 caratteri per riga (indispensabile per non andare a capo su Telegram mobile).
-Colonne: Categoria (13 car, ljust, tronca con "." se più lungo) | Scorsa (7 car, rjust, €XX.XX) | /sett (6 car, rjust, €XXX/s senza decimali) | T (emoji stato).
-Legenda T: usa il campo "status" presente nei dati per ogni categoria.
-  • status=ok → ✅ (proiezione fine mese entro il budget)
-  • status=attenzione → ⚠️ (al ritmo attuale supererai il budget a fine mese)
-  • status=sforato → 🔴 (budget mensile già superato)
-  • spesa settimana scorsa = €0.00 → ⬜ (indipendentemente dallo status)
-Dopo il code block aggiungi SEMPRE questa legenda in corsivo:
-_✅ in target · ⚠️ a questo ritmo esci dal budget · ⬜ nessuna spesa sett. scorsa_
-Esempio formato (rispetta ESATTAMENTE questi allineamenti):
-```
-Categoria      Scorsa   /sett T
-───────────────────────────────
-Alimentari     €26.84  €86/s ✅
-Ristoranti.    €21.41  €46/s ⚠️
-Trasporti       €0.00  €37/s ⬜
-Svago & Int.  €120.00  €75/s 🔴
-```
-_✅ in target · ⚠️ a questo ritmo esci dal budget · ⬜ nessuna spesa sett. scorsa_
-
----
-
-💡 *3 Consigli per questa settimana*
-
-Basati ESCLUSIVAMENTE sui pattern e anomalie nei dati:
-
-1️⃣ [Consiglio specifico con giorno/categoria/importo reale dai dati — es. "il sabato spendi il 35% del tuo budget settimanale alimentare: pianifica la spesa in anticipo"]
-2️⃣ [Consiglio specifico]
-3️⃣ [Consiglio specifico]
-
----
-✨ _Generato con AI — verifica sempre i numeri_
-_Scrivi in modo naturale per modificare un obiettivo_
+Regole:
+- NON inventare numeri non presenti nei dati forniti sopra.
+- Tono amichevole e informale, prospettico ("questa settimana punta a..."), MAI menzognero sui dati.
+- Testo semplice, senza Markdown (niente *, niente emoji, niente elenchi puntati dentro le stringhe).
+- Lingua italiana.
 """
 
 
@@ -531,54 +504,29 @@ Hai ricevuto i seguenti dati per pianificare il mese di {month_label}:
 
 # ISTRUZIONI DI RAGIONAMENTO (Chain of Thought)
 
-Prima di produrre il piano, analizza internamente:
+Prima di produrre i consigli, analizza internamente:
 1. Quali categorie mostrano trend in crescita negli ultimi 3 mesi? Richiedono attenzione o un piano di contenimento?
-2. Quali categorie sono in calo? Rinforza questo comportamento positivo nel piano.
+2. Quali categorie sono in calo? Rinforza questo comportamento positivo.
 3. L'obiettivo di risparmio è realistico rispetto alle entrate previste e alle spese storiche?
 4. Gli abbonamenti in scadenza riducono il budget disponibile: quantificali nei consigli.
-5. Se l'utente ha indicato vincoli espliciti, rispettali e costruisci il piano attorno a loro.
+5. Se l'utente ha indicato vincoli espliciti, rispettali.
 
 # OUTPUT RICHIESTO
 
-Produci ESATTAMENTE il seguente piano mensile in Markdown per Telegram.
-Usa *grassetto* solo con singolo asterisco.
-NON inventare numeri non presenti nei dati.
-Sii specifico e concreto: usa i dati reali, non consigli generici.
-Tono prospettico: "questo mese punta a...", non retrospettivo.
+Rispondi SOLO con un oggetto JSON valido, nessun testo prima o dopo, nessun
+blocco di codice Markdown attorno. Struttura ESATTA:
 
----
+{{
+  "tips": [
+    "consiglio specifico per questo mese con categoria/importo reale dai dati",
+    "consiglio specifico",
+    "consiglio specifico"
+  ]
+}}
 
-📅 *Piano Mensile {month_label}*
-
-💰 Previsione entrate: *€[income_forecast]*
-🎯 Obiettivo risparmio: *€[savings_goal]*
-🏦 Saldo conti attuale: *€[total_accounts]*
-
-[Se ci sono abbonamenti in scadenza:]
-🔔 *Abbonamenti in uscita questo mese:*
-[lista abbonamenti con importo e data di scadenza]
-
----
-
-🎯 *Budget per categoria*
-
-[Per ogni categoria con target, una riga: nome, target €/mese, e una nota breve basata sul trend. Es:]
-• *Alimentari* — €X/mese _(stabile negli ultimi 6 mesi)_
-• *Ristoranti* — €X/mese _(attenzione: tendenza in crescita, cerca di contenere)_
-• *Trasporti* — €X/mese _(ottimo: in calo, continua così)_
-
----
-
-💡 *3 Consigli per questo mese*
-
-Basati ESCLUSIVAMENTE sui trend e anomalie nei dati:
-
-1️⃣ [Consiglio specifico con categoria/importo reale dai dati]
-2️⃣ [Consiglio specifico]
-3️⃣ [Consiglio specifico]
-
----
-✨ _Generato con AI — verifica sempre i numeri_
-_Scrivi in modo naturale per modificare un obiettivo_
+Regole:
+- NON inventare numeri non presenti nei dati forniti sopra.
+- Tono prospettico ("questo mese punta a..."), specifico e concreto, MAI menzognero sui dati.
+- Testo semplice, senza Markdown (niente *, niente emoji, niente elenchi puntati dentro le stringhe).
+- Lingua italiana.
 """
-

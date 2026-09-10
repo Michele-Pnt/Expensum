@@ -45,7 +45,7 @@ function getTooltipPosition(
   let top = 0;
   let left = 0;
 
-  if (position === "bottom" || (position !== "top" && spotBottom + tooltipHeight + 16 < vh)) {
+  if (position !== "top" && spotBottom + tooltipHeight + 16 < vh) {
     top = spotBottom + 12;
   } else if (position === "top" || spotTop - tooltipHeight - 16 > 0) {
     top = spotTop - tooltipHeight - 12;
@@ -98,7 +98,7 @@ export default function TourOverlay() {
     tooltipObserverRef.current.observe(node);
   }, []);
 
-  const measureTarget = useCallback(() => {
+  const measureTarget = useCallback(function measureTarget() {
     if (!step) return;
     // Cerca il primo match on-screen con dimensioni reali (evita duplicati hidden o in animazione)
     const candidates = Array.from(document.querySelectorAll(step.selector)) as HTMLElement[];
@@ -127,7 +127,7 @@ export default function TourOverlay() {
     el.style.position = el.style.position || "relative";
     el.style.zIndex = "9999";
     el.style.borderRadius = "8px";
-    el.style.outline = "2px solid var(--color-primary, #6C5CE7)";
+    el.style.outline = "2px solid var(--color-primary)";
     el.style.outlineOffset = "2px";
 
     // Osserva resize
@@ -175,7 +175,7 @@ export default function TourOverlay() {
       clearTimeout(t);
       if (retryRef.current) clearTimeout(retryRef.current);
     };
-  }, [isActive, currentStep, measureTarget, cleanupPrevElement]);
+  }, [isActive, currentStep, step, measureTarget, cleanupPrevElement]);
 
   // Scroll per portare l'elemento nello schermo. Salta gli elementi dentro un
   // contenitore position:fixed (es. un Dialog MUI, centrato nel viewport e
@@ -268,12 +268,11 @@ export default function TourOverlay() {
           overflowY: "auto",
           bgcolor: "background.paper",
           borderRadius: "14px",
-          boxShadow: "0 8px 40px rgba(0,0,0,0.28), 0 2px 8px rgba(0,0,0,0.12)",
           p: 2.5,
           opacity: 1,
           transform: "translateY(0)",
           transition: TRANSITION,
-          border: "1px solid var(--color-border, rgba(255,255,255,0.08))",
+          border: "1px solid var(--color-border)",
           pointerEvents: "auto",
         }}
       >
@@ -293,7 +292,7 @@ export default function TourOverlay() {
             sx={{
               height: "100%",
               width: `${((currentStep + 1) / steps.length) * 100}%`,
-              background: "linear-gradient(90deg, var(--color-primary, #6C5CE7), #a78bfa)",
+              background: "linear-gradient(90deg, var(--color-primary), var(--color-primary-dark))",
               borderRadius: 2,
               transition: TRANSITION,
             }}
@@ -301,7 +300,7 @@ export default function TourOverlay() {
         </Box>
 
         {/* Titolo */}
-        <Typography variant="subtitle1" fontWeight={700} sx={{ mb: 0.75, lineHeight: 1.3 }}>
+        <Typography variant="subtitle1" fontWeight={500} sx={{ mb: 0.75, lineHeight: 1.3 }}>
           {step.title}
         </Typography>
 
@@ -344,8 +343,8 @@ export default function TourOverlay() {
                 borderRadius: "8px",
                 px: 1.5,
                 py: 0.5,
-                background: "linear-gradient(135deg, var(--color-primary, #6C5CE7), #8b5cf6)",
-                "&:hover": { background: "linear-gradient(135deg, #5a4ad1, #7c3aed)" },
+                background: "linear-gradient(135deg, var(--color-primary), var(--color-primary-dark))",
+                "&:hover": { background: "linear-gradient(135deg, var(--color-primary-dark), var(--color-primary))" },
               }}
             >
               {isLast ? "Fatto!" : "Avanti"}

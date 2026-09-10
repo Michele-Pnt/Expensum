@@ -1,4 +1,5 @@
 import NextLink from "next/link";
+import Image from "next/image";
 import { Box, Card, CardContent, Chip, Stack, Typography } from "@mui/material";
 import { getTranslations, setRequestLocale } from "next-intl/server";
 import { Link } from "@/i18n/navigation";
@@ -58,8 +59,13 @@ export default async function ComeFunzionaMoneoPage({
         }}
       >
         <Link href="/" style={{ display: "flex", alignItems: "center", gap: 8, textDecoration: "none" }}>
-          <img src="/logo-expensum-icon.png" alt="Expensum" style={{ height: 28, width: "auto" }} />
-          <img src="/scritta_expensum.png" alt="Expensum" style={{ height: 16, width: "auto" }} />
+          <Image src="/logo-expensum-icon.png" alt="Expensum" width={28} height={28} />
+          <Typography
+            component="span"
+            sx={{ fontSize: "17px", fontWeight: 300, letterSpacing: "0.015em", color: "text.primary" }}
+          >
+            Expensum
+          </Typography>
         </Link>
         <Link href="/" style={{ textDecoration: "none", color: "inherit" }}>
           <Typography
@@ -78,7 +84,7 @@ export default async function ComeFunzionaMoneoPage({
 
       <Box sx={{ p: { xs: 2, md: 4 }, maxWidth: 980, mx: "auto", flex: 1 }}>
         <Box sx={{ mb: 4 }}>
-          <Typography variant="h4" fontWeight={800} color="primary.main" gutterBottom>
+          <Typography component="h1" variant="h4" fontWeight={300} color="primary.main" gutterBottom>
             {t("title")}
           </Typography>
           <Typography color="text.secondary">{t("intro")}</Typography>
@@ -87,7 +93,7 @@ export default async function ComeFunzionaMoneoPage({
         <Stack spacing={3}>
         <Card sx={{ borderRadius: 4 }}>
           <CardContent>
-            <Typography variant="h6" fontWeight={700} gutterBottom>
+            <Typography variant="h6" fontWeight={500} gutterBottom>
               {t("aiDisclosure.title")}
             </Typography>
             <Typography color="text.secondary">{t("aiDisclosure.desc")}</Typography>
@@ -96,7 +102,7 @@ export default async function ComeFunzionaMoneoPage({
 
         <Card sx={{ borderRadius: 4 }}>
           <CardContent>
-            <Typography variant="h6" fontWeight={700} gutterBottom>
+            <Typography variant="h6" fontWeight={500} gutterBottom>
               {t("models.title")}
             </Typography>
             <Stack spacing={2} sx={{ mt: 1 }}>
@@ -118,7 +124,7 @@ export default async function ComeFunzionaMoneoPage({
 
         <Card sx={{ borderRadius: 4 }}>
           <CardContent>
-            <Typography variant="h6" fontWeight={700} gutterBottom>
+            <Typography variant="h6" fontWeight={500} gutterBottom>
               {t("limits.title")}
             </Typography>
             <Typography color="text.secondary">{t("limits.desc")}</Typography>
@@ -127,7 +133,7 @@ export default async function ComeFunzionaMoneoPage({
 
         <Card sx={{ borderRadius: 4 }}>
           <CardContent>
-            <Typography variant="h6" fontWeight={700} gutterBottom>
+            <Typography variant="h6" fontWeight={500} gutterBottom>
               {t("privacy.title")}
             </Typography>
             <Typography color="text.secondary">

@@ -48,13 +48,12 @@ jobs:
     - name: Installazione dipendenze
       run: |
         python -m pip install --upgrade pip
-        pip install pytest pytest-cov
-        pip install -r requirements.txt
+        python -m pip install --require-hashes -r requirements-dev.lock
 
     - name: Scansione CVE dipendenze (pip-audit)
       run: |
-        pip install pip-audit
-        pip-audit -r requirements.txt --desc
+        pip-audit -r requirements.lock --strict --desc
+        pip-audit -r ML-model/requirements.lock --strict --desc
 
     - name: Esecuzione Test Suite (unit + integration, MOCK mode)
       run: |

@@ -12,19 +12,24 @@ from logging.handlers import TimedRotatingFileHandler
 from pathlib import Path
 from dotenv import load_dotenv
 
-# Carica il file .env dalla root del progetto
-load_dotenv(dotenv_path=Path(__file__).parent / ".env")
+# Il twin di audit riceve esclusivamente un ambiente Docker sintetico e non deve mai
+# leggere file dell'host: altrimenti un build/scanner locale potrebbe ereditare secret
+# reali da .env o .env.local. Le normali esecuzioni restano invariate.
+_AUDIT_MODE = os.getenv("EXPENSUM_AUDIT_MODE") == "1"
+if not _AUDIT_MODE:
+    # Carica il file .env dalla root del progetto.
+    load_dotenv(dotenv_path=Path(__file__).parent / ".env")
 
-# Ambiente Postgres locale dockerizzato (development documentation): se .env.local esiste,
-# le sue variabili (DATABASE_URL su localhost:5433, ecc.) vincono su .env. Senza questo,
-# qualsiasi script/processo lanciato in un terminale dove non è stato fatto
-# `source .env.local` a mano ricade silenziosamente sul fallback sqlite di
-# Config.DATABASE_URL, con schema disallineato dalle migration Alembic più recenti.
-# In produzione .env.local non esiste: load_dotenv su un path assente è un no-op innocuo.
-# Esclusa la modalità test (conftest.py imposta TESTING=True prima di ogni import,
-# vedi tests/conftest.py riga 18): i test devono restare sqlite-in-memory, mai Postgres.
-if os.getenv("TESTING") != "True":
-    load_dotenv(dotenv_path=Path(__file__).parent / ".env.local", override=True)
+    # Ambiente Postgres locale dockerizzato (development documentation): se .env.local esiste,
+    # le sue variabili (DATABASE_URL su localhost:5433, ecc.) vincono su .env. Senza questo,
+    # qualsiasi script/processo lanciato in un terminale dove non è stato fatto
+    # `source .env.local` a mano ricade silenziosamente sul fallback sqlite di
+    # Config.DATABASE_URL, con schema disallineato dalle migration Alembic più recenti.
+    # In produzione .env.local non esiste: load_dotenv su un path assente è un no-op innocuo.
+    # Esclusa la modalità test (conftest.py imposta TESTING=True prima di ogni import,
+    # vedi tests/conftest.py riga 18): i test devono restare sqlite-in-memory, mai Postgres.
+    if os.getenv("TESTING") != "True":
+        load_dotenv(dotenv_path=Path(__file__).parent / ".env.local", override=True)
 
 
 class Config:
@@ -75,7 +80,16 @@ class Config:
     # --- MISTRAL ---
     MISTRAL_API_KEY: str = os.getenv("MISTRAL_API_KEY", "")
     MISTRAL_SMALL_MODEL: str = "mistral-small-latest"   # risolve a Mistral Small 4 (2026)
-    MISTRAL_LARGE_MODEL: str = "mistral-large-latest"   # risolve a Mistral Large 3 (2026)
+    MISTRAL_LARGE_MODEL: str = "mistral-large-latest"   # ritirato dal catalogo, non più servito da nessun tier
+    # Catena modelli per il parsing spese (src/expense_parser.py::_call_mistral).
+    # TEMPORANEO (2026-09): sul piano Free MISTRAL_SMALL_MODEL/MISTRAL_LARGE_MODEL sono
+    # entrambi a 0 req/min o ritirati — vedi memoria project_mistral_free_tier_model_access.
+    # Da riportare a MISTRAL_SMALL_MODEL/MISTRAL_LARGE_MODEL (o equivalenti attivi) appena
+    # viene ricaricato credito sull'account Mistral, cambiando solo questi due default.
+    MISTRAL_EXPENSE_PARSER_MODEL: str = os.getenv("MISTRAL_EXPENSE_PARSER_MODEL", "ministral-14b-latest")
+    MISTRAL_EXPENSE_PARSER_FALLBACK_MODEL: str = os.getenv(
+        "MISTRAL_EXPENSE_PARSER_FALLBACK_MODEL", "ministral-8b-latest",
+    )
     # Timeout HTTP per chiamata (ms): senza questo il client può restare
     # appeso a tempo indeterminato su una risposta lenta (nessuna eccezione,
     # quindi né retry né except a valle scattano mai).
@@ -113,6 +127,8 @@ class Config:
     BREVO_API_KEY: str = os.getenv("BREVO_API_KEY", "")
     # ID della lista Brevo "Beta Waitlist" (Contacts → Lists → apri la lista → ID nell'URL)
     BREVO_BETA_WAITLIST_LIST_ID: int = int(os.getenv("BREVO_BETA_WAITLIST_LIST_ID", "5"))
+    # Segreto HMAC configurato nel webhook Tally: autentica i submit server-to-server.
+    TALLY_WEBHOOK_SIGNING_SECRET: str = os.getenv("TALLY_WEBHOOK_SIGNING_SECRET", "")
     # Mittente delle email transazionali (deve essere un dominio verificato su Brevo:
     # Settings → Senders & IP → Domains, con SPF/DKIM configurati)
     BREVO_SENDER_EMAIL: str = os.getenv("BREVO_SENDER_EMAIL", "hello@expensum.it")
@@ -198,6 +214,14 @@ class Config:
     CATEGORY_PROMOTION_WINDOW_DAYS: int = int(os.getenv("CATEGORY_PROMOTION_WINDOW_DAYS", "90"))
     # Categoria di fallback usata finché un pattern resta "pending".
     CATEGORY_FALLBACK_NAME: str = os.getenv("CATEGORY_FALLBACK_NAME", "Altro")
+
+    # --- NORMALIZZAZIONE VOCI DI SPESA (src/expense_label_normalizer.py) ---
+    # Metadato di sola aggregazione per i grafici (mai mostrato come descrizione):
+    # raggruppa "coca"/"coca cola"/"coca-cola" sotto un'unica ancora per utente+categoria.
+    # Soglia più permissiva di CATEGORY_CANDIDATE_CLUSTER_CUTOFF perché qui l'errore
+    # costa poco (solo una barra di un grafico), non la creazione di una categoria vera —
+    # e partial_ratio (containment) richiede margine diverso da ratio.
+    EXPENSE_LABEL_MATCH_THRESHOLD: float = float(os.getenv("EXPENSE_LABEL_MATCH_THRESHOLD", "85"))
 
     # --- RILEVAMENTO ABBONAMENTI (src/subscription_detector.py) ---
     # Occorrenze alla stessa cadenza prima di chiedere conferma Sì/No all'utente.

@@ -48,7 +48,6 @@
   border-color: var(--color-primary);
   position: relative;
   overflow: hidden;
-  box-shadow: 0 4px 24px rgba(26, 54, 115, 0.10);
 }
 
 .cardPremium::before {
@@ -119,9 +118,8 @@
 
 .btnPremium {
   background: var(--color-primary);
-  color: #ffffff;
+  color: #1C363D;
   border-color: transparent;
-  box-shadow: 0 2px 12px rgba(26, 54, 115, 0.25);
 }
 
 .btn:hover {
@@ -129,6 +127,6 @@
 }
 
 .btnPremium:hover {
-  box-shadow: 0 4px 20px rgba(26, 54, 115, 0.35);
+  background: var(--color-primary-dark);
   opacity: 0.92;
 }

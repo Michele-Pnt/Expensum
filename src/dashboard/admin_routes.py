@@ -34,6 +34,7 @@ from sqlalchemy import text
 
 from config import Config
 from src.dashboard import admin_metrics
+from src.notification_service import create_notification
 from src.user_store import Feedback, User
 
 admin_bp = Blueprint("admin", __name__)
@@ -44,7 +45,7 @@ def _admin_required(f):
     @wraps(f)
     def wrapper(*args, **kwargs):
         if not session.get("admin_logged_in"):
-            return redirect(url_for("admin_login"))
+            return redirect(url_for("auth.admin_login"))
         return f(*args, **kwargs)
     return wrapper
 
@@ -168,6 +169,7 @@ def product_metrics():
         tx_success = admin_metrics.get_tx_success_by_type_method(s)
         tour = admin_metrics.get_tour_funnel(s)
         subscription_funnel = admin_metrics.get_subscription_candidate_funnel(s)
+        expense_label_clusters = admin_metrics.get_expense_label_cluster_stats(s)
     return render_template(
         "product.html",
         retention=retention,
@@ -177,6 +179,7 @@ def product_metrics():
         tx_success=tx_success,
         tour=tour,
         subscription_funnel=subscription_funnel,
+        expense_label_clusters=expense_label_clusters,
     )
 
 
@@ -243,6 +246,26 @@ def toggle_user(chat_id: str):
             s.commit()
             return jsonify({"status": "ok", "new_state": user.is_active})
     return jsonify({"error": "User not found"}), 404
+
+
+@admin_bp.route("/admin/api/notify-user/<chat_id>", methods=["POST"])
+@_admin_required
+def notify_user(chat_id: str):
+    """Invia una notifica in-app a un singolo utente (messaggio manuale admin)."""
+    data = request.get_json(silent=True) or {}
+    title = (data.get("title") or "").strip()
+    body = (data.get("body") or "").strip()
+    if not title or not body:
+        return jsonify({"error": "title e body sono obbligatori"}), 400
+
+    with _store().Session() as s:
+        user = s.query(User).filter(User.chat_id == chat_id).first()
+        if not user:
+            return jsonify({"error": "User not found"}), 404
+        if not user.notifications_enabled:
+            return jsonify({"error": "Utente in opt-out dalle notifiche (Art. 21 GDPR)"}), 409
+        create_notification(s, chat_id, "admin_message", title, body, priority="info")
+    return jsonify({"ok": True})
 
 
 # ---------------------------------------------------------------------------

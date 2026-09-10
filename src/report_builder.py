@@ -1,14 +1,16 @@
 """
-src/report_builder.py — Assembla il report finale per Telegram.
+src/report_builder.py — Assembla il contenuto strutturato dei report mostrati
+in webapp (settimanale, mensile "pesante", piano mensile previsionale).
 
-In modalità dry-run (o in caso di fallimento AI), usa i dati statistici
-locali per costruire un report di fallback senza chiamare le API esterne.
-Contiene anche WeeklyPlanBuilder e MonthlyPlanBuilder.
+Il layout (KPI, tabelle, elenchi) è sempre costruito qui in modo deterministico
+a partire dai dati statistici: l'AI (quando disponibile) contribuisce solo la
+prosa narrativa e i consigli, mai numeri o tabelle — vedi `ReportContent` in
+`src/report_schema.py`. In modalità dry-run (o in caso di fallimento AI), la
+narrazione ricade su testo generato localmente senza chiamare Mistral.
 """
 
 import calendar as _calendar
 import logging
-from calendar import month_name
 from datetime import date, timedelta
 from typing import TYPE_CHECKING
 
@@ -17,7 +19,7 @@ from src.data_processor import (
     WeeklyPatternAnalyzer,
     MonthlyResidualCalc,
     CategoryMomentum,
-    WeeklyAnalysis,
+    MonthlySummary,
     MonthlyPatternAnalyzer,
     MonthlyCategoryStats,
     IncomeForecaster,
@@ -26,120 +28,178 @@ from src.data_processor import (
     CategoryBudgetResult,
 )
 from src.forecaster import ForecastResult
+from src.report_schema import (
+    ListSection,
+    ReportContent,
+    TableSection,
+    kpi,
+    list_section,
+    narrative_section,
+    new_report_content,
+    table_section,
+    validated_str_list,
+)
 
 if TYPE_CHECKING:
     from src.storage.base import FinancialStorage
 
 logger = logging.getLogger("financial_agent.report_builder")
 
+# Indice di sezione da cui il piano Free sfoca il contenuto: 0 = blocca TUTTE
+# le sezioni, lasciando visibili solo titolo e KPI come "peek" (stesso confine
+# del vecchio schema Markdown, dove il peek era il paragrafo di riepilogo
+# prima della tabella categorie — vedi splitReportPeek in ReportContent.tsx).
+# Le sezioni contengono sempre dati reali (tabelle, importi): NON usare un
+# indice > 0, altrimenti la prima sezione (es. "Spesa per categorie") resta
+# in chiaro anche per un utente bloccato.
+_LOCKED_FROM_SECTION = 0
+
 
 class ReportBuilder:
-    """Assembla e formatta il report Markdown per Telegram."""
+    """Assembla il contenuto strutturato del report mensile "pesante"."""
 
     @staticmethod
-    def build_fallback_report(
+    def build_content(
         report: TrendReport,
         forecast: ForecastResult,
-        accounts: list[dict] = None,
+        accounts: list[dict] | None = None,
         budget_by_cat: dict[str, float] | None = None,
-    ) -> str:
-        """
-        Costruisce un report Markdown completo usando SOLO i dati statistici
-        locali (nessuna chiamata Gemini). Utile per dry-run o fallback.
+        net_savings: float | None = None,
+        ai_narrative: dict | None = None,
+    ) -> ReportContent:
+        """Costruisce il report mensile "pesante" come `ReportContent`.
+
+        `ai_narrative`, se fornito e valido, sostituisce i paragrafi di analisi
+        e i consigli generati staticamente con la prosa di Mistral — atteso
+        nella forma `{"trend_paragraphs": [...], "tips": [...]}`. KPI e tabella
+        categorie sono SEMPRE calcolati qui dai dati reali, mai dall'AI.
         """
         cur = report.current_month
-        lines = []
+        accounts = accounts or []
 
-        # 1. Riepilogo
-        lines.append(f"📊 *Riepilogo {cur.label}*")
-        lines.append(f"Spesa totale: *€{cur.total:.2f}*")
-        lines.append(f"Entrate totali: *€{report.total_income:.2f}*")
-        
-        tot_acc = sum(a.get('current_balance', 0.0) for a in accounts) if accounts else 0.0
-        lines.append(f"🏦 Denaro sui conti: *€{tot_acc:.2f}*")
-        
-        # In mancanza del dato esatto di Notion in args passati al costruttore, usiamo n/d per il momento
-        # (potremmo volerlo passare tra gli argomenti se necessario)
-        lines.append(f"Risparmio mensile: *(Calcolato da Notion)*")
-        
-        lines.append("\n*Spesa per categorie:*")
+        tot_acc = sum(a.get("current_balance", 0.0) for a in accounts)
+        kpis = [
+            kpi("Spesa totale", f"€{cur.total:.2f}"),
+            kpi("Entrate totali", f"€{report.total_income:.2f}"),
+            kpi("Denaro sui conti", f"€{tot_acc:.2f}"),
+            kpi(
+                "Risparmio mensile",
+                f"€{net_savings:.2f}" if net_savings is not None else "n/d",
+                tone="positive" if (net_savings or 0) > 0 else "neutral",
+            ),
+        ]
+
+        sections = [ReportBuilder._build_category_table(cur, budget_by_cat)]
+
+        trend_paragraphs = ReportBuilder._generate_trend_paragraphs(report, cur)
+        tips = ReportBuilder._generate_basic_tips(report, forecast)
+        if ai_narrative:
+            ai_paragraphs = validated_str_list(ai_narrative.get("trend_paragraphs"), max_items=4)
+            ai_tips = validated_str_list(ai_narrative.get("tips"), max_items=3)
+            trend_paragraphs = ai_paragraphs or trend_paragraphs
+            tips = ai_tips or tips
+
+        sections.append(narrative_section("Analisi e Confronto Trend", trend_paragraphs))
+        sections.append(ReportBuilder._build_forecast_section(forecast))
+        sections.append(list_section("Consigli Azionabili", tips))
+
+        if accounts:
+            sections.append(
+                list_section(
+                    "Liquidità per conto",
+                    [f"{a.get('name', 'Sconosciuto')}: €{float(a.get('current_balance', 0.0)):.2f}" for a in accounts],
+                )
+            )
+
+        return new_report_content(
+            title=f"Riepilogo {cur.label}",
+            kpis=kpis,
+            sections=sections,
+            locked_from_section=_LOCKED_FROM_SECTION,
+            footer_note="Generato con AI: verifica sempre i numeri",
+        )
+
+    @staticmethod
+    def _build_category_table(cur: MonthlySummary, budget_by_cat: dict[str, float] | None) -> TableSection:
+        """Tabella "Spesa per categorie" del mese, con colonna Budget/% se disponibile."""
         c_list = sorted(cur.by_category.items(), key=lambda x: x[1], reverse=True)
         has_budget = bool(budget_by_cat)
+
         if has_budget:
-            header = f"{'Categoria':<20} {'Spesa':>9}  {'Budget':>9}  {'% mensile':>9}"
-            sep = "─" * len(header)
-            rows = [header, sep]
-            for cat, amt in c_list:
-                if amt <= 0:
-                    continue
-                pct = (amt / cur.total * 100) if cur.total > 0 else 0
+            columns = [
+                {"key": "categoria", "label": "Categoria", "align": "left"},
+                {"key": "spesa", "label": "Spesa", "align": "right"},
+                {"key": "budget", "label": "Budget", "align": "right"},
+                {"key": "pct", "label": "% mensile", "align": "right"},
+            ]
+        else:
+            columns = [
+                {"key": "categoria", "label": "Categoria", "align": "left"},
+                {"key": "spesa", "label": "Spesa", "align": "right"},
+                {"key": "pct", "label": "% sul mese", "align": "right"},
+            ]
+
+        rows = []
+        for cat, amt in c_list:
+            if amt <= 0:
+                continue
+            pct = (amt / cur.total * 100) if cur.total > 0 else 0
+            cells = {"categoria": cat, "spesa": f"€{amt:.2f}", "pct": f"{pct:.1f}%"}
+            over = False
+            if has_budget:
                 budget = budget_by_cat.get(cat)
                 over = budget is not None and amt > budget
-                prefix = "⚠ " if over else "  "
-                budget_str = f"€{budget:.2f}" if budget else "    —    "
-                cat_trunc = cat[:18] if len(cat) > 18 else cat
-                rows.append(f"{prefix}{cat_trunc:<18} €{amt:>8.2f}  {budget_str:>9}  {pct:>8.1f}%")
-            lines.append("```\n" + "\n".join(rows) + "\n```")
-        else:
-            header = f"{'Categoria':<22} {'Spesa':>9}  {'% sul Mese':>12}"
-            sep = "─" * len(header)
-            rows = [header, sep]
-            for cat, amt in c_list:
-                if amt <= 0:
-                    continue
-                pct = (amt / cur.total * 100) if cur.total > 0 else 0
-                cat_trunc = cat[:22] if len(cat) > 22 else cat
-                rows.append(f"  {cat_trunc:<22} €{amt:>8.2f}  {pct:>8.1f}%")
-            lines.append("```\n" + "\n".join(rows) + "\n```")
+                cells["budget"] = f"€{budget:.2f}" if budget else "—"
+            rows.append({"cells": cells, "tone": "warning" if over else None})
 
-        # 2. Analisi e Confronto Trend
-        lines.append(f"\n---\n📉 *Analisi e Confronto Trend*\n")
-        
-        # Spese
+        return table_section(
+            "Spesa per categorie",
+            columns,
+            rows,
+            empty_message="Nessuna spesa registrata questo mese." if not rows else None,
+        )
+
+    @staticmethod
+    def _build_forecast_section(forecast: ForecastResult) -> ListSection:
+        """Sezione previsione (stime ottimistica/base/pessimistica + spese fisse)."""
+        items = [
+            f"Stima ottimistica: €{forecast.optimistic_forecast:.2f}",
+            f"Stima base: €{forecast.base_forecast:.2f}",
+            f"Stima pessimistica: €{forecast.pessimistic_forecast:.2f}",
+        ]
+        if forecast.fixed_items:
+            items.append(
+                f"Spese fisse identificate ({len(forecast.fixed_items)}): €{forecast.fixed_expenses:.2f}/mese"
+            )
+        return list_section(f"Previsione {forecast.target_month_label}", items)
+
+    @staticmethod
+    def _generate_trend_paragraphs(report: TrendReport, cur: MonthlySummary) -> list[str]:
+        """Paragrafi di analisi deterministici (fallback quando l'AI non è disponibile)."""
+        paragraphs = []
+
         if report.historical_avg > 0:
             delta_eur = cur.total - report.historical_avg
             sign = "+" if delta_eur >= 0 else ""
-            lines.append(
-                f"- *Spese*: La spesa è in *{report.trend_direction}* vs media storica. "
+            paragraphs.append(
+                f"Spese: la spesa è in {report.trend_direction} rispetto alla media storica. "
                 f"La media è €{report.historical_avg:.2f} ({sign}€{delta_eur:.2f}, {report.delta_pct:+.1f}%)."
             )
         else:
-            lines.append("- *Spese*: Dati storici insufficienti.")
-            
-        # Entrate & Risparmio
-        lines.append("- *Entrate*: Statistiche locali non comparabili pienamente.")
-        lines.append("- *Risparmio*: Dato elaborato esternamente (vedi app).")
-        
-        # Categorie
-        lines.append("- *Categorie*: ")
+            paragraphs.append("Spese: dati storici insufficienti per un confronto.")
+
+        paragraphs.append("Entrate: statistiche locali non comparabili pienamente.")
+        paragraphs.append("Risparmio: dato elaborato esternamente (vedi app).")
+
+        cat_lines = []
         for cat, amt in list(cur.by_category.items())[:3]:
             avg_notion = cur.by_category_average.get(cat, 0.0)
             if amt > 0 and avg_notion > 0:
-                lines.append(f"    • {cat}: speso €{amt:.2f} vs media €{avg_notion:.2f}")
+                cat_lines.append(f"{cat}: speso €{amt:.2f} vs media €{avg_notion:.2f}")
+        if cat_lines:
+            paragraphs.append("Categorie: " + "; ".join(cat_lines) + ".")
 
-        # 3. Forecast
-        lines.append(f"\n---\n🔮 *Previsione {forecast.target_month_label}*\n")
-        lines.append(f"Stima ottimistica: *€{forecast.optimistic_forecast:.2f}*")
-        lines.append(f"Stima base: *€{forecast.base_forecast:.2f}*")
-        lines.append(f"Stima pessimistica: *€{forecast.pessimistic_forecast:.2f}*")
-
-        if forecast.fixed_items:
-            lines.append(
-                f"\n_Spese fisse identificate ({len(forecast.fixed_items)}): "
-                f"€{forecast.fixed_expenses:.2f}/mese_"
-            )
-
-        # Consigli base (statistici, senza Gemini)
-        lines.append("\n---\n💡 *Consigli Azionabili*\n")
-        tips = ReportBuilder._generate_basic_tips(report, forecast)
-        for i, tip in enumerate(tips, 1):
-            lines.append(f"{i}️⃣ {tip}")
-
-        lines.append(
-            "\n---\n✨ _Generato con AI — verifica sempre i numeri_"
-        )
-
-        return "\n".join(lines)
+        return paragraphs
 
     @staticmethod
     def _generate_basic_tips(report: TrendReport, forecast: ForecastResult) -> list[str]:
@@ -168,7 +228,7 @@ class ReportBuilder:
             cat_pct = (cat_amt / cur.total * 100) if cur.total > 0 else 0
             if cat_pct > 30:
                 tips.append(
-                    f"La categoria *{cat_name}* rappresenta il {cat_pct:.0f}% del totale "
+                    f"La categoria {cat_name} rappresenta il {cat_pct:.0f}% del totale "
                     f"(€{cat_amt:.0f}). Valuta se ci sono margini di riduzione in quest'area."
                 )
 
@@ -417,39 +477,106 @@ class WeeklyPlanBuilder:
         data.total_accounts = total_accounts
         return data
 
-    def build_fallback_text(self, data: "WeeklyPlanData") -> str:
-        """Report budget mensile di fallback (senza AI). La tabella budget è inviata come PNG separato."""
+    def build_content(self, data: "WeeklyPlanData", ai_narrative: dict | None = None) -> ReportContent:
+        """Costruisce il report budget settimanale come `ReportContent`.
+
+        `ai_narrative`, se fornito e valido (`{"tips": [...]}`), sostituisce i
+        consigli generici con quelli generati da Mistral. KPI, abbonamenti e
+        tabella budget restano sempre calcolati qui dai dati reali.
+        """
         ref = data.reference_date
         week_end = ref + timedelta(days=6)
-        lines = []
 
-        lines.append(f"📅 *Report Budget* ({ref.strftime('%d/%m')} → {week_end.strftime('%d/%m')})")
-        lines.append(
-            f"🏦 Saldo: *€{data.total_accounts:.2f}* | "
-            f"💰 Entrate mese: *€{data.total_income_month:.2f}* | "
-            f"Spese mese: *€{data.total_spent_month:.2f}*"
+        kpis = [
+            kpi("Saldo conti", f"€{data.total_accounts:.2f}"),
+            kpi("Entrate mese", f"€{data.total_income_month:.2f}"),
+            kpi("Spese mese", f"€{data.total_spent_month:.2f}"),
+            kpi("Settimane rimaste", f"{data.weeks_remaining:.1f}"),
+        ]
+
+        sections = []
+
+        sub_items = [
+            f"{s['name']}: €{float(s.get('amount') or 0):.2f}, scade {s['due_date'].strftime('%d/%m')}"
+            for s in data.due_subscriptions
+        ]
+        if sub_items:
+            sub_items.append(f"Totale: €{data.subs_total_week:.2f}")
+        sections.append(
+            list_section(
+                "Abbonamenti in uscita questa settimana",
+                sub_items,
+                empty_message="Nessun abbonamento in scadenza questa settimana. 🎉",
+            )
         )
-        lines.append(f"📆 Settimane rimaste: *{data.weeks_remaining:.1f}*")
 
-        lines.append("\n🔔 *Abbonamenti in uscita questa settimana:*")
-        if data.due_subscriptions:
-            for s in data.due_subscriptions:
-                amt = f"€{float(s.get('amount') or 0):.2f}"
-                due_str = s["due_date"].strftime("%d/%m")
-                lines.append(f"  • {s['name']}: {amt} — scade {due_str}")
-            lines.append(f"_Totale: €{data.subs_total_week:.2f}_")
-        else:
-            lines.append("Nessun abbonamento in scadenza questa settimana. 🎉")
+        budget_rows = []
+        for cat, r in sorted(data.budget_results.items(), key=lambda x: x[1].budget_monthly, reverse=True):
+            last_week = data.spent_last_week_by_cat.get(cat, 0.0)
+            budget_rows.append(
+                {
+                    "cells": {
+                        "categoria": cat,
+                        "scorsa": f"€{last_week:.2f}",
+                        "limite": f"€{r.limite_reale:.2f}/sett" if r.status != "sforato" else "—",
+                        "stato": {"ok": "In target", "attenzione": "Attenzione", "sforato": "Sforato"}.get(r.status, r.status),
+                    },
+                    "tone": {"ok": "positive", "attenzione": "warning", "sforato": "negative"}.get(r.status),
+                }
+            )
+        sections.append(
+            table_section(
+                "Budget per categoria",
+                [
+                    {"key": "categoria", "label": "Categoria", "align": "left"},
+                    {"key": "scorsa", "label": "Sett. scorsa", "align": "right"},
+                    {"key": "limite", "label": "Limite reale", "align": "right"},
+                    {"key": "stato", "label": "Stato", "align": "left"},
+                ],
+                budget_rows,
+                empty_message="Nessuna categoria con budget impostato. Usa /modify per aggiungerne uno.",
+            )
+        )
 
         if data.no_budget_cats:
-            lines.append("\n📌 *Categorie senza budget (stima storica):*")
-            for cat, avg in sorted(data.no_budget_cats.items(), key=lambda x: x[1], reverse=True):
-                lines.append(f"  • {cat}: ~€{avg:.2f}/sett. (media storica)")
+            sections.append(
+                list_section(
+                    "Categorie senza budget (stima storica)",
+                    [
+                        f"{cat}: ~€{avg:.2f}/sett. (media storica)"
+                        for cat, avg in sorted(data.no_budget_cats.items(), key=lambda x: x[1], reverse=True)
+                    ],
+                )
+            )
 
-        if not data.budget_results:
-            lines.append("\n_Nessuna categoria con budget impostato — usa /modify per aggiungerne uno._")
+        tips = self._generate_weekly_tips(data)
+        if ai_narrative:
+            ai_tips = validated_str_list(ai_narrative.get("tips"), max_items=3)
+            tips = ai_tips or tips
+        if tips:
+            sections.append(list_section("Consigli per questa settimana", tips))
 
-        return "\n".join(lines)
+        return new_report_content(
+            title=f"Piano Settimanale {ref.strftime('%d/%m')} → {week_end.strftime('%d/%m')}",
+            kpis=kpis,
+            sections=sections,
+            locked_from_section=_LOCKED_FROM_SECTION,
+        )
+
+    @staticmethod
+    def _generate_weekly_tips(data: "WeeklyPlanData") -> list[str]:
+        """Consigli deterministici di fallback basati sullo stato budget."""
+        tips = []
+        for cat, r in sorted(data.budget_results.items(), key=lambda x: x[1].budget_monthly, reverse=True):
+            if r.status == "sforato":
+                tips.append(f"Hai già superato il budget mensile di {cat} di €{r.overrun:.2f}: rallenta questa settimana.")
+            elif r.status == "attenzione" and len(tips) < 3:
+                tips.append(f"Al ritmo attuale supererai il budget di {cat}: limite consigliato €{r.limite_reale:.2f}/sett.")
+            if len(tips) == 3:
+                break
+        if not tips:
+            tips.append("Le tue categorie con budget sono tutte in target questa settimana: continua così.")
+        return tips[:3]
 
     def build_budget_table_image(
         self,
@@ -464,7 +591,7 @@ class WeeklyPlanBuilder:
 
         ref = data.reference_date
         week_end = ref + timedelta(days=6)
-        title = f"Budget Settimanale  —  {ref.strftime('%d/%m')} → {week_end.strftime('%d/%m/%Y')}"
+        title = f"Budget Settimanale: {ref.strftime('%d/%m')} → {week_end.strftime('%d/%m/%Y')}"
 
         return ChartGenerator(output_dir=output_dir).generate_weekly_budget_table(
             budget_results=data.budget_results,
@@ -513,7 +640,7 @@ class WeeklyPlanData:
             )
             for s in self.due_subscriptions:
                 due_str = s["due_date"].strftime("%d/%m")
-                lines.append(f"  {s['name']}: €{float(s.get('amount') or 0):.2f} — scade {due_str}")
+                lines.append(f"  {s['name']}: €{float(s.get('amount') or 0):.2f}, scade {due_str}")
             lines.append("")
 
         lines.append(
@@ -622,7 +749,7 @@ class MonthlyPlanData:
             lines.append(f"ABBONAMENTI IN SCADENZA NEL MESE (totale €{self.subs_total_month:.2f}):")
             for s in self.subscriptions_month:
                 due_str = s["due_date"].strftime("%d/%m")
-                lines.append(f"  {s['name']}: €{float(s.get('amount') or 0):.2f} — scade {due_str}")
+                lines.append(f"  {s['name']}: €{float(s.get('amount') or 0):.2f}, scade {due_str}")
             lines.append("")
 
         lines.append("TARGET MENSILE PER CATEGORIA (basato su storico 6 mesi):")
@@ -812,52 +939,106 @@ class MonthlyPlanBuilder:
         # spiegazione sono sempre coerenti su tutti i canali. No-op per Notion
         # (fetch_savings_goals -> [] di default in FinancialStorage).
         try:
-            from src.savings_goals_service import compute_goal_progress, compute_monthly_score, explain_score
+            from src.savings_goals_service import (
+                _category_name_for, compute_goal_progress, compute_monthly_score, explain_score,
+            )
             active_goals = storage.fetch_savings_goals(status="active")
             for goal in active_goals:
                 progress = compute_goal_progress(storage, goal)
                 score = compute_monthly_score(storage, goal, progress)
+                category_name = (
+                    _category_name_for(storage, goal.get("category_id"))
+                    if goal["goal_type"] == "category_spending_reduction" else None
+                )
                 data.savings_goals_summary.append({
                     "name": goal["name"],
                     "progress_pct": progress["progress_pct"],
                     "score_label": score["score_label"],
                     "eta_date": progress["eta_date"].isoformat() if progress["eta_date"] else None,
-                    "explanation": explain_score(goal, score, markdown=False),
+                    "explanation": explain_score(goal, score, markdown=False, category_name=category_name),
                 })
         except Exception:
             logger.warning("Impossibile popolare il riepilogo obiettivi di risparmio nel piano mensile", exc_info=True)
 
         return data
 
-    def build_fallback_text(self, data: "MonthlyPlanData") -> str:
-        """Piano mensile di fallback (senza AI) basato sui dati statistici."""
+    def build_content(self, data: "MonthlyPlanData", ai_narrative: dict | None = None) -> ReportContent:
+        """Costruisce il piano mensile previsionale come `ReportContent`.
+
+        `ai_narrative`, se fornito e valido (`{"tips": [...]}`), sostituisce i
+        consigli generici con quelli generati da Mistral. KPI, abbonamenti e
+        tabella target restano sempre calcolati qui dai dati reali.
+        """
         tm = data.target_month
         month_label = f"{_MONTHS_IT[tm.month]} {tm.year}"
-        lines = []
 
-        lines.append(f"📅 *Piano Mensile {month_label}*")
-        lines.append(f"🏦 Saldo conti: *€{data.total_accounts:.2f}*")
-        lines.append(
-            f"💰 Previsione entrate: *€{data.income_forecast:.2f}* | "
-            f"Spese mese scorso: *€{data.total_spent_last_month:.2f}*"
-        )
-        lines.append(f"🎯 Obiettivo risparmio: *€{data.savings_goal:.2f}*")
+        kpis = [
+            kpi("Saldo conti", f"€{data.total_accounts:.2f}"),
+            kpi("Previsione entrate", f"€{data.income_forecast:.2f}"),
+            kpi("Spese mese scorso", f"€{data.total_spent_last_month:.2f}"),
+            kpi("Obiettivo risparmio", f"€{data.savings_goal:.2f}", tone="positive"),
+        ]
+
+        sections = []
 
         if data.subscriptions_month:
-            lines.append(f"\n🔔 *Abbonamenti in scadenza* (€{data.subs_total_month:.2f} totale):")
-            for s in data.subscriptions_month:
-                amt = f"€{float(s.get('amount') or 0):.2f}"
-                due_str = s["due_date"].strftime("%d/%m")
-                lines.append(f"  • {s['name']}: {amt} — scade {due_str}")
+            sub_items = [
+                f"{s['name']}: €{float(s.get('amount') or 0):.2f}, scade {s['due_date'].strftime('%d/%m')}"
+                for s in data.subscriptions_month
+            ]
+            sub_items.append(f"Totale: €{data.subs_total_month:.2f}")
+            sections.append(list_section("Abbonamenti in scadenza", sub_items))
 
-        lines.append("\n🎯 *Target mensile per categoria:*")
-        sorted_targets = sorted(data.suggested_targets.items(), key=lambda x: x[1], reverse=True)
-        for cat, target in sorted_targets:
+        target_rows = []
+        for cat, target in sorted(data.suggested_targets.items(), key=lambda x: x[1], reverse=True):
             stats = data.pattern_stats.get(cat)
             trend = stats.trend if stats else "stabile"
-            trend_emoji = "📈" if trend == "in crescita" else ("📉" if trend == "in calo" else "➡️")
-            override_marker = " *(obiettivo tuo)*" if cat in data.category_overrides else ""
-            lines.append(f"  • {cat}: *€{target:.2f}/mese* {trend_emoji}{override_marker}")
+            categoria = cat + (" (obiettivo tuo)" if cat in data.category_overrides else "")
+            target_rows.append(
+                {
+                    "cells": {"categoria": categoria, "target": f"€{target:.2f}/mese", "trend": trend},
+                    "tone": "positive" if trend == "in calo" else ("warning" if trend == "in crescita" else None),
+                }
+            )
+        sections.append(
+            table_section(
+                "Target mensile per categoria",
+                [
+                    {"key": "categoria", "label": "Categoria", "align": "left"},
+                    {"key": "target", "label": "Target", "align": "right"},
+                    {"key": "trend", "label": "Trend", "align": "left"},
+                ],
+                target_rows,
+                empty_message="Nessun target disponibile per questo mese.",
+            )
+        )
 
-        lines.append("\n---\n✨ _Generato con AI — verifica sempre i numeri_\n_Scrivi per modificare un obiettivo_")
-        return "\n".join(lines)
+        tips = self._generate_monthly_tips(data)
+        if ai_narrative:
+            ai_tips = validated_str_list(ai_narrative.get("tips"), max_items=3)
+            tips = ai_tips or tips
+        if tips:
+            sections.append(list_section("Consigli per questo mese", tips))
+
+        return new_report_content(
+            title=f"Piano Mensile {month_label}",
+            kpis=kpis,
+            sections=sections,
+            locked_from_section=_LOCKED_FROM_SECTION,
+            footer_note="Generato con AI: verifica sempre i numeri. Scrivi per modificare un obiettivo.",
+        )
+
+    @staticmethod
+    def _generate_monthly_tips(data: "MonthlyPlanData") -> list[str]:
+        """Consigli deterministici di fallback basati sui trend per categoria."""
+        tips = []
+        for cat, target in sorted(data.suggested_targets.items(), key=lambda x: x[1], reverse=True):
+            stats = data.pattern_stats.get(cat)
+            trend = stats.trend if stats else "stabile"
+            if trend == "in crescita" and len(tips) < 3:
+                tips.append(f"{cat} è in crescita negli ultimi mesi: punta al target di €{target:.2f}/mese per contenerla.")
+            if len(tips) == 3:
+                break
+        if not tips:
+            tips.append("Le tue categorie principali sono stabili o in calo: mantieni gli attuali target mensili.")
+        return tips[:3]

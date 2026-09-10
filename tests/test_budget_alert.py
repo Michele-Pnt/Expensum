@@ -13,7 +13,12 @@ from datetime import date
 
 import pytest
 
-from src.budget_alert import evaluate_budget_alert, check_expense_budget_alert
+from src.budget_alert import (
+    check_expense_budget_alert,
+    check_expense_budget_status,
+    classify_budget_band,
+    evaluate_budget_alert,
+)
 
 pytestmark = pytest.mark.unit
 
@@ -151,3 +156,106 @@ class TestCheckExpenseBudgetAlert:
         msg = check_expense_budget_alert(storage, "Alimentari", date(2026, 7, 11))
         assert msg is not None
         assert "95%" in msg
+
+
+# ---------------------------------------------------------------------------
+# 3. Logica pura — classify_budget_band (soglie per il centro notifiche)
+# ---------------------------------------------------------------------------
+
+class TestClassifyBudgetBand:
+    def test_no_budget_returns_none(self):
+        assert classify_budget_band(50.0, None) is None
+
+    def test_zero_budget_returns_none(self):
+        assert classify_budget_band(50.0, 0.0) is None
+
+    def test_negative_budget_returns_none(self):
+        assert classify_budget_band(50.0, -10.0) is None
+
+    def test_below_100_returns_none(self):
+        # Anche l'80% di warning inline non deve generare notifica.
+        assert classify_budget_band(85.0, 100.0) is None
+
+    def test_exactly_100_is_reached(self):
+        assert classify_budget_band(100.0, 100.0) == "reached"
+
+    def test_between_100_and_120_is_reached(self):
+        assert classify_budget_band(110.0, 100.0) == "reached"
+
+    def test_just_under_120_is_reached(self):
+        assert classify_budget_band(119.0, 100.0) == "reached"
+
+    def test_exactly_120_is_exceeded(self):
+        assert classify_budget_band(120.0, 100.0) == "exceeded"
+
+    def test_over_120_is_exceeded(self):
+        assert classify_budget_band(150.0, 100.0) == "exceeded"
+
+
+# ---------------------------------------------------------------------------
+# 4. Orchestrazione — check_expense_budget_status (centro notifiche)
+# ---------------------------------------------------------------------------
+
+class TestCheckExpenseBudgetStatus:
+    def test_none_category_returns_none(self):
+        storage = FakeStorage([], [])
+        assert check_expense_budget_status(storage, None, date(2026, 7, 11)) is None
+
+    def test_category_without_budget_returns_none(self):
+        storage = FakeStorage(
+            [{"name": "Alimentari", "monthly_budget": None}],
+            [{"date": date(2026, 7, 5), "amount": 90.0, "category": "Alimentari"}],
+        )
+        assert check_expense_budget_status(storage, "Alimentari", date(2026, 7, 11)) is None
+
+    def test_under_100_percent_returns_none(self):
+        storage = FakeStorage(
+            [{"name": "Alimentari", "monthly_budget": 100.0}],
+            [{"date": date(2026, 7, 5), "amount": 85.0, "category": "Alimentari"}],
+        )
+        # 85% supera la sola banda di warning inline: nessuna notifica persistita.
+        assert check_expense_budget_status(storage, "Alimentari", date(2026, 7, 11)) is None
+
+    def test_reached_band_returns_status_dict(self):
+        storage = FakeStorage(
+            [{"name": "Alimentari", "monthly_budget": 100.0}],
+            [{"date": date(2026, 7, 5), "amount": 110.0, "category": "Alimentari"}],
+        )
+        status = check_expense_budget_status(storage, "Alimentari", date(2026, 7, 11))
+        assert status == {
+            "category": "Alimentari", "spent": 110.0, "budget": 100.0, "band": "reached",
+        }
+
+    def test_exceeded_band_returns_status_dict(self):
+        storage = FakeStorage(
+            [{"name": "Svago", "monthly_budget": 50.0}],
+            [{"date": date(2026, 7, 5), "amount": 70.0, "category": "Svago"}],
+        )
+        status = check_expense_budget_status(storage, "Svago", date(2026, 7, 11))
+        assert status == {
+            "category": "Svago", "spent": 70.0, "budget": 50.0, "band": "exceeded",
+        }
+
+    def test_sums_only_target_category(self):
+        storage = FakeStorage(
+            [
+                {"name": "Alimentari", "monthly_budget": 100.0},
+                {"name": "Trasporti", "monthly_budget": 100.0},
+            ],
+            [
+                {"date": date(2026, 7, 3), "amount": 110.0, "category": "Alimentari"},
+                {"date": date(2026, 7, 4), "amount": 500.0, "category": "Trasporti"},
+            ],
+        )
+        status = check_expense_budget_status(storage, "Alimentari", date(2026, 7, 11))
+        assert status["spent"] == 110.0
+
+    def test_ignores_other_months(self):
+        storage = FakeStorage(
+            [{"name": "Alimentari", "monthly_budget": 100.0}],
+            [
+                {"date": date(2026, 6, 20), "amount": 500.0, "category": "Alimentari"},
+                {"date": date(2026, 7, 8), "amount": 30.0, "category": "Alimentari"},
+            ],
+        )
+        assert check_expense_budget_status(storage, "Alimentari", date(2026, 7, 11)) is None

@@ -185,6 +185,16 @@ class TestIncomeForecaster:
         result = IncomeForecaster().compute(incomes)
         assert result > 0.0
 
+    def test_structured_income_category_does_not_change_forecast_totals(self):
+        """Reports/jobs aggregate amount and date, regardless of the category representation."""
+        amounts = [1000.0] * 6
+        baseline = self._make_incomes(amounts)
+        structured = [
+            {**income, "income_category": {"id": 31, "name": "Consulenza", "archived": True}}
+            for income in baseline
+        ]
+        assert IncomeForecaster().compute(structured) == IncomeForecaster().compute(baseline)
+
 
 # ---------------------------------------------------------------------------
 # MonthlyBudgetTargetCalc
@@ -434,11 +444,18 @@ class TestMonthlyPlanBuilder:
         assert "Alimentari" in data.category_overrides
 
     def test_fallback_text_generated(self):
+        # Ex `build_fallback_text` (Markdown): oggi il contenuto è un ReportContent
+        # strutturato (vedi src/report_schema.py). Verifica lo stesso comportamento
+        # di business (titolo del piano mensile + categoria presente nella tabella
+        # target) sulla struttura dict invece che su substring di testo libero.
         storage = self._make_storage()
         data = MonthlyPlanBuilder().build(storage)
-        text = MonthlyPlanBuilder().build_fallback_text(data)
-        assert "Piano Mensile" in text
-        assert "Alimentari" in text
+        content = MonthlyPlanBuilder().build_content(data)
+        assert content["title"].startswith("Piano Mensile")
+        target_section = next(
+            s for s in content["sections"] if s["heading"] == "Target mensile per categoria"
+        )
+        assert any("Alimentari" in row["cells"]["categoria"] for row in target_section["rows"])
 
     def test_to_prompt_text_contains_key_sections(self):
         storage = self._make_storage()

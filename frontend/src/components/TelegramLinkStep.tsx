@@ -75,9 +75,9 @@ export default function TelegramLinkStep() {
   if (state === "already_linked" || state === "linked") {
     return (
       <Box sx={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 1, py: 1 }}>
-        <CheckCircle2 size={28} color="#2ecc71" />
+        <CheckCircle2 size={28} color="var(--color-income)" />
         <Typography variant="body2" fontWeight={600}>
-          Telegram collegato! 🎉
+          Telegram collegato!
         </Typography>
         <Typography variant="body2" color="text.secondary" sx={{ textAlign: "center" }}>
           Da ora puoi registrare spese anche scrivendo direttamente al bot su Telegram.
@@ -117,8 +117,8 @@ export default function TelegramLinkStep() {
         sx={{
           borderRadius: "8px",
           textTransform: "none",
-          background: "linear-gradient(135deg, #6C5CE7, #8b5cf6)",
-          "&:hover": { background: "linear-gradient(135deg, #5a4ad1, #7c3aed)" },
+          background: "linear-gradient(135deg, var(--color-primary), var(--color-primary-dark))",
+          "&:hover": { background: "linear-gradient(135deg, var(--color-primary-dark), var(--color-primary))" },
         }}
       >
         Apri Telegram e collega

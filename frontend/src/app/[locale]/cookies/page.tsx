@@ -18,7 +18,7 @@ export async function generateMetadata({
   const { locale } = await params;
   const isEn = locale === "en";
   return {
-    title: isEn ? "Cookie Policy — Expensum" : "Cookie Policy — Expensum",
+    title: isEn ? "Cookie Policy | Expensum" : "Cookie Policy | Expensum",
     description: isEn
       ? "Expensum's notice on the use of cookies."
       : "Informativa sull'uso dei cookie su Expensum.",

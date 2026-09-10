@@ -6,10 +6,16 @@ UserStore.record_streak_activity per la logica completa.
 """
 import pytest
 from datetime import date, datetime, timedelta
+from zoneinfo import ZoneInfo
 
 from src.user_store import User, UserStreak, PlanChange
 
 pytestmark = pytest.mark.integration
+
+
+def _service_today() -> date:
+    """Usa lo stesso fuso orario di default della logica di streak."""
+    return datetime.now(ZoneInfo("Europe/Rome")).date()
 
 
 def _prep_streak(store, chat_id, **kwargs):
@@ -35,7 +41,7 @@ def test_two_transactions_same_day_count_as_one_qualifying_day(mock_db_session):
     with store.Session() as s:
         streak = s.query(UserStreak).filter_by(chat_id="s1").first()
         assert streak.current_streak_days == 1
-        assert streak.last_qualifying_date == date.today()
+        assert streak.last_qualifying_date == _service_today()
 
 
 def test_third_transaction_same_day_does_not_advance_twice(mock_db_session):
@@ -55,7 +61,7 @@ def test_third_transaction_same_day_does_not_advance_twice(mock_db_session):
 def test_consecutive_day_increments_streak(mock_db_session):
     store = mock_db_session
     store.add_user(chat_id="s3")
-    yesterday = date.today() - timedelta(days=1)
+    yesterday = _service_today() - timedelta(days=1)
     _prep_streak(
         store, "s3",
         current_streak_days=5, streak_target_days=14,
@@ -68,13 +74,13 @@ def test_consecutive_day_increments_streak(mock_db_session):
     with store.Session() as s:
         streak = s.query(UserStreak).filter_by(chat_id="s3").first()
         assert streak.current_streak_days == 6
-        assert streak.last_qualifying_date == date.today()
+        assert streak.last_qualifying_date == _service_today()
 
 
 def test_gap_resets_streak_to_zero_keeping_same_target(mock_db_session):
     store = mock_db_session
     store.add_user(chat_id="s4")
-    three_days_ago = date.today() - timedelta(days=3)
+    three_days_ago = _service_today() - timedelta(days=3)
     _prep_streak(
         store, "s4",
         current_streak_days=8, streak_target_days=14,
@@ -93,7 +99,7 @@ def test_gap_resets_streak_to_zero_keeping_same_target(mock_db_session):
 def test_reaching_target_grants_reward_and_pauses_cycle(mock_db_session):
     store = mock_db_session
     store.add_user(chat_id="s5")
-    yesterday = date.today() - timedelta(days=1)
+    yesterday = _service_today() - timedelta(days=1)
     _prep_streak(
         store, "s5",
         current_streak_days=13, streak_target_days=14,
@@ -149,7 +155,7 @@ def test_first_transaction_after_reward_expiry_resumes_counting_at_new_target(mo
         current_streak_days=0, streak_target_days=28,
         cycle_state="reward_active",
         reward_active_until=datetime.utcnow() - timedelta(minutes=1),
-        last_qualifying_date=date.today() - timedelta(days=20),
+        last_qualifying_date=_service_today() - timedelta(days=20),
     )
 
     store.record_streak_activity("s7")  # 1ª tx dopo la scadenza: riattiva il ciclo
@@ -168,7 +174,7 @@ def test_first_transaction_after_reward_expiry_resumes_counting_at_new_target(mo
 def test_record_tx_event_returns_streak_result_only_for_expense_and_income(mock_db_session):
     store = mock_db_session
     store.add_user(chat_id="s8")
-    yesterday = date.today() - timedelta(days=1)
+    yesterday = _service_today() - timedelta(days=1)
     _prep_streak(
         store, "s8",
         current_streak_days=13, streak_target_days=14,
@@ -191,7 +197,7 @@ def test_record_tx_event_unlocks_streak_achievements_on_cycle_completion(mock_db
     """Completare un ciclo sblocca gli achievement di streak, oltre al reward Pro."""
     store = mock_db_session
     store.add_user(chat_id="s8b")
-    yesterday = date.today() - timedelta(days=1)
+    yesterday = _service_today() - timedelta(days=1)
     _prep_streak(
         store, "s8b",
         current_streak_days=13, streak_target_days=14,
@@ -227,12 +233,12 @@ def test_reset_stale_streaks_resets_only_counting_users_with_gap(mock_db_session
     _prep_streak(
         store, "s10",
         current_streak_days=5, streak_target_days=14, cycle_state="counting",
-        last_qualifying_date=date.today() - timedelta(days=3),
+        last_qualifying_date=_service_today() - timedelta(days=3),
     )
     _prep_streak(
         store, "s11",
         current_streak_days=5, streak_target_days=14, cycle_state="counting",
-        last_qualifying_date=date.today() - timedelta(days=1),
+        last_qualifying_date=_service_today() - timedelta(days=1),
     )
     _prep_streak(
         store, "s12",

@@ -25,7 +25,6 @@ from sqlalchemy import (
     Boolean,
     DateTime,
     Integer,
-    BigInteger,
     Date,
     ForeignKey,
     Numeric,
@@ -43,6 +42,8 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import declarative_base, sessionmaker
 
 from config import Config
+from src.application.structured_logging import log_exception
+from src.application.persistence import LedgerRepository, RetentionRepository
 
 
 def _get_fernet() -> Fernet:
@@ -242,9 +243,6 @@ class User(Base):
     # Backend di storage
     storage_backend = Column(String, default="notion", nullable=False)
 
-    # Dashboard pinnata in chat Telegram
-    pinned_dashboard_msg_id = Column(BigInteger, nullable=True)
-
     # Preferenze utente
     preferred_language = Column(String, default='it', nullable=False)
     currency = Column(String, default='EUR', nullable=False)
@@ -253,6 +251,10 @@ class User(Base):
     monthly_budget = Column(Numeric(12, 2), nullable=True)
     notification_time = Column(String, default='08:00')
     notifications_enabled = Column(Boolean, default=True)
+    # Grafici Analytics: raggruppa le voci di spesa per etichetta normalizzata
+    # (default) oppure mostra il nome originale di ogni spesa.
+    analytics_group_labels = Column(Boolean, default=True, nullable=False,
+                                    server_default=text('true'))
 
     # Stato wizard onboarding
     onboarding_step = Column(String, default='pending')
@@ -738,7 +740,7 @@ class ReportEvent(Base):
 
 
 # 5. IL MANAGER DEL DATABASE
-class UserStore:
+class UserStore(LedgerRepository, RetentionRepository):
     def __init__(
         self,
         db_url="sqlite:///users.db",
@@ -789,7 +791,10 @@ class UserStore:
         # operazioni cross-tenant che la RLS non può soddisfare (vedi _owner_session).
         self._owner_engine = None
         self._owner_Session = None
-        logger.info(f"UserStore inizializzato correttamente.")
+        logger.info(
+            "user_store_initialized",
+            extra={"domain": "persistence", "event": "user_store_initialized", "meta": {}},
+        )
 
     @contextmanager
     def _user_session(self, user_id: str):
@@ -860,6 +865,20 @@ class UserStore:
                 "output_cost_per_1k": 0.0015,
             },
             {
+                "provider": "mistral",
+                "model": Config.MISTRAL_EXPENSE_PARSER_MODEL,
+                # Ministral 3 14B — listino ufficiale 2026: $0.20/M input, $0.20/M output
+                "input_cost_per_1k": 0.0002,
+                "output_cost_per_1k": 0.0002,
+            },
+            {
+                "provider": "mistral",
+                "model": Config.MISTRAL_EXPENSE_PARSER_FALLBACK_MODEL,
+                # Ministral 3 8B — listino ufficiale 2026: $0.15/M input, $0.15/M output
+                "input_cost_per_1k": 0.00015,
+                "output_cost_per_1k": 0.00015,
+            },
+            {
                 "provider": "gemini",
                 "model": Config.GEMINI_MODEL,
                 "input_cost_per_1k": 0.0003,
@@ -918,7 +937,6 @@ class UserStore:
             "email": "TEXT",
             "password_hash": "TEXT",
             "token_version": "INTEGER DEFAULT 0",
-            "pinned_dashboard_msg_id": "INTEGER",
             "storage_backend": "TEXT DEFAULT 'notion'",
             "preferred_language": "TEXT DEFAULT 'it'",
             "currency": "TEXT DEFAULT 'EUR'",
@@ -927,6 +945,7 @@ class UserStore:
             "monthly_budget": "REAL",
             "notification_time": "TEXT DEFAULT '08:00'",
             "notifications_enabled": "BOOLEAN DEFAULT 1",
+            "analytics_group_labels": "BOOLEAN DEFAULT 1",
             "onboarding_step": "TEXT DEFAULT 'pending'",
             "onboarding_completed_at": "DATETIME",
             "privacy_policy_version_accepted": "TEXT",
@@ -967,7 +986,10 @@ class UserStore:
                         continue
                     col_type = column_type if dialect == "sqlite" else _pg_type(column_type)
                     connection.execute(text(f"ALTER TABLE users ADD COLUMN {column_name} {col_type}"))
-                    logger.info(f"[DB Migration] Aggiunta colonna users.{column_name}")
+                    logger.info(
+                        "sqlite_schema_column_added",
+                        extra={"domain": "persistence", "event": "sqlite_schema_column_added", "meta": {"column": column_name}},
+                    )
 
                 if dialect == "sqlite" and "notion_api_key" in existing:
                     try:
@@ -982,6 +1004,16 @@ class UserStore:
                 col_type = "REAL" if dialect == "sqlite" else "FLOAT"
                 connection.execute(text(f"ALTER TABLE subscriptions ADD COLUMN amount {col_type}"))
                 logger.info("[DB Migration] Aggiunta colonna subscriptions.amount")
+            if sub_cols and "cadence" not in sub_cols:
+                connection.execute(text("ALTER TABLE subscriptions ADD COLUMN cadence VARCHAR(20)"))
+                logger.info("[DB Migration] Aggiunta colonna subscriptions.cadence")
+
+            loan_cols = _existing_columns(connection, "loans")
+            if loan_cols and "payment_cadence" not in loan_cols:
+                connection.execute(text(
+                    "ALTER TABLE loans ADD COLUMN payment_cadence VARCHAR(20) DEFAULT 'monthly'"
+                ))
+                logger.info("[DB Migration] Aggiunta colonna loans.payment_cadence")
 
             # 1c. Finance tables migrate toward 3NF-compatible shape
             acc_cols = _existing_columns(connection, "accounts")
@@ -1003,6 +1035,105 @@ class UserStore:
             inc_cols = _existing_columns(connection, "incomes")
             if inc_cols and "created_at" not in inc_cols:
                 connection.execute(text("ALTER TABLE incomes ADD COLUMN created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP"))
+            if inc_cols and "income_category_id" not in inc_cols:
+                connection.execute(text("ALTER TABLE incomes ADD COLUMN income_category_id INTEGER"))
+
+            # Base.metadata.create_all covers new databases. Existing local databases
+            # need these explicit additive tables before their legacy rows are mapped.
+            if not inspect(connection).has_table("user_income_categories"):
+                connection.execute(text(
+                    "CREATE TABLE user_income_categories ("
+                    "id INTEGER PRIMARY KEY, user_id VARCHAR NOT NULL, name VARCHAR NOT NULL, "
+                    "monthly_budget REAL, description TEXT, description_summary TEXT, "
+                    "archived_at TIMESTAMP, budget_suggestion_dismissed_at TIMESTAMP, "
+                    "CONSTRAINT uq_user_income_categories_user_name UNIQUE (user_id, name))"
+                ))
+            if not inspect(connection).has_table("user_income_category_notion_links"):
+                connection.execute(text(
+                    "CREATE TABLE user_income_category_notion_links ("
+                    "category_id INTEGER PRIMARY KEY, notion_page_id VARCHAR UNIQUE, "
+                    "synced_at TIMESTAMP, average REAL)"
+                ))
+
+            if inc_cols:
+                from src.income_categories import DEFAULT_INCOME_CATEGORIES, normalize_income_category_name
+
+                income_rows = connection.execute(text(
+                    "SELECT id, user_id, income_type FROM incomes WHERE income_category_id IS NULL"
+                )).mappings().all()
+                users_with_incomes = {str(row["user_id"]) for row in income_rows}
+                for user_id in users_with_incomes:
+                    for default_name in DEFAULT_INCOME_CATEGORIES:
+                        found = connection.execute(text(
+                            "SELECT id FROM user_income_categories "
+                            "WHERE user_id = :uid AND lower(name) = lower(:name) LIMIT 1"
+                        ), {"uid": user_id, "name": default_name}).first()
+                        if found is None:
+                            connection.execute(text(
+                                "INSERT INTO user_income_categories (user_id, name) VALUES (:uid, :name)"
+                            ), {"uid": user_id, "name": default_name})
+                for row in income_rows:
+                    category_name = normalize_income_category_name(row["income_type"])
+                    category = connection.execute(text(
+                        "SELECT id FROM user_income_categories "
+                        "WHERE user_id = :uid AND lower(name) = lower(:name) LIMIT 1"
+                    ), {"uid": row["user_id"], "name": category_name}).first()
+                    if category is None:
+                        result = connection.execute(text(
+                            "INSERT INTO user_income_categories (user_id, name) VALUES (:uid, :name)"
+                        ), {"uid": row["user_id"], "name": category_name})
+                        category_id = result.lastrowid
+                        if category_id is None:
+                            category_id = connection.execute(text(
+                                "SELECT id FROM user_income_categories "
+                                "WHERE user_id = :uid AND lower(name) = lower(:name) LIMIT 1"
+                            ), {"uid": row["user_id"], "name": category_name}).scalar_one()
+                    else:
+                        category_id = category[0]
+                    connection.execute(text(
+                        "UPDATE incomes SET income_category_id = :category_id WHERE id = :income_id"
+                    ), {"category_id": category_id, "income_id": row["id"]})
+
+            # SQLite cannot add a foreign key to an existing table in-place.  The
+            # runtime compatibility path therefore installs the equivalent tenant
+            # guard for newly written/retargeted incomes and the same functional
+            # uniqueness used by the Alembic hardening migration.  Managed deploys
+            # still use Alembic for the physical FK.
+            connection.execute(text(
+                "CREATE UNIQUE INDEX IF NOT EXISTS uq_user_income_categories_user_lower_name "
+                "ON user_income_categories (user_id, lower(name))"
+            ))
+            connection.execute(text(
+                "CREATE TRIGGER IF NOT EXISTS trg_incomes_income_category_tenant_insert "
+                "BEFORE INSERT ON incomes WHEN NEW.income_category_id IS NOT NULL "
+                "AND NOT EXISTS (SELECT 1 FROM user_income_categories c "
+                "WHERE c.id = NEW.income_category_id AND c.user_id = NEW.user_id) "
+                "BEGIN SELECT RAISE(ABORT, 'income category tenant mismatch'); END"
+            ))
+            connection.execute(text(
+                "CREATE TRIGGER IF NOT EXISTS trg_incomes_income_category_tenant_update "
+                "BEFORE UPDATE OF income_category_id ON incomes "
+                "WHEN NEW.income_category_id IS NOT NULL "
+                "AND NOT EXISTS (SELECT 1 FROM user_income_categories c "
+                "WHERE c.id = NEW.income_category_id AND c.user_id = NEW.user_id) "
+                "BEGIN SELECT RAISE(ABORT, 'income category tenant mismatch'); END"
+            ))
+            # The same parent-existence check protects the optional Notion cache
+            # table when a pre-Alembic SQLite file did not declare its FK.
+            connection.execute(text(
+                "CREATE TRIGGER IF NOT EXISTS trg_income_category_link_parent_insert "
+                "BEFORE INSERT ON user_income_category_notion_links "
+                "WHEN NOT EXISTS (SELECT 1 FROM user_income_categories c "
+                "WHERE c.id = NEW.category_id) "
+                "BEGIN SELECT RAISE(ABORT, 'income category link parent missing'); END"
+            ))
+            connection.execute(text(
+                "CREATE TRIGGER IF NOT EXISTS trg_income_category_link_parent_update "
+                "BEFORE UPDATE OF category_id ON user_income_category_notion_links "
+                "WHEN NOT EXISTS (SELECT 1 FROM user_income_categories c "
+                "WHERE c.id = NEW.category_id) "
+                "BEGIN SELECT RAISE(ABORT, 'income category link parent missing'); END"
+            ))
 
             cat_cols = _existing_columns(connection, "user_categories")
             if cat_cols and "monthly_budget" not in cat_cols:
@@ -1103,7 +1234,10 @@ class UserStore:
                             ), {"chat_id": c_id, "db_key": db_key, "db_id": db_id, "schema": schema})
                 
                 if old_data:
-                    logger.info(f"[DB Migration] Migrati schemi per {len(old_data)} utenti verso database_schemas.")
+                    logger.info(
+                        "database_schemas_migrated",
+                        extra={"domain": "persistence", "event": "database_schemas_migrated", "meta": {"count": len(old_data)}},
+                    )
 
     def get_user(self, chat_id: str) -> User | None:
         """Cerca un utente per chat_id. Se non esiste o è disattivato, torna None."""
@@ -1150,7 +1284,40 @@ class UserStore:
                     setattr(user, key, value)
             
             session.commit() # Salvataggio definitivo su disco!
+            self._ensure_default_income_categories(chat_id)
             return user
+
+    def _ensure_default_income_categories(self, user_id: str) -> None:
+        """Create the approved income-category bootstrap set exactly once per user.
+
+        Ogni categoria di default riceve la sua `description_summary` statica da
+        `INCOME_CATEGORY_DESCRIPTIONS`, cosi il parser LLM la riceve sempre nel prompt
+        (stesso principio di `CATEGORY_DESCRIPTIONS` per le categorie di spesa in
+        `workspace_bootstrapper.py`). Le righe preesistenti senza descrizione — utenti
+        creati prima di questa modifica — vengono aggiornate in place, mai sovrascrivendo
+        una descrizione gia scritta dall'utente.
+        """
+        from src.income_categories import DEFAULT_INCOME_CATEGORIES, INCOME_CATEGORY_DESCRIPTIONS
+        from src.storage.models import UserIncomeCategory
+
+        user_id = str(user_id)
+        with self._user_session(user_id) as session:
+            existing = {
+                row.name.casefold(): row
+                for row in session.query(UserIncomeCategory).filter(
+                    UserIncomeCategory.user_id == user_id
+                )
+            }
+            for name in DEFAULT_INCOME_CATEGORIES:
+                row = existing.get(name.casefold())
+                description = INCOME_CATEGORY_DESCRIPTIONS.get(name)
+                if row is None:
+                    session.add(UserIncomeCategory(
+                        user_id=user_id, name=name, description_summary=description,
+                    ))
+                elif description and not row.description_summary:
+                    row.description_summary = description
+            session.commit()
 
     def update_setup_status(self, chat_id: str, setup_status: str) -> None:
         """Aggiorna lo stato del setup utente."""
@@ -1195,6 +1362,8 @@ class UserStore:
                 user.lifestyle_json = json.dumps(current)
             if 'budget' in data:
                 user.monthly_budget = data['budget']
+            if 'monthly_budget' in data:
+                user.monthly_budget = data['monthly_budget']
             if 'notification_time' in data:
                 user.notification_time = data['notification_time']
             if 'notifications_enabled' in data:
@@ -1246,9 +1415,33 @@ class UserStore:
                 'monthly_budget': user.monthly_budget,
                 'notification_time': user.notification_time,
                 'notifications_enabled': user.notifications_enabled,
+                'analytics_group_labels': bool(user.analytics_group_labels),
                 'onboarding_step': user.onboarding_step,
                 'onboarding_completed_at': user.onboarding_completed_at.isoformat() if user.onboarding_completed_at else None,
             }
+
+    def update_user_preferences(self, chat_id: str, data: dict) -> None:
+        """Aggiorna le preferenze utente senza modificare lo stato onboarding."""
+        chat_id = str(chat_id)
+        with self.Session() as session:
+            user = session.query(User).filter(User.chat_id == chat_id).first()
+            if not user:
+                return
+            if 'language' in data:
+                user.preferred_language = data['language']
+            if 'currency' in data:
+                user.currency = data['currency']
+            if 'timezone' in data:
+                user.timezone = data['timezone']
+            if 'monthly_budget' in data:
+                user.monthly_budget = data['monthly_budget']
+            if 'notification_time' in data:
+                user.notification_time = data['notification_time']
+            if 'notifications_enabled' in data:
+                user.notifications_enabled = data['notifications_enabled']
+            if 'analytics_group_labels' in data:
+                user.analytics_group_labels = bool(data['analytics_group_labels'])
+            session.commit()
 
     def set_credentials(self, chat_id: str, email: str, password: str) -> None:
         """Salva email e hash Argon2id della password per un utente."""
@@ -1508,7 +1701,11 @@ class UserStore:
         Se il `new_chat_id` è già occupato da un altro account reale, solleva ValueError.
         """
         from src.storage.models import (
-            Expense, Income, Account, Subscription, UserCategory, SavedReport
+            Expense, ExpenseLabelCluster, ExpenseLabelOverride, QuickExpenseShortcut,
+            Income, Account, Transfer, Subscription, SubscriptionCandidate, UserCategory,
+            CategoryCandidate, UserIncomeCategory, UserIncomeCategoryNotionLink,
+            IncomeCategoryNotionSyncTask, SavedReport, SavingsGoal, SavingsGoalEvaluation,
+            Loan, LoanMonthlyCharge, MortgageSimulation, Notification,
         )
 
         old_chat_id = str(old_chat_id)
@@ -1550,17 +1747,53 @@ class UserStore:
                     # default) l'errore emerge piu' avanti, sui vincoli UNIQUE, quando il
                     # bulk update sposta old_chat_id -> new_chat_id. ChatMessage non ha
                     # vincoli unique e puo' contenere cronologia reale: non la tocchiamo.
+                    # Expense referenzia label_cluster_id -> ExpenseLabelCluster.id: le
+                    # spese vanno cancellate prima dei cluster, non dopo (FK). Stesso
+                    # discorso per le regole di correzione manuale (cluster_id).
                     session.query(Expense).filter(Expense.user_id == new_chat_id).delete()
+                    session.query(ExpenseLabelOverride).filter(ExpenseLabelOverride.user_id == new_chat_id).delete()
+                    session.query(ExpenseLabelCluster).filter(ExpenseLabelCluster.user_id == new_chat_id).delete()
+                    session.query(QuickExpenseShortcut).filter(QuickExpenseShortcut.user_id == new_chat_id).delete()
                     session.query(Income).filter(Income.user_id == new_chat_id).delete()
+                    # MortgageSimulation.converted_loan_id -> Loan.id (senza CASCADE) e
+                    # Transfer/SavingsGoal/Loan -> Account.id: vanno cancellate prima di
+                    # Account. Loan/SavingsGoal hanno FK con ondelete=CASCADE verso le
+                    # rispettive tabelle figlie (LoanMonthlyCharge/SavingsGoalEvaluation
+                    # figlie tramite goal_id/loan_id), che il DB elimina da solo.
+                    session.query(MortgageSimulation).filter(MortgageSimulation.user_id == new_chat_id).delete()
+                    session.query(Loan).filter(Loan.user_id == new_chat_id).delete()
+                    session.query(SavingsGoal).filter(SavingsGoal.user_id == new_chat_id).delete()
+                    session.query(Transfer).filter(Transfer.user_id == new_chat_id).delete()
                     session.query(Account).filter(Account.user_id == new_chat_id).delete()
                     session.query(Subscription).filter(Subscription.user_id == new_chat_id).delete()
+                    session.query(SubscriptionCandidate).filter(SubscriptionCandidate.user_id == new_chat_id).delete()
+                    session.query(CategoryCandidate).filter(CategoryCandidate.user_id == new_chat_id).delete()
                     session.query(UserCategory).filter(UserCategory.user_id == new_chat_id).delete()
+                    placeholder_income_category_ids = [row[0] for row in session.query(
+                        UserIncomeCategory.id
+                    ).filter(UserIncomeCategory.user_id == new_chat_id).all()]
+                    if placeholder_income_category_ids:
+                        session.query(UserIncomeCategoryNotionLink).filter(
+                            UserIncomeCategoryNotionLink.category_id.in_(placeholder_income_category_ids)
+                        ).delete(synchronize_session=False)
+                        session.query(IncomeCategoryNotionSyncTask).filter(
+                            IncomeCategoryNotionSyncTask.category_id.in_(placeholder_income_category_ids)
+                        ).delete(synchronize_session=False)
+                    session.query(UserIncomeCategory).filter(UserIncomeCategory.user_id == new_chat_id).delete()
                     session.query(SavedReport).filter(SavedReport.user_id == new_chat_id).delete()
                     session.query(Feedback).filter(Feedback.chat_id == new_chat_id).delete()
                     session.query(DatabaseSchema).filter(DatabaseSchema.chat_id == new_chat_id).delete()
                     session.query(OAuthSession).filter(OAuthSession.chat_id == new_chat_id).delete()
                     session.query(UserPlan).filter(UserPlan.chat_id == new_chat_id).delete()
                     session.query(PlanChange).filter(PlanChange.chat_id == new_chat_id).delete()
+                    session.query(TrialLifecycleEvent).filter(TrialLifecycleEvent.chat_id == new_chat_id).delete()
+                    # chat_id e' primary key (o parte di una composita) su queste tre:
+                    # una riga placeholder gia' esistente blocca l'UPDATE massivo old->new
+                    # con una violazione di chiave primaria, non solo di FK.
+                    session.query(UserStreak).filter(UserStreak.chat_id == new_chat_id).delete()
+                    session.query(UserMetricCounter).filter(UserMetricCounter.chat_id == new_chat_id).delete()
+                    session.query(UserGamificationProfile).filter(UserGamificationProfile.chat_id == new_chat_id).delete()
+                    session.query(Notification).filter(Notification.user_id == new_chat_id).delete()
 
                 session.delete(target_user)
                 session.flush()
@@ -1600,14 +1833,37 @@ class UserStore:
             session.query(LlmTokenReservation).filter(LlmTokenReservation.chat_id == old_chat_id).update({"chat_id": new_chat_id})
             session.query(LlmUsageEvent).filter(LlmUsageEvent.chat_id == old_chat_id).update({"chat_id": new_chat_id})
             session.query(ChatMessage).filter(ChatMessage.chat_id == old_chat_id).update({"chat_id": new_chat_id})
+            session.query(TrialLifecycleEvent).filter(TrialLifecycleEvent.chat_id == old_chat_id).update({"chat_id": new_chat_id})
+            session.query(TxEvent).filter(TxEvent.chat_id == old_chat_id).update({"chat_id": new_chat_id})
+            session.query(UserStreak).filter(UserStreak.chat_id == old_chat_id).update({"chat_id": new_chat_id})
+            session.query(UserMetricCounter).filter(UserMetricCounter.chat_id == old_chat_id).update({"chat_id": new_chat_id})
+            session.query(UserAchievement).filter(UserAchievement.chat_id == old_chat_id).update({"chat_id": new_chat_id})
+            session.query(UserGamificationProfile).filter(UserGamificationProfile.chat_id == old_chat_id).update({"chat_id": new_chat_id})
+            session.query(ReportEvent).filter(ReportEvent.chat_id == old_chat_id).update({"chat_id": new_chat_id})
 
             # Tabelle finanziarie
             session.query(Expense).filter(Expense.user_id == old_chat_id).update({"user_id": new_chat_id})
+            session.query(ExpenseLabelCluster).filter(ExpenseLabelCluster.user_id == old_chat_id).update({"user_id": new_chat_id})
+            session.query(ExpenseLabelOverride).filter(ExpenseLabelOverride.user_id == old_chat_id).update({"user_id": new_chat_id})
+            session.query(QuickExpenseShortcut).filter(QuickExpenseShortcut.user_id == old_chat_id).update({"user_id": new_chat_id})
             session.query(Income).filter(Income.user_id == old_chat_id).update({"user_id": new_chat_id})
             session.query(Account).filter(Account.user_id == old_chat_id).update({"user_id": new_chat_id})
+            session.query(Transfer).filter(Transfer.user_id == old_chat_id).update({"user_id": new_chat_id})
             session.query(Subscription).filter(Subscription.user_id == old_chat_id).update({"user_id": new_chat_id})
+            session.query(SubscriptionCandidate).filter(SubscriptionCandidate.user_id == old_chat_id).update({"user_id": new_chat_id})
+            session.query(CategoryCandidate).filter(CategoryCandidate.user_id == old_chat_id).update({"user_id": new_chat_id})
             session.query(UserCategory).filter(UserCategory.user_id == old_chat_id).update({"user_id": new_chat_id})
+            session.query(UserIncomeCategory).filter(UserIncomeCategory.user_id == old_chat_id).update({"user_id": new_chat_id})
+            session.query(IncomeCategoryNotionSyncTask).filter(
+                IncomeCategoryNotionSyncTask.user_id == old_chat_id
+            ).update({"user_id": new_chat_id})
             session.query(SavedReport).filter(SavedReport.user_id == old_chat_id).update({"user_id": new_chat_id})
+            session.query(SavingsGoal).filter(SavingsGoal.user_id == old_chat_id).update({"user_id": new_chat_id})
+            session.query(SavingsGoalEvaluation).filter(SavingsGoalEvaluation.user_id == old_chat_id).update({"user_id": new_chat_id})
+            session.query(Loan).filter(Loan.user_id == old_chat_id).update({"user_id": new_chat_id})
+            session.query(LoanMonthlyCharge).filter(LoanMonthlyCharge.user_id == old_chat_id).update({"user_id": new_chat_id})
+            session.query(MortgageSimulation).filter(MortgageSimulation.user_id == old_chat_id).update({"user_id": new_chat_id})
+            session.query(Notification).filter(Notification.user_id == old_chat_id).update({"user_id": new_chat_id})
 
             # Ora nessuna FK referenzia piu' old_chat_id: la vecchia riga users si puo' cancellare
             session.query(User).filter(User.chat_id == old_chat_id).delete()
@@ -1641,7 +1897,10 @@ class UserStore:
             else:
                 row.fallbacks = (row.fallbacks or 0) + 1
             session.commit()
-            logger.debug(f"[AI Metrics] {'completion' if success else 'fallback'} (+1) — {today}")
+            logger.debug(
+                "ai_metrics_incremented",
+                extra={"domain": "usage", "event": "ai_metrics_incremented", "meta": {"outcome": "completion" if success else "fallback"}},
+            )
 
     def save_feedback(
         self, chat_id: str, message: str, category: str | None = None, rating: str | None = None
@@ -1652,7 +1911,7 @@ class UserStore:
             fb = Feedback(chat_id=chat_id, message=message, category=category, rating=rating)
             session.add(fb)
             session.commit()
-            logger.info(f"[User {chat_id}] Salvato nuovo feedback.")
+            logger.info("feedback_saved", extra={"domain": "feedback", "event": "feedback_saved", "chat_id": chat_id, "meta": {}})
 
         # L'hook sta qui e non nei chiamanti, così vale per il comando Telegram e
         # per qualunque endpoint futuro. Import locale: evita il ciclo di import.
@@ -1660,7 +1919,7 @@ class UserStore:
             from src.gamification import engine
             engine.record_event(self, chat_id, "feedback_sent")
         except Exception as exc:  # noqa: BLE001 — il feedback è già salvato
-            logger.warning("[Gamification] Hook feedback fallito per %s: %s", chat_id, exc)
+            log_exception(logger, level="warning", domain="gamification", event="feedback_hook_failed", exception=exc, chat_id=chat_id)
 
     # --- METODI OAUTH (Fase 2) ---
     def generate_secure_token(self, length=12) -> str:
@@ -1678,7 +1937,7 @@ class UserStore:
             new_session = OAuthSession(chat_id=chat_id, state=state)
             session.add(new_session)
             session.commit()
-            logger.info(f"[Auth] Magic Token generato per chat_id={chat_id} (token={state})")
+            logger.info("oauth_session_created", extra={"domain": "security", "event": "oauth_session_created", "chat_id": str(chat_id), "meta": {}})
             return state
 
     def get_and_delete_oauth_session(self, state: str) -> str | None:
@@ -1736,7 +1995,7 @@ class UserStore:
                 schema.mapped_properties_json = mapped_properties_json
             
             session.commit()
-            logger.info(f"[User {chat_id}] Schema salvato per {db_key}.")
+            logger.info("database_schema_saved", extra={"domain": "persistence", "event": "database_schema_saved", "chat_id": chat_id, "meta": {"database_key": db_key}})
 
     def get_active_notion_users(self) -> list:
         """Ritorna tutti gli utenti attivi con storage_backend Notion."""
@@ -1993,20 +2252,97 @@ class UserStore:
     # Frammento SQL costante (mai interpolato con input utente) per escludere le
     # categorie archiviate dalle letture che servono a *scegliere* una categoria.
     _ACTIVE_CATEGORY_CLAUSE = " AND archived_at IS NULL"
+    _CATEGORY_NAMES_QUERY = text(
+        "SELECT name FROM user_categories WHERE user_id = :uid ORDER BY name"
+    )
+    _ACTIVE_CATEGORY_NAMES_QUERY = text(
+        "SELECT name FROM user_categories "
+        "WHERE user_id = :uid AND archived_at IS NULL ORDER BY name"
+    )
+    _CATEGORY_DESCRIPTIONS_QUERY = text(
+        "SELECT name, description_summary FROM user_categories "
+        "WHERE user_id = :uid ORDER BY name"
+    )
+    _ACTIVE_CATEGORY_DESCRIPTIONS_QUERY = text(
+        "SELECT name, description_summary FROM user_categories "
+        "WHERE user_id = :uid AND archived_at IS NULL ORDER BY name"
+    )
+    _CATEGORY_BUDGETS_QUERY = text(
+        "SELECT uc.name, uc.monthly_budget, ucnl.average "
+        "FROM user_categories uc "
+        "LEFT JOIN user_category_notion_links ucnl ON ucnl.category_id = uc.id "
+        "WHERE uc.user_id = :uid ORDER BY uc.name"
+    )
+    _ACTIVE_CATEGORY_BUDGETS_QUERY = text(
+        "SELECT uc.name, uc.monthly_budget, ucnl.average "
+        "FROM user_categories uc "
+        "LEFT JOIN user_category_notion_links ucnl ON ucnl.category_id = uc.id "
+        "WHERE uc.user_id = :uid AND uc.archived_at IS NULL ORDER BY uc.name"
+    )
+    _CATEGORY_AVERAGES_QUERY = text(
+        "SELECT uc.name, ucnl.average "
+        "FROM user_categories uc "
+        "LEFT JOIN user_category_notion_links ucnl ON ucnl.category_id = uc.id "
+        "WHERE uc.user_id = :uid ORDER BY uc.name"
+    )
+    _ACTIVE_CATEGORY_AVERAGES_QUERY = text(
+        "SELECT uc.name, ucnl.average "
+        "FROM user_categories uc "
+        "LEFT JOIN user_category_notion_links ucnl ON ucnl.category_id = uc.id "
+        "WHERE uc.user_id = :uid AND uc.archived_at IS NULL ORDER BY uc.name"
+    )
 
     def get_user_category_names(self, user_id: str, include_archived: bool = False) -> list[str]:
         """Nomi delle categorie dell'utente, archiviate escluse per default."""
         user_id = str(user_id)
-        clause = "" if include_archived else self._ACTIVE_CATEGORY_CLAUSE
+        query = self._CATEGORY_NAMES_QUERY if include_archived else self._ACTIVE_CATEGORY_NAMES_QUERY
         with self._user_session(user_id) as session:
             rows = session.execute(
-                text(
-                    "SELECT name FROM user_categories "
-                    f"WHERE user_id = :uid{clause} ORDER BY name"
-                ),
+                query,
                 {"uid": user_id},
             ).fetchall()
             return [r[0] for r in rows]
+
+    def get_user_income_categories(
+        self, user_id: str, include_archived: bool = False
+    ) -> list[dict]:
+        """Return local, user-scoped income category DTOs for the Notion adapter."""
+        from src.storage.models import UserIncomeCategory, UserIncomeCategoryNotionLink
+
+        user_id = str(user_id)
+        with self._user_session(user_id) as session:
+            query = session.query(UserIncomeCategory, UserIncomeCategoryNotionLink).outerjoin(
+                UserIncomeCategoryNotionLink,
+                UserIncomeCategoryNotionLink.category_id == UserIncomeCategory.id,
+            ).filter(UserIncomeCategory.user_id == user_id)
+            return [
+                {
+                    "id": category.id,
+                    "name": category.name,
+                    "monthly_budget": float(category.monthly_budget)
+                    if category.monthly_budget is not None else None,
+                    "description": category.description,
+                    "description_summary": category.description_summary,
+                    "average": float(link.average) if link and link.average is not None else 0.0,
+                    "archived": category.archived_at is not None,
+                }
+                for category, link in query.all()
+            ]
+
+    def get_user_income_category_names(
+        self, user_id: str, include_archived: bool = False
+    ) -> list[str]:
+        """Return income category names that may be selected by the user."""
+        return [
+            row["name"] for row in self.get_user_income_categories(user_id, include_archived)
+        ]
+
+    def get_user_income_categories_with_descriptions(self, user_id: str) -> list[dict]:
+        """Return active income categories and their safe parser descriptions."""
+        return [
+            {"name": row["name"], "description_summary": row["description_summary"]}
+            for row in self.get_user_income_categories(user_id)
+        ]
 
     def get_user_categories_with_descriptions(
         self, user_id: str, include_archived: bool = False
@@ -2021,13 +2357,14 @@ class UserStore:
         odierno, solo nome) — vedi `ExpenseParser(category_descriptions=...)`.
         """
         user_id = str(user_id)
-        clause = "" if include_archived else self._ACTIVE_CATEGORY_CLAUSE
+        query = (
+            self._CATEGORY_DESCRIPTIONS_QUERY
+            if include_archived
+            else self._ACTIVE_CATEGORY_DESCRIPTIONS_QUERY
+        )
         with self._user_session(user_id) as session:
             rows = session.execute(
-                text(
-                    "SELECT name, description_summary FROM user_categories "
-                    f"WHERE user_id = :uid{clause} ORDER BY name"
-                ),
+                query,
                 {"uid": user_id},
             ).fetchall()
             return [{"name": r[0], "description_summary": r[1]} for r in rows]
@@ -2109,24 +2446,6 @@ class UserStore:
                 }
             return result
 
-    # --- METODI DASHBOARD PINNED MESSAGE ---
-
-    def get_pinned_dashboard_msg_id(self, chat_id: str) -> int | None:
-        """Recupera l'ID del messaggio dashboard pinnato per un utente."""
-        chat_id = str(chat_id)
-        with self.Session() as session:
-            user = session.query(User).filter(User.chat_id == chat_id).first()
-            return user.pinned_dashboard_msg_id if user else None
-
-    def set_pinned_dashboard_msg_id(self, chat_id: str, msg_id: int | None) -> None:
-        """Salva (o resetta) l'ID del messaggio dashboard pinnato."""
-        chat_id = str(chat_id)
-        with self.Session() as session:
-            user = session.query(User).filter(User.chat_id == chat_id).first()
-            if user:
-                user.pinned_dashboard_msg_id = msg_id
-                session.commit()
-
     def get_user_categories_with_budget(
         self, user_id: str, include_archived: bool = False
     ) -> list[dict]:
@@ -2139,15 +2458,10 @@ class UserStore:
         nel DB locale (user_categories + user_category_notion_links).
         """
         user_id = str(user_id)
-        clause = "" if include_archived else " AND uc.archived_at IS NULL"
+        query = self._CATEGORY_BUDGETS_QUERY if include_archived else self._ACTIVE_CATEGORY_BUDGETS_QUERY
         with self._user_session(user_id) as session:
             rows = session.execute(
-                text(
-                    "SELECT uc.name, uc.monthly_budget, ucnl.average "
-                    "FROM user_categories uc "
-                    "LEFT JOIN user_category_notion_links ucnl ON ucnl.category_id = uc.id "
-                    f"WHERE uc.user_id = :uid{clause} ORDER BY uc.name"
-                ),
+                query,
                 {"uid": user_id},
             ).fetchall()
             return [
@@ -2163,15 +2477,10 @@ class UserStore:
         `average` viene da `user_category_notion_links` (None per categorie senza link Notion).
         """
         user_id = str(user_id)
-        clause = "" if include_archived else " AND uc.archived_at IS NULL"
+        query = self._CATEGORY_AVERAGES_QUERY if include_archived else self._ACTIVE_CATEGORY_AVERAGES_QUERY
         with self._user_session(user_id) as session:
             rows = session.execute(
-                text(
-                    "SELECT uc.name, ucnl.average "
-                    "FROM user_categories uc "
-                    "LEFT JOIN user_category_notion_links ucnl ON ucnl.category_id = uc.id "
-                    f"WHERE uc.user_id = :uid{clause} ORDER BY uc.name"
-                ),
+                query,
                 {"uid": user_id},
             ).fetchall()
             return [{"name": r[0], "average": r[1] or 0.0} for r in rows]
@@ -2747,8 +3056,11 @@ class UserStore:
         'not_found' se l'utente non esiste.
         """
         from src.storage.models import (
-            Expense, Income, Account, Subscription, UserCategory, UserCategoryNotionLink,
-            SavedReport, SavingsGoal, SavingsGoalEvaluation,
+            Expense, ExpenseLabelCluster, ExpenseLabelOverride, QuickExpenseShortcut,
+            Income, Account, Subscription, UserCategory,
+            UserCategoryNotionLink, UserIncomeCategory, UserIncomeCategoryNotionLink,
+            IncomeCategoryNotionSyncTask,
+            SavedReport, SavingsGoal, SavingsGoalEvaluation, Notification,
         )
 
         chat_id = str(chat_id)
@@ -2787,6 +3099,19 @@ class UserStore:
                 session.query(UserCategoryNotionLink).filter(
                     UserCategoryNotionLink.category_id.in_(cat_ids)
                 ).delete(synchronize_session=False)
+            income_cat_ids = [
+                r[0] for r in session.execute(
+                    text("SELECT id FROM user_income_categories WHERE user_id = :uid"),
+                    {"uid": chat_id},
+                ).fetchall()
+            ]
+            if income_cat_ids:
+                session.query(UserIncomeCategoryNotionLink).filter(
+                    UserIncomeCategoryNotionLink.category_id.in_(income_cat_ids)
+                ).delete(synchronize_session=False)
+                session.query(IncomeCategoryNotionSyncTask).filter(
+                    IncomeCategoryNotionSyncTask.category_id.in_(income_cat_ids)
+                ).delete(synchronize_session=False)
 
             if backend == "postgres":
                 # Ordine obbligato dalle FK:
@@ -2815,12 +3140,20 @@ class UserStore:
                     SavingsGoalEvaluation.user_id == chat_id
                 ).delete()
                 session.query(SavingsGoal).filter(SavingsGoal.user_id == chat_id).delete()
+                # Expense referenzia label_cluster_id -> ExpenseLabelCluster.id: le
+                # spese vanno cancellate prima dei cluster, non dopo (FK). Stesso
+                # discorso per le regole di correzione manuale (cluster_id).
                 session.query(Expense).filter(Expense.user_id == chat_id).delete()
+                session.query(ExpenseLabelOverride).filter(ExpenseLabelOverride.user_id == chat_id).delete()
+                session.query(ExpenseLabelCluster).filter(ExpenseLabelCluster.user_id == chat_id).delete()
+                # Referenzia account_id/category_id: va cancellata prima di Account/UserCategory.
+                session.query(QuickExpenseShortcut).filter(QuickExpenseShortcut.user_id == chat_id).delete()
                 session.query(Income).filter(Income.user_id == chat_id).delete()
                 session.query(Subscription).filter(Subscription.user_id == chat_id).delete()
                 session.query(Account).filter(Account.user_id == chat_id).delete()
 
             session.query(UserCategory).filter(UserCategory.user_id == chat_id).delete()
+            session.query(UserIncomeCategory).filter(UserIncomeCategory.user_id == chat_id).delete()
             session.query(SavedReport).filter(SavedReport.user_id == chat_id).delete()
             session.query(ChatMessage).filter(ChatMessage.chat_id == chat_id).delete()
             # Ledger token
@@ -2849,6 +3182,7 @@ class UserStore:
             session.query(TrialLifecycleEvent).filter(
                 TrialLifecycleEvent.chat_id == chat_id
             ).delete()
+            session.query(Notification).filter(Notification.user_id == chat_id).delete()
             session.delete(user)
             session.commit()
 
@@ -3252,201 +3586,6 @@ class UserStore:
                     chat_id, step, channel,
                 )
 
-    # --- METODI LEDGER TOKEN (Fase 2.2 — Token System Reale) ---
-
-    def reserve_llm_tokens(
-        self,
-        chat_id: str,
-        request_key: str,
-        operation: str,
-        provider: str,
-        model: str,
-        reserved_tokens: int,
-        ttl_minutes: int = 5,
-    ) -> "LlmTokenReservation":
-        """Crea una reservation di token prima di una chiamata AI.
-
-        Per utenti Free: verifica che la quota residua copra la prenotazione.
-        Solleva `QuotaExceededError` se non sufficiente.
-        Per utenti Pro: crea sempre la reservation (soft cap — solo log se anomalia).
-
-        Args:
-            request_key: chiave idempotente stabile per il retry applicativo.
-        """
-        chat_id = str(chat_id)
-        now = datetime.utcnow()
-        expires_at = now + timedelta(minutes=ttl_minutes)
-
-        plan_info = self.get_user_plan(chat_id)
-
-        if plan_info["plan_type"] == "free" and plan_info["tokens_remaining"] < reserved_tokens:
-            raise QuotaExceededError(
-                f"Quota esaurita: {plan_info['tokens_remaining']} token rimasti, "
-                f"richiesti {reserved_tokens}."
-            )
-
-        if plan_info["plan_type"] == "pro" and plan_info["tokens_remaining"] < reserved_tokens:
-            # Strutturato (non solo testo libero) cosi' log analysis tooling puo'
-            # aggregare per chat_id: un singolo evento e' normale usura del soft cap,
-            # ripetuto piu' volte e' il segnale di script/account compromesso che la
-            # checklist di sicurezza chiede di monitorare (Token Monitoring).
-            logger.warning(
-                "pro_cap_hit",
-                extra={
-                    "domain": "security", "event": "pro_cap_hit", "chat_id": chat_id,
-                    "meta": {"tokens_remaining": plan_info["tokens_remaining"], "requested": reserved_tokens},
-                },
-            )
-
-        with self.Session() as session:
-            # Idempotenza: se esiste già una reservation con lo stesso request_key, la ritorna
-            existing = session.query(LlmTokenReservation).filter_by(
-                request_key=request_key
-            ).first()
-            if existing:
-                logger.debug(
-                    "[User %s] Reservation già esistente per request_key=%s", chat_id, request_key
-                )
-                return existing
-
-            reservation = LlmTokenReservation(
-                chat_id=chat_id,
-                request_key=request_key,
-                created_at=now,
-                expires_at=expires_at,
-                operation=operation,
-                provider=provider,
-                model=model,
-                reserved_tokens=reserved_tokens,
-                status="pending",
-            )
-            session.add(reservation)
-            session.commit()
-            logger.debug(
-                "[User %s] Reservation creata: %s token, op=%s, key=%s",
-                chat_id, reserved_tokens, operation, request_key,
-            )
-            return reservation
-
-    def finalize_llm_usage(
-        self,
-        chat_id: str,
-        request_key: str,
-        prompt_tokens: int,
-        completion_tokens: int,
-        total_tokens: int,
-        provider: str,
-        model: str,
-        operation: str,
-        thinking_tokens: int | None = None,
-        cached_tokens: int | None = None,
-        input_method: str | None = None,
-    ) -> "LlmUsageEvent":
-        """Registra il consumo reale dopo una chiamata AI e finalizza la reservation.
-
-        Calcola il costo stimato usando `llm_pricing` (se disponibile).
-        Idempotente: se esiste già un evento con lo stesso `request_key`, lo ritorna.
-        """
-        chat_id = str(chat_id)
-        now = datetime.utcnow()
-
-        with self.Session() as session:
-            # Idempotenza
-            existing_event = session.query(LlmUsageEvent).filter_by(
-                request_key=request_key
-            ).first()
-            if existing_event:
-                logger.debug(
-                    "[User %s] Usage event già esistente per request_key=%s", chat_id, request_key
-                )
-                return existing_event
-
-            # Calcola costo stimato
-            pricing = session.query(LlmPricing).filter(
-                LlmPricing.provider == provider,
-                LlmPricing.model == model,
-                LlmPricing.valid_to.is_(None),
-            ).first()
-
-            estimated_cost = None
-            if pricing:
-                input_cost = (Decimal(prompt_tokens) / 1000) * pricing.input_cost_per_1k
-                output_cost = (Decimal(completion_tokens) / 1000) * pricing.output_cost_per_1k
-                estimated_cost = (input_cost + output_cost).quantize(
-                    Decimal("0.00000001"), rounding="ROUND_HALF_UP"
-                )
-
-            # Trova la reservation associata (se esiste)
-            reservation = session.query(LlmTokenReservation).filter_by(
-                request_key=request_key
-            ).first()
-            reservation_id = None
-            if reservation:
-                reservation.status = "finalized"
-                reservation_id = reservation.id
-
-            event = LlmUsageEvent(
-                chat_id=chat_id,
-                occurred_at=now,
-                provider=provider,
-                model=model,
-                operation=operation,
-                input_method=input_method,
-                prompt_tokens=prompt_tokens,
-                completion_tokens=completion_tokens,
-                total_tokens=total_tokens,
-                thinking_tokens=thinking_tokens,
-                cached_tokens=cached_tokens,
-                estimated_cost_amount=estimated_cost,
-                estimated_cost_currency=pricing.currency if pricing else "USD",
-                request_key=request_key,
-                reservation_id=reservation_id,
-            )
-            session.add(event)
-            session.commit()
-            logger.debug(
-                "[User %s] Usage finalizzato: %s token totali, costo ~$%s, op=%s",
-                chat_id, total_tokens, estimated_cost, operation,
-            )
-            return event
-
-    def release_llm_reservation(self, chat_id: str, request_key: str, reason: str = "") -> None:
-        """Rilascia una reservation pending (es. in caso di errore non recuperabile).
-
-        Imposta lo status a 'released' in modo che i token tornino disponibili.
-        """
-        chat_id = str(chat_id)
-        with self.Session() as session:
-            reservation = session.query(LlmTokenReservation).filter_by(
-                request_key=request_key,
-                chat_id=chat_id,
-            ).first()
-            if reservation and reservation.status == "pending":
-                reservation.status = "released"
-                reservation.release_reason = reason
-                session.commit()
-                logger.debug(
-                    "[User %s] Reservation rilasciata: key=%s, motivo=%s",
-                    chat_id, request_key, reason,
-                )
-
-    def expire_stale_reservations(self) -> int:
-        """Marca come 'expired' tutte le reservation pending con expires_at passato.
-
-        Da chiamare periodicamente (es. nel job notturno).
-        Restituisce il numero di reservation scadute.
-        """
-        now = datetime.utcnow()
-        with self.Session() as session:
-            count = session.query(LlmTokenReservation).filter(
-                LlmTokenReservation.status == "pending",
-                LlmTokenReservation.expires_at < now,
-            ).update({"status": "expired"})
-            session.commit()
-            if count:
-                logger.info("[Ledger] %s reservation scadute marcate come expired.", count)
-            return count
-
     def log_message(
         self,
         chat_id: str,
@@ -3455,98 +3594,18 @@ class UserStore:
         text: str,
         metadata: dict | None = None,
     ) -> int:
-        """Salva un messaggio nella cronologia condivisa. Ritorna l'id del record creato."""
+        """Salva un messaggio nella cronologia condivisa e ritorna l'identificatore."""
         with self.Session() as session:
-            msg = ChatMessage(
+            message = ChatMessage(
                 chat_id=str(chat_id),
                 source=source,
                 role=role,
                 text=text,
                 metadata_json=json.dumps(metadata, default=str) if metadata else None,
             )
-            session.add(msg)
+            session.add(message)
             session.commit()
-            return msg.id
-
-    def cleanup_old_chat_messages(self, days: int = 90) -> int:
-        """Rimuove i messaggi più vecchi di `days` giorni. Chiamata dal job APScheduler notturno."""
-        cutoff = datetime.utcnow() - timedelta(days=days)
-        with self.Session() as session:
-            deleted = session.query(ChatMessage).filter(
-                ChatMessage.created_at < cutoff
-            ).delete(synchronize_session=False)
-            session.commit()
-        if deleted:
-            logger.info("[Cleanup] Rimossi %d chat_messages più vecchi di %d giorni.", deleted, days)
-        return deleted
-
-    def cleanup_stale_category_candidates(self, days: int = 90) -> int:
-        """Rimuove i pattern di categorizzazione adattiva mai promossi né in attesa
-        di conferma, più vecchi di `days` giorni (chiamata dal job notturno di retention).
-
-        Non tocca i candidate `promoted` (audit trail delle categorie reali create)
-        né `awaiting_confirm` (decisione dell'utente ancora pendente) — solo i
-        `pending` stagnanti, che contengono testo libero (nome spesa) accumulato
-        senza mai portare a nulla.
-        """
-        from src.storage.models import CategoryCandidate
-
-        cutoff = datetime.utcnow() - timedelta(days=days)
-        with self.Session() as session:
-            deleted = session.query(CategoryCandidate).filter(
-                CategoryCandidate.status == "pending",
-                CategoryCandidate.last_seen_at < cutoff,
-            ).delete(synchronize_session=False)
-            session.commit()
-        if deleted:
-            logger.info("[Cleanup] Rimossi %d category_candidates stagnanti più vecchi di %d giorni.", deleted, days)
-        return deleted
-
-    def cleanup_stale_subscription_candidates(self, days: int = 120) -> int:
-        """Rimuove i pattern di abbonamento rilevati mai confermati né rifiutati,
-        più vecchi di `days` giorni (chiamata dal job notturno di retention).
-
-        Finestra più larga di `cleanup_stale_category_candidates` (120gg contro
-        90) perché le cadenze rilevate arrivano fino al trimestrale/annuale: un
-        candidate trimestrale ha `last_seen_at` naturalmente più distante nel
-        tempo, cancellarlo a 90gg lo farebbe sparire prima che l'utente veda
-        anche solo la seconda occorrenza. Non tocca `confirmed` (audit trail
-        degli abbonamenti reali creati) né `awaiting_confirm` (decisione
-        dell'utente ancora pendente) né `dismissed` (già una decisione finale,
-        ma serve a non riproporre lo stesso pattern — vedi
-        `src/subscription_detector.dismiss_candidate`).
-        """
-        from src.storage.models import SubscriptionCandidate
-
-        cutoff = datetime.utcnow() - timedelta(days=days)
-        with self.Session() as session:
-            deleted = session.query(SubscriptionCandidate).filter(
-                SubscriptionCandidate.status == "pending",
-                SubscriptionCandidate.last_seen_at < cutoff,
-            ).delete(synchronize_session=False)
-            session.commit()
-        if deleted:
-            logger.info(
-                "[Cleanup] Rimossi %d subscription_candidates stagnanti più vecchi di %d giorni.",
-                deleted, days,
-            )
-        return deleted
-
-    def cleanup_old_job_runs(self, days: int = 90) -> int:
-        """Rimuove le esecuzioni job più vecchie di `days` giorni.
-
-        La tabella `job_runs` cresce a ogni esecuzione: senza questa pulizia
-        (chiamata dal job notturno di retention) crescerebbe indefinitamente.
-        """
-        cutoff = datetime.utcnow() - timedelta(days=days)
-        with self.Session() as session:
-            deleted = session.query(JobRun).filter(
-                JobRun.finished_at < cutoff
-            ).delete(synchronize_session=False)
-            session.commit()
-        if deleted:
-            logger.info("[Cleanup] Rimosse %d job_runs più vecchie di %d giorni.", deleted, days)
-        return deleted
+            return message.id
 
     def record_job_run(
         self,

@@ -34,9 +34,13 @@
   width: auto;
 }
 
+/* Scritta reale in Sora invece dell'immagine del vecchio brandkit (vedi
+   .navLogoText in page.module.css sulla landing — stesso pattern). */
 .navLogoText {
-  height: 16px;
-  width: auto;
+  font-size: 17px;
+  font-weight: 300;
+  letter-spacing: 0.015em;
+  color: var(--color-text);
 }
 
 .backLink {
@@ -70,10 +74,10 @@
 
 .title {
   font-size: 1.75rem;
-  font-weight: 800;
+  font-weight: 300;
   color: var(--color-primary);
   margin: 0 0 0.5rem;
-  letter-spacing: -0.02em;
+  letter-spacing: -0.005em;
 }
 
 .subtitle {
@@ -102,7 +106,7 @@
 
 .placeholderTitle {
   font-size: 1rem;
-  font-weight: 700;
+  font-weight: 500;
   color: var(--color-primary);
   margin: 0 0 0.5rem;
 }
@@ -161,7 +165,7 @@
 
 .legalContent h2 {
   font-size: 1.1rem;
-  font-weight: 700;
+  font-weight: 500;
   color: var(--color-primary);
   margin: 0 0 0.75rem;
   padding-bottom: 0.4rem;
@@ -170,7 +174,7 @@
 
 .legalContent h3 {
   font-size: 0.95rem;
-  font-weight: 700;
+  font-weight: 500;
   color: var(--color-text);
   margin: 1.25rem 0 0.5rem;
 }

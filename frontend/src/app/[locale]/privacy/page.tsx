@@ -18,7 +18,7 @@ export async function generateMetadata({
   const { locale } = await params;
   const isEn = locale === "en";
   return {
-    title: isEn ? "Privacy Policy — Expensum" : "Privacy Policy — Expensum",
+    title: isEn ? "Privacy Policy | Expensum" : "Privacy Policy | Expensum",
     description: isEn
       ? "Expensum's notice on the processing of personal data under the GDPR."
       : "Informativa sul trattamento dei dati personali di Expensum ai sensi del GDPR.",
@@ -40,8 +40,8 @@ export default async function PrivacyPolicyPage({
       title="Privacy Policy"
       subtitle={
         isEn
-          ? "Notice on the processing of personal data under EU Regulation 2016/679 (GDPR) and Italian Legislative Decree 196/2003 as amended by Legislative Decree 101/2018. Last updated: July 27, 2026."
-          : "Informativa sul trattamento dei dati personali ai sensi del Regolamento UE 2016/679 (GDPR) e del D.Lgs. 196/2003 come modificato dal D.Lgs. 101/2018. Ultimo aggiornamento: 27 luglio 2026."
+          ? "Notice on the processing of personal data under EU Regulation 2016/679 (GDPR) and Italian Legislative Decree 196/2003 as amended by Legislative Decree 101/2018. Last updated: September 2, 2026."
+          : "Informativa sul trattamento dei dati personali ai sensi del Regolamento UE 2016/679 (GDPR) e del D.Lgs. 196/2003 come modificato dal D.Lgs. 101/2018. Ultimo aggiornamento: 2 settembre 2026."
       }
     >
       {isEn ? <PrivacyContentEn /> : <PrivacyContentIt />}

@@ -21,6 +21,7 @@ from sqlalchemy.orm import sessionmaker
 from src.user_store import Base, User
 from src.storage.models import (
     Account, UserCategory, Expense, Subscription, SavingsGoal, CategoryCandidate,
+    ExpenseLabelCluster, ExpenseLabelOverride,
 )
 from src.storage.postgres_storage import PostgresStorage
 
@@ -188,6 +189,46 @@ class TestDeleteWithReassignment:
         # I candidati seguono senza comparire nel conteggio: sono stato del matcher.
         assert db_session.query(CategoryCandidate).one().fallback_category_id == target
 
+    def test_reassigns_label_clusters_and_overrides(self, storage, db_session):
+        """Cluster e regole di correzione hanno una FK RESTRICT verso user_categories:
+        senza riassegnarli la cancellazione fallirebbe con ForeignKeyViolation."""
+        cat_id = _category(storage, "Ristoranti")
+        target = _category(storage, "Svago")
+        storage.create_expense(date(2026, 5, 1), 30.0, "Pizza", "Ristoranti", None)
+        db_session.add(ExpenseLabelOverride(
+            user_id="u1", category_id=cat_id, normalized_text="pizza",
+            cluster_id=db_session.query(ExpenseLabelCluster).one().id, source="split",
+        ))
+        db_session.commit()
+
+        storage.delete_category(cat_id, reassign_to=target)
+
+        assert db_session.query(ExpenseLabelCluster).one().category_id == target
+        assert db_session.query(ExpenseLabelOverride).one().category_id == target
+
+    def test_colliding_override_is_dropped_in_favour_of_destination(self, storage, db_session):
+        """Due regole sullo stesso testo non possono coesistere nella stessa categoria:
+        vince quella già presente nella destinazione."""
+        cat_id = _category(storage, "Ristoranti")
+        target = _category(storage, "Svago")
+        storage.create_expense(date(2026, 5, 1), 30.0, "Pizza", "Ristoranti", None)
+        storage.create_expense(date(2026, 5, 2), 20.0, "Pizza", "Svago", None)
+        clusters = {c.category_id: c.id for c in db_session.query(ExpenseLabelCluster).all()}
+        db_session.add(ExpenseLabelOverride(
+            user_id="u1", category_id=cat_id, normalized_text="pizza",
+            cluster_id=clusters[cat_id], source="split",
+        ))
+        db_session.add(ExpenseLabelOverride(
+            user_id="u1", category_id=target, normalized_text="pizza",
+            cluster_id=clusters[target], source="split",
+        ))
+        db_session.commit()
+
+        storage.delete_category(cat_id, reassign_to=target)
+
+        surviving = db_session.query(ExpenseLabelOverride).one()
+        assert surviving.cluster_id == clusters[target]
+
     def test_rejects_reassignment_to_itself(self, storage):
         cat_id = _category(storage, "Ristoranti")
         with pytest.raises(ValueError):
@@ -213,3 +254,39 @@ class TestDeleteWithReassignment:
         assert len(remaining) == 1
         expenses = storage.fetch_all_transactions(date(2026, 1, 1), date(2026, 12, 31))
         assert expenses[0]["category"] == remaining[0]
+
+
+class TestClusterStaysAlignedWithExpenses:
+    """Cancellare o rinominare una spesa deve riallineare il gruppo che la conteneva.
+
+    Senza, `variant_counts` e l'ancora restano fermi alla situazione precedente e il
+    grafico mostra un'etichetta che non corrisponde più a nessuna spesa dell'utente.
+    """
+
+    def test_delete_realigns_the_label_of_the_group(self, storage, db_session):
+        _category(storage, "Alimentari")
+        keep = storage.create_expense(date(2026, 5, 1), 5.0, "Coca", "Alimentari", None)
+        drop = [storage.create_expense(date(2026, 5, d), 5.0, "Coca Cola", "Alimentari", None)
+                for d in (2, 3)]
+        cluster = db_session.query(ExpenseLabelCluster).one()
+        assert cluster.anchor_text == "Coca Cola"  # la grafia più frequente
+
+        for expense in drop:
+            storage.delete_expense(expense["id"])
+
+        db_session.refresh(cluster)
+        assert cluster.variant_counts == {"Coca": 1}
+        assert cluster.anchor_text == "Coca"
+        assert keep["id"]
+
+    def test_rename_realigns_the_group_left_behind(self, storage, db_session):
+        _category(storage, "Alimentari")
+        storage.create_expense(date(2026, 5, 1), 5.0, "Coca", "Alimentari", None)
+        moved = storage.create_expense(date(2026, 5, 2), 5.0, "Coca Cola", "Alimentari", None)
+        source = db_session.query(ExpenseLabelCluster).one()
+
+        storage.update_expense(moved["id"], name="Biglietto del treno")
+
+        db_session.refresh(source)
+        assert source.variant_counts == {"Coca": 1}
+        assert source.anchor_text == "Coca"

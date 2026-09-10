@@ -51,7 +51,7 @@ def build_welcome_email(name: str, login_url: str, email: str, password: str) ->
     (<a href="{feedback_url}">{feedback_url}</a>) pensata apposta per segnalare
     bug o dirci cosa pensi dell'app: sei tra le prime persone a provarla, per una
     beta è oro.</p>
-    <p>A presto,<br>Michele — Expensum</p>
+    <p>A presto,<br>Michele, Expensum</p>
     <hr>
     <p style="text-align:center;">{social_icons_html}</p>
     <p style="font-size:12px;color:#888;text-align:center;">
@@ -73,7 +73,7 @@ def build_referral_reward_email(days_granted: int) -> tuple[str, str]:
     <p>grazie al referral, il tuo account Expensum è stato esteso di
     <strong>{days_granted} giorni</strong> di piano Pro.</p>
     <p><a href="{login_url}">Accedi</a> per continuare a usarlo.</p>
-    <p>A presto,<br>Michele — Expensum</p>
+    <p>A presto,<br>Michele, Expensum</p>
     """
     return subject, html
 
@@ -87,7 +87,7 @@ def build_lifetime_founder_unlocked_email() -> tuple[str, str]:
     ringraziamento, ti garantiamo un posto nell'offerta <strong>Lifetime Founder</strong>
     quando la apriremo, senza rischiare di restare fuori dai posti disponibili.</p>
     <p>Ti scriveremo appena l'offerta sarà attiva.</p>
-    <p>A presto,<br>Michele — Expensum</p>
+    <p>A presto,<br>Michele, Expensum</p>
     """
     return subject, html
 

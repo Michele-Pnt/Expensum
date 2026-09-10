@@ -14,7 +14,9 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from src.user_store import Base, User
-from src.storage.models import Account, UserCategory, Expense, Income, Subscription, SavedReport, Transfer
+from src.storage.models import (
+    Account, UserCategory, UserIncomeCategory, Expense, Income, Subscription, SavedReport, Transfer,
+)
 from src.storage.postgres_storage import PostgresStorage
 
 pytestmark = pytest.mark.integration
@@ -67,6 +69,30 @@ class TestGetCategoryNames:
 
         names = storage.get_category_names()
         assert set(names) == {"Cibo", "Trasporti"}
+
+
+class TestDeleteIncomeCategory:
+    def test_deletes_category_and_reassigns_linked_incomes_to_fallback(self, db_session, storage):
+        """La cancellazione replica il ciclo spese: storico salvo su Altra entrata."""
+        account = Account(user_id="test_user_1", name="Conto", opening_balance=0)
+        category = UserIncomeCategory(user_id="test_user_1", name="Bonus progetto")
+        fallback = UserIncomeCategory(user_id="test_user_1", name="Altra entrata")
+        db_session.add_all([account, category, fallback])
+        db_session.flush()
+        income = Income(
+            user_id="test_user_1", income_date=date(2026, 9, 1), amount=100,
+            name="Premio", account_id=account.id, income_type="Bonus progetto",
+            income_category_id=category.id,
+        )
+        db_session.add(income)
+        db_session.commit()
+
+        result = storage.delete_income_category(category.id)
+
+        assert result == {"incomes": 1}
+        assert db_session.get(UserIncomeCategory, category.id) is None
+        assert db_session.get(Income, income.id).income_category_id == fallback.id
+        assert db_session.get(Income, income.id).income_type == "Altra entrata"
 
     def test_does_not_return_other_users_categories(self, db_session, storage):
         db_session.add(User(chat_id="other_user", is_active=True))
@@ -206,6 +232,89 @@ class TestCategoryDescription:
 # ---------------------------------------------------------------------------
 
 class TestCreateIncome:
+    def test_income_category_id_uses_canonical_owned_category(self, db_session, storage):
+        """The structured ID wins over a stale client-side category name."""
+        db_session.add(Account(user_id="test_user_1", name="Conto", opening_balance=0))
+        db_session.commit()
+        account = db_session.query(Account).filter_by(user_id="test_user_1").one()
+        category = storage.create_income_category("Consulenza")
+
+        result = storage.create_income(
+            date(2026, 9, 1), 100, "Cliente", str(account.id),
+            income_category_id=category["id"], income_category_name="Nome obsoleto",
+        )
+
+        assert result["income_category_id"] == category["id"]
+        assert result["income_category"] == "Consulenza"
+        assert result["income_type"] == "Consulenza"
+
+    def test_income_category_id_rejects_another_tenant(self, db_session, storage):
+        """An income may never point at a category owned by another tenant."""
+        db_session.add_all([
+            Account(user_id="test_user_1", name="Conto", opening_balance=0),
+            UserIncomeCategory(user_id="test_user_2", name="Riservata"),
+        ])
+        db_session.commit()
+        account = db_session.query(Account).filter_by(user_id="test_user_1").one()
+        foreign = db_session.query(UserIncomeCategory).filter_by(user_id="test_user_2").one()
+
+        with pytest.raises(ValueError, match="Income category not found"):
+            storage.create_income(
+                date(2026, 9, 1), 100, "Cliente", str(account.id),
+                income_category_id=foreign.id,
+            )
+
+    def test_create_income_resolves_user_category_and_dual_writes_legacy(self, db_session, storage):
+        """A new income uses the category FK while keeping the legacy value readable."""
+        db_session.add(Account(user_id="test_user_1", name="Conto", opening_balance=0))
+        db_session.commit()
+        account = db_session.query(Account).filter_by(user_id="test_user_1").one()
+
+        result = storage.create_income(
+            date(2026, 9, 1), 1500, "Stipendio settembre", str(account.id),
+            income_category_name="Stipendio",
+        )
+
+        assert result["income_category"] == "Stipendio"
+        assert result["income_category_id"] is not None
+        assert result["income_type"] == "Stipendio"
+
+    def test_renaming_income_category_updates_legacy_income_type(self, db_session, storage):
+        """Rename keeps the legacy income_type consistent with the canonical FK."""
+        category = storage.create_income_category("Freelance")
+        account = Account(user_id="test_user_1", name="Conto", opening_balance=0)
+        db_session.add(account)
+        db_session.flush()
+        db_session.add(Income(
+            user_id="test_user_1", income_date=date(2026, 9, 1), amount=100,
+            name="Consulenza", account_id=account.id, income_type="Freelance",
+            income_category_id=category["id"],
+        ))
+        db_session.commit()
+
+        storage.update_income_category(category["id"], name="Consulenza")
+
+        assert db_session.query(Income).one().income_type == "Consulenza"
+
+    def test_income_category_description_can_be_cleared(self, storage):
+        """An empty description removes stale AI context instead of preserving it."""
+        category = storage.create_income_category(
+            "Progetti", description="Compensi progetto", description_summary="Compensi progetto",
+        )
+
+        updated = storage.update_income_category(
+            category["id"], description=None, description_summary=None,
+        )
+
+        assert updated is not None
+        assert updated["description"] is None
+        assert updated["description_summary"] is None
+
+    def test_income_category_creation_rejects_case_insensitive_duplicate(self, storage):
+        """Case variants must not make resolution choose an arbitrary category."""
+        storage.create_income_category("Freelance")
+        with pytest.raises(Exception):
+            storage.create_income_category("freelance")
     def test_returns_dict_with_expected_keys(self, db_session, storage):
         db_session.add(Account(user_id="test_user_1", name="Conto", opening_balance=500.0))
         db_session.commit()
@@ -224,7 +333,7 @@ class TestCreateIncome:
         assert result["date"] == date(2026, 4, 1)
         assert "id" in result
 
-    def test_income_type_nullable(self, db_session, storage):
+    def test_missing_income_type_dual_writes_fallback_category(self, db_session, storage):
         db_session.add(Account(user_id="test_user_1", name="Conto", opening_balance=500.0))
         db_session.commit()
         acc = db_session.query(Account).filter_by(user_id="test_user_1").first()
@@ -235,7 +344,8 @@ class TestCreateIncome:
             name="Rimborso generico",
             account_id=str(acc.id),
         )
-        assert result["income_type"] is None
+        assert result["income_type"] == "Altra entrata"
+        assert result["income_category"] == "Altra entrata"
 
     def test_persists_income_type_to_db(self, db_session, storage):
         db_session.add(Account(user_id="test_user_1", name="Conto", opening_balance=500.0))
@@ -251,7 +361,8 @@ class TestCreateIncome:
         )
         row = db_session.query(Income).filter_by(user_id="test_user_1", name="Bonus").first()
         assert row is not None
-        assert row.income_type == "Bonus"
+        assert row.income_type == "Bonus lavorativo"
+        assert row.income_category_id is not None
 
 
 # ---------------------------------------------------------------------------
@@ -532,6 +643,111 @@ class TestFetchTransfers:
         db_session.commit()
 
         assert storage.fetch_transfers(date(2026, 4, 1), date(2026, 4, 30)) == []
+
+
+class TestUpdateTransfer:
+    def test_updates_amount_and_rebalances_both_accounts(self, db_session, storage):
+        db_session.add(Account(user_id="test_user_1", name="Corrente", opening_balance=1000.0))
+        db_session.add(Account(user_id="test_user_1", name="Risparmio", opening_balance=200.0))
+        db_session.commit()
+        corrente = db_session.query(Account).filter_by(name="Corrente").first()
+        risparmio = db_session.query(Account).filter_by(name="Risparmio").first()
+        created = storage.create_transfer(
+            transfer_date=date(2026, 4, 1), amount=300.0,
+            from_account_id=corrente.id, to_account_id=risparmio.id, name="Giroconto",
+        )
+
+        result = storage.update_transfer(created["id"], amount=500.0)
+
+        assert result["amount"] == 500.0
+        accounts = {a["name"]: a["current_balance"] for a in storage.fetch_accounts()}
+        assert accounts["Corrente"] == 1000.0 - 500.0
+        assert accounts["Risparmio"] == 200.0 + 500.0
+
+    def test_swapping_accounts_updates_balances(self, db_session, storage):
+        db_session.add(Account(user_id="test_user_1", name="A", opening_balance=0.0))
+        db_session.add(Account(user_id="test_user_1", name="B", opening_balance=0.0))
+        db_session.add(Account(user_id="test_user_1", name="C", opening_balance=0.0))
+        db_session.commit()
+        a = db_session.query(Account).filter_by(name="A").first()
+        b = db_session.query(Account).filter_by(name="B").first()
+        c = db_session.query(Account).filter_by(name="C").first()
+        created = storage.create_transfer(date(2026, 4, 1), 100.0, a.id, b.id)
+
+        storage.update_transfer(created["id"], to_account_id=c.id)
+
+        accounts = {acc["name"]: acc["current_balance"] for acc in storage.fetch_accounts()}
+        assert accounts["A"] == -100.0
+        assert accounts["B"] == 0.0
+        assert accounts["C"] == 100.0
+
+    def test_rejects_same_from_and_to_account(self, db_session, storage):
+        db_session.add(Account(user_id="test_user_1", name="A", opening_balance=0.0))
+        db_session.add(Account(user_id="test_user_1", name="B", opening_balance=0.0))
+        db_session.commit()
+        a = db_session.query(Account).filter_by(name="A").first()
+        b = db_session.query(Account).filter_by(name="B").first()
+        created = storage.create_transfer(date(2026, 4, 1), 100.0, a.id, b.id)
+
+        with pytest.raises(ValueError):
+            storage.update_transfer(created["id"], to_account_id=a.id)
+
+    def test_returns_none_for_missing_transfer(self, storage):
+        assert storage.update_transfer(999999, amount=10.0) is None
+
+    def test_does_not_update_other_users_transfer(self, db_session, storage):
+        db_session.add(User(chat_id="other_user6", is_active=True))
+        db_session.add(Account(user_id="other_user6", name="Alieno1", opening_balance=0.0))
+        db_session.add(Account(user_id="other_user6", name="Alieno2", opening_balance=0.0))
+        db_session.commit()
+        a = db_session.query(Account).filter_by(name="Alieno1").first()
+        b = db_session.query(Account).filter_by(name="Alieno2").first()
+        other_transfer = Transfer(
+            user_id="other_user6", from_account_id=a.id, to_account_id=b.id,
+            amount=10.0, transfer_date=date(2026, 4, 1),
+        )
+        db_session.add(other_transfer)
+        db_session.commit()
+
+        assert storage.update_transfer(other_transfer.id, amount=999.0) is None
+
+
+class TestDeleteTransfer:
+    def test_deletes_transfer_and_restores_balances(self, db_session, storage):
+        db_session.add(Account(user_id="test_user_1", name="Corrente", opening_balance=1000.0))
+        db_session.add(Account(user_id="test_user_1", name="Risparmio", opening_balance=200.0))
+        db_session.commit()
+        corrente = db_session.query(Account).filter_by(name="Corrente").first()
+        risparmio = db_session.query(Account).filter_by(name="Risparmio").first()
+        created = storage.create_transfer(
+            transfer_date=date(2026, 4, 1), amount=300.0,
+            from_account_id=corrente.id, to_account_id=risparmio.id,
+        )
+
+        assert storage.delete_transfer(created["id"]) is True
+
+        accounts = {a["name"]: a["current_balance"] for a in storage.fetch_accounts()}
+        assert accounts["Corrente"] == 1000.0
+        assert accounts["Risparmio"] == 200.0
+
+    def test_returns_false_for_missing_transfer(self, storage):
+        assert storage.delete_transfer(999999) is False
+
+    def test_does_not_delete_other_users_transfer(self, db_session, storage):
+        db_session.add(User(chat_id="other_user7", is_active=True))
+        db_session.add(Account(user_id="other_user7", name="Alieno1", opening_balance=0.0))
+        db_session.add(Account(user_id="other_user7", name="Alieno2", opening_balance=0.0))
+        db_session.commit()
+        a = db_session.query(Account).filter_by(name="Alieno1").first()
+        b = db_session.query(Account).filter_by(name="Alieno2").first()
+        other_transfer = Transfer(
+            user_id="other_user7", from_account_id=a.id, to_account_id=b.id,
+            amount=10.0, transfer_date=date(2026, 4, 1),
+        )
+        db_session.add(other_transfer)
+        db_session.commit()
+
+        assert storage.delete_transfer(other_transfer.id) is False
 
 
 # ---------------------------------------------------------------------------

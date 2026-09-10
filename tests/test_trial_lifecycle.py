@@ -55,8 +55,14 @@ def test_build_drip_message_substitutes_placeholders():
 
 
 def test_build_drip_message_missing_placeholder_logs_warning_and_returns_template(caplog):
-    with caplog.at_level(logging.WARNING):
-        text = trial_lifecycle.build_drip_message("d7", "telegram", {})
+    lifecycle_logger = trial_lifecycle.logger
+    was_disabled = lifecycle_logger.disabled
+    lifecycle_logger.disabled = False
+    try:
+        with caplog.at_level(logging.WARNING, logger=lifecycle_logger.name):
+            text = trial_lifecycle.build_drip_message("d7", "telegram", {})
+    finally:
+        lifecycle_logger.disabled = was_disabled
 
     assert "{expense_count}" in text
     assert any(r.message == "Placeholder mancante nel template drip" for r in caplog.records)

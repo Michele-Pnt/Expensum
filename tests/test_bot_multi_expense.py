@@ -145,6 +145,68 @@ def test_awaiting_confirmation_sends_extra_promotion_message(monkeypatch):
     assert callback_data == ["catpromote_yes:42", "catpromote_no:42"]
 
 
+def test_parse_failure_enriches_reason_with_last_error_status_code(monkeypatch):
+    """Quando il parser fallisce del tutto, `reason` deve incorporare lo status
+    code dell'ultimo errore Mistral (src/expense_parser.py::last_error_status_code)
+    per distinguere rate-limit/5xx da altri fallimenti nella dashboard admin."""
+    import bot
+
+    fake_parser = MagicMock()
+    fake_parser.parse_multi_with_usage.return_value = ([], {})
+    fake_parser.last_error_status_code = 503
+    monkeypatch.setattr(bot, "_get_parser", lambda chat_id: fake_parser)
+    monkeypatch.setattr(bot._user_store, "reserve_llm_tokens", lambda **k: None)
+    monkeypatch.setattr(bot._user_store, "increment_ai_metrics", lambda **k: None)
+    monkeypatch.setattr(bot.analytics, "track", lambda *a, **k: None)
+    monkeypatch.setattr(bot._user_store, "Session", lambda: MagicMock())
+    monkeypatch.setattr(bot._user_store, "get_user_preferences", lambda chat_id: {})
+    record_mock = MagicMock()
+    monkeypatch.setattr(bot._user_store, "record_tx_event", record_mock)
+
+    context = MagicMock()
+    context.user_data = {}
+    update = MagicMock()
+    update.effective_message.message_id = 1
+    update.message.reply_text = AsyncMock()
+
+    asyncio.run(bot._process_expense_text(update, context, "boh", "111"))
+
+    record_mock.assert_called_once_with(
+        "111", "unknown", "text", "failed", "telegram", reason="ai_unavailable_503",
+    )
+
+
+def test_parse_failure_without_status_code_falls_back_to_plain_reason(monkeypatch):
+    """Controprova: se il parser non ha catturato uno status code (es. errore di
+    rete generico), il reason resta il vecchio 'ai_unavailable' — nessuna
+    regressione per i chiamanti/dashboard che già lo filtrano così."""
+    import bot
+
+    fake_parser = MagicMock()
+    fake_parser.parse_multi_with_usage.return_value = ([], {})
+    fake_parser.last_error_status_code = None
+    monkeypatch.setattr(bot, "_get_parser", lambda chat_id: fake_parser)
+    monkeypatch.setattr(bot._user_store, "reserve_llm_tokens", lambda **k: None)
+    monkeypatch.setattr(bot._user_store, "increment_ai_metrics", lambda **k: None)
+    monkeypatch.setattr(bot.analytics, "track", lambda *a, **k: None)
+    monkeypatch.setattr(bot._user_store, "Session", lambda: MagicMock())
+    monkeypatch.setattr(bot._user_store, "get_user_preferences", lambda chat_id: {})
+    record_mock = MagicMock()
+    monkeypatch.setattr(bot._user_store, "record_tx_event", record_mock)
+
+    context = MagicMock()
+    context.user_data = {}
+    update = MagicMock()
+    update.effective_message.message_id = 1
+    update.message.reply_text = AsyncMock()
+
+    asyncio.run(bot._process_expense_text(update, context, "boh", "111"))
+
+    record_mock.assert_called_once_with(
+        "111", "unknown", "text", "failed", "telegram", reason="ai_unavailable",
+    )
+
+
 def test_catpromote_yes_calls_confirm_promotion(monkeypatch):
     """Il bottone Sì richiama category_matcher.confirm_promotion col candidate_id giusto."""
     import bot
@@ -236,10 +298,6 @@ def test_mconfirm_then_maccount_saves_only_that_transaction(monkeypatch):
     monkeypatch.setattr(bot._user_store, "log_message", lambda *a, **k: None)
     monkeypatch.setattr(bot._user_store, "increment_ai_metrics", lambda *a, **k: None)
     monkeypatch.setattr(bot.analytics, "track", lambda *a, **k: None)
-
-    async def _fake_refresh(*a, **k):
-        return None
-    monkeypatch.setattr(bot, "_refresh_pinned_dashboard", _fake_refresh)
 
     query, update, context = _make_query_update_context("111", "mconfirm:1", pending_expenses=pending_expenses)
     asyncio.run(bot.handle_callback(update, context))

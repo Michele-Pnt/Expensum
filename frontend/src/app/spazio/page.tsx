@@ -2,15 +2,32 @@
 
 import { useEffect, useState, useCallback, useMemo } from "react";
 import {
-  Box, Card, CardContent, Tab, Tabs, Typography, Table, TableBody,
-  TableCell, TableContainer, TableHead, TableRow, TablePagination,
+  Box, Card, CardContent, Tab, Tabs, Typography, TablePagination,
   IconButton, Button, Dialog, DialogTitle, DialogContent, DialogActions,
-  TextField, Select, MenuItem, FormControl, InputLabel, Chip, Menu,
-  CircularProgress, Snackbar, Alert, Tooltip, TableSortLabel,
+  TextField, Select, MenuItem, FormControl, InputLabel, Chip, Menu, Divider,
+  CircularProgress, Alert, Tooltip, ToggleButton, ToggleButtonGroup,
+  useMediaQuery, useTheme,
 } from "@mui/material";
-import { Plus, Pencil, Trash2, Check, X } from "lucide-react";
-import { getCsrfToken } from "@/lib/csrf";
+import {
+  Plus, Pencil, Trash2, Check, X, CalendarDays,
+  Landmark, Tag, CreditCard, ArrowDownCircle, ArrowUpCircle, ArrowLeftRight,
+} from "lucide-react";
+import { apiFetch, apiErrorMessage } from "@/lib/api";
 import { formatDateIt } from "@/lib/date";
+import {
+  buildMonthlyBudgetGuidance,
+  validateGeneralMonthlyBudget,
+} from "./budgetViewModels";
+import {
+  activeIncomeCategories,
+  incomeCategoryLabel,
+  type IncomeCategoryDto,
+} from "./incomeCategoryViewModels";
+import ResponsiveDataTable, { type Column } from "./components/ResponsiveDataTable";
+import SwipeCalendar from "@/components/SwipeCalendar";
+import InfoButton from "@/components/InfoButton";
+import { useSnackbar } from "@/components/feedback/useSnackbar";
+import AppSnackbar from "@/components/feedback/AppSnackbar";
 
 // ---------------------------------------------------------------------------
 // Tipi
@@ -33,30 +50,38 @@ interface Expense {
 }
 interface Income {
   id: number; date: string; name: string; amount: number;
-  income_type: string; account: string; account_id: number | null;
+  income_type: string; income_category?: string | null; income_category_id?: number | null;
+  account: string; account_id: number | null;
 }
 interface Transfer {
   id: number; date: string; name: string; amount: number;
   from_account_id: number; to_account_id: number;
 }
+interface UserPreferencesResponse { monthly_budget: number | string | null }
 
 type DialogMode = "add" | "edit";
-type EntityType = "account" | "category" | "subscription" | "expense" | "income" | "transfer";
+type EntityType = "account" | "category" | "incomeCategory" | "subscription" | "expense" | "income" | "transfer";
 
 // ---------------------------------------------------------------------------
 // Colori / costanti
 // ---------------------------------------------------------------------------
 
-const PRIMARY = "#1A3673";
-const ACCENT = "#C5A059";
-const BORDER = "#E5E2DC";
-
-const CELL_SX = { fontSize: "0.8rem", py: 1 };
-const HEAD_SX = { fontSize: "0.75rem", fontWeight: 700, color: "#6B7280", py: 1 };
+const PRIMARY = "#5FC4CB";
+// Rosso del tema (theme.palette.error.main), non un rosso ad-hoc: contrasto già
+// verificato contro lo sfondo #1C363D, coerente col resto dell'app.
+const ACCENT = "#DC2626";
+// Verde del tema (theme.palette.success.main): cifre delle entrate, per distinguerle
+// a colpo d'occhio dalle spese (rosse) e dal budget (azzurrino).
+const INCOME_COLOR = "#16A34A";
+const BORDER = "rgba(176,181,185,0.25)";
+// theme.palette.text.secondary: unico grigio per testo secondario/placeholder,
+// non più due varianti (#9CA3AF/#B0B5B9) senza motivo di contrasto.
+const MUTED = "#B0B5B9";
 
 const ENTITY_PATH: Record<EntityType, string> = {
   account: "accounts",
   category: "categories",
+  incomeCategory: "income-categories",
   subscription: "subscriptions",
   expense: "expenses",
   income: "incomes",
@@ -65,32 +90,33 @@ const ENTITY_PATH: Record<EntityType, string> = {
 
 const ACCOUNT_TYPES = ["Conto corrente", "Carta di credito", "Risparmio", "Contanti", "Investimento"];
 const SUB_TYPES = ["Settimanale", "Mensile", "Bimestrale", "Trimestrale", "Semestrale", "Annuale"];
-const INCOME_TYPES = ["stipendio", "freelance", "investimento", "regalo", "rimborso", "altro"];
+
+// Su mobile la tab bar diventa una griglia di sole icone (senza etichette visibili,
+// solo aria-label) per evitare lo scroll orizzontale con 6 sezioni. Stesso ordine dei <Tab>.
+const SPAZIO_TAB_ICONS = [
+  { label: "Conti", Icon: Landmark },
+  { label: "Categorie", Icon: Tag },
+  { label: "Abbonamenti", Icon: CreditCard },
+  { label: "Spese", Icon: ArrowUpCircle },
+  { label: "Entrate", Icon: ArrowDownCircle },
+  { label: "Trasferimenti", Icon: ArrowLeftRight },
+];
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
-function getTelegramInitData(): string {
-  if (typeof window === "undefined") return "";
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  return (window as any).Telegram?.WebApp?.initData ?? "";
-}
-
-async function buildHeaders(): Promise<HeadersInit> {
-  const init = getTelegramInitData();
-  const csrfToken = await getCsrfToken();
-  const headers: Record<string, string> = {
-    "Content-Type": "application/json",
-    "X-CSRFToken": csrfToken,
-  };
-  if (init) headers["X-Telegram-Init-Data"] = init;
-  return headers;
-}
-
 function fmtCurrency(n: number | null | undefined): string {
   if (n == null) return "—";
   return n.toLocaleString("it-IT", { style: "currency", currency: "EUR" });
+}
+
+/** Come fmtCurrency ma con segno esplicito anche per i positivi: il colore da solo
+ * (verde/rosso) non basta a comunicare la direzione a chi non lo percepisce. */
+function fmtSignedCurrency(n: number | null | undefined): string {
+  if (n == null) return "—";
+  const formatted = fmtCurrency(Math.abs(n));
+  return n >= 0 ? `+${formatted}` : `−${formatted}`;
 }
 
 function todayIso(): string {
@@ -102,12 +128,58 @@ function monthStartIso(): string {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-01`;
 }
 
+function toIso(d: Date): string {
+  return d.toISOString().slice(0, 10);
+}
+
+function daysAgoIso(days: number): string {
+  const d = new Date();
+  d.setDate(d.getDate() - days);
+  return toIso(d);
+}
+
+function prevMonthStartIso(): string {
+  const d = new Date();
+  return toIso(new Date(d.getFullYear(), d.getMonth() - 1, 1));
+}
+
+function prevMonthEndIso(): string {
+  const d = new Date();
+  return toIso(new Date(d.getFullYear(), d.getMonth(), 0));
+}
+
+function yearStartIso(): string {
+  return `${new Date().getFullYear()}-01-01`;
+}
+
+const DATE_RANGE_PRESETS = [
+  { label: "Questo mese", start: monthStartIso, end: todayIso },
+  { label: "Mese scorso", start: prevMonthStartIso, end: prevMonthEndIso },
+  { label: "Ultimi 7 giorni", start: () => daysAgoIso(7), end: todayIso },
+  { label: "Ultimi 30 giorni", start: () => daysAgoIso(30), end: todayIso },
+  { label: "Anno in corso", start: yearStartIso, end: todayIso },
+];
+
 // ---------------------------------------------------------------------------
 // Componente principale
 // ---------------------------------------------------------------------------
 
 export default function SpazioPage() {
+  const theme = useTheme();
+  const isMobile = useMediaQuery(theme.breakpoints.down("sm"));
   const [tab, setTab] = useState(0);
+  const [categoryKind, setCategoryKind] = useState<"expense" | "income">("expense");
+
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    if (params.get("tab") === "transfers") {
+      setTab(5);
+    } else if (params.get("tab") === "expenses") {
+      setTab(3);
+      const search = params.get("search");
+      if (search) setExpSearch(search);
+    }
+  }, []);
 
   // Dati
   const [accounts, setAccounts] = useState<Account[]>([]);
@@ -115,6 +187,7 @@ export default function SpazioPage() {
   const [subscriptions, setSubscriptions] = useState<Subscription[]>([]);
   const [expenses, setExpenses] = useState<Expense[]>([]);
   const [incomes, setIncomes] = useState<Income[]>([]);
+  const [incomeCategories, setIncomeCategories] = useState<IncomeCategoryDto[]>([]);
   const [transfers, setTransfers] = useState<Transfer[]>([]);
 
   // Paginazione spese/entrate
@@ -140,7 +213,7 @@ export default function SpazioPage() {
 
   // Entrate: filtri extra + sort (server-side)
   const [incSearch, setIncSearch] = useState("");
-  const [incType, setIncType] = useState("");
+  const [incCategoryId, setIncCategoryId] = useState("");
   const [incAccId, setIncAccId] = useState("");
   const [incSortBy, setIncSortBy] = useState("date");
   const [incSortDir, setIncSortDir] = useState<"asc" | "desc">("desc");
@@ -173,9 +246,7 @@ export default function SpazioPage() {
   }>({ open: false, mode: "add", entity: "account", data: {} });
 
   // Snackbar
-  const [snack, setSnack] = useState<{ open: boolean; msg: string; severity: "success" | "error" }>({
-    open: false, msg: "", severity: "success",
-  });
+  const { snack, showSuccess, showError, close: closeSnack } = useSnackbar();
 
   // Menu di modifica rapida categoria (click sul chip in tabella spese)
   const [catMenu, setCatMenu] = useState<{ anchorEl: HTMLElement; expenseId: number } | null>(null);
@@ -184,12 +255,15 @@ export default function SpazioPage() {
   const [suggestions, setSuggestions] = useState<Record<string, number>>({});
   const [dismissed, setDismissed] = useState<Set<string>>(new Set());
   const [loadingSuggestions, setLoadingSuggestions] = useState(false);
+  const [generalBudgetInput, setGeneralBudgetInput] = useState("");
+  const [savingGeneralBudget, setSavingGeneralBudget] = useState(false);
 
   // Banner setup post-onboarding
   const [setupBannerDismissed, setSetupBannerDismissed] = useState(false);
   const missingAccounts = !loading.accounts && accounts.length === 0;
   const missingBudgets = !loading.categories && categories.length > 0 && categories.every(c => c.monthly_budget == null);
   const showSetupBanner = !setupBannerDismissed && (missingAccounts || missingBudgets);
+  const monthlyBudgetGuidance = useMemo(() => buildMonthlyBudgetGuidance(categories), [categories]);
 
   // ---------------------------------------------------------------------------
   // Fetch
@@ -198,9 +272,10 @@ export default function SpazioPage() {
   const fetchAccounts = useCallback(async () => {
     setLoading(l => ({ ...l, accounts: true }));
     try {
-      const res = await fetch("/api/space/accounts", { headers: await buildHeaders() });
-      const json = await res.json();
+      const json = await apiFetch<{ accounts: Account[] }>("/api/space/accounts");
       setAccounts(json.accounts ?? []);
+    } catch {
+      // Elenco best-effort: nessun errore mostrato all'utente se la chiamata fallisce.
     } finally {
       setLoading(l => ({ ...l, accounts: false }));
     }
@@ -209,9 +284,10 @@ export default function SpazioPage() {
   const fetchCategories = useCallback(async () => {
     setLoading(l => ({ ...l, categories: true }));
     try {
-      const res = await fetch("/api/space/categories", { headers: await buildHeaders() });
-      const json = await res.json();
+      const json = await apiFetch<{ categories: Category[] }>("/api/space/categories");
       setCategories(json.categories ?? []);
+    } catch {
+      // Elenco best-effort: nessun errore mostrato all'utente se la chiamata fallisce.
     } finally {
       setLoading(l => ({ ...l, categories: false }));
     }
@@ -220,24 +296,50 @@ export default function SpazioPage() {
   const fetchSuggestions = useCallback(async () => {
     setLoadingSuggestions(true);
     try {
-      const res = await fetch("/api/space/categories/suggestions", { headers: await buildHeaders() });
-      if (res.ok) {
-        const json = await res.json();
-        setSuggestions(json.suggestions ?? {});
-      }
+      const json = await apiFetch<{ suggestions: Record<string, number> }>("/api/space/categories/suggestions");
+      setSuggestions(json.suggestions ?? {});
+    } catch {
+      // Suggerimenti best-effort: nessun errore mostrato all'utente se la chiamata fallisce.
     } finally {
       setLoadingSuggestions(false);
+    }
+  }, []);
+
+  const fetchPreferences = useCallback(async () => {
+    setLoading(l => ({ ...l, preferences: true }));
+    try {
+      const json = await apiFetch<UserPreferencesResponse>("/api/user/preferences");
+      const parsedBudget = json.monthly_budget == null ? null : Number(json.monthly_budget);
+      const monthlyBudget = parsedBudget == null || Number.isFinite(parsedBudget) ? parsedBudget : null;
+      setGeneralBudgetInput(monthlyBudget == null ? "" : String(monthlyBudget));
+    } catch {
+      // Preferenze best-effort: nessun errore mostrato all'utente se la chiamata fallisce.
+    } finally {
+      setLoading(l => ({ ...l, preferences: false }));
     }
   }, []);
 
   const fetchSubscriptions = useCallback(async () => {
     setLoading(l => ({ ...l, subscriptions: true }));
     try {
-      const res = await fetch("/api/space/subscriptions", { headers: await buildHeaders() });
-      const json = await res.json();
+      const json = await apiFetch<{ subscriptions: Subscription[] }>("/api/space/subscriptions");
       setSubscriptions(json.subscriptions ?? []);
+    } catch {
+      // Elenco best-effort: nessun errore mostrato all'utente se la chiamata fallisce.
     } finally {
       setLoading(l => ({ ...l, subscriptions: false }));
+    }
+  }, []);
+
+  const fetchIncomeCategories = useCallback(async () => {
+    setLoading(l => ({ ...l, incomeCategories: true }));
+    try {
+      const json = await apiFetch<{ income_categories: IncomeCategoryDto[] }>("/api/income-categories");
+      setIncomeCategories(json.income_categories ?? []);
+    } catch {
+      // Categorie entrate best-effort: nessun errore mostrato all'utente se la chiamata fallisce.
+    } finally {
+      setLoading(l => ({ ...l, incomeCategories: false }));
     }
   }, []);
 
@@ -248,16 +350,17 @@ export default function SpazioPage() {
   ) => {
     setLoading(l => ({ ...l, expenses: true }));
     try {
-      const params = new URLSearchParams({ limit: String(rpp), offset: String(page * rpp), start, end });
-      if (search) params.set("search", search);
-      if (catId) params.set("category_id", catId);
-      if (accId) params.set("account_id", accId);
-      params.set("sort_by", sortBy);
-      params.set("sort_dir", sortDir);
-      const res = await fetch(`/api/space/expenses?${params}`, { headers: await buildHeaders() });
-      const json = await res.json();
+      const params: Record<string, string> = { limit: String(rpp), offset: String(page * rpp), start, end };
+      if (search) params.search = search;
+      if (catId) params.category_id = catId;
+      if (accId) params.account_id = accId;
+      params.sort_by = sortBy;
+      params.sort_dir = sortDir;
+      const json = await apiFetch<{ expenses: Expense[]; total: number }>("/api/space/expenses", { params });
       setExpenses(json.expenses ?? []);
       setExpTotal(json.total ?? 0);
+    } catch {
+      // Elenco best-effort: nessun errore mostrato all'utente se la chiamata fallisce.
     } finally {
       setLoading(l => ({ ...l, expenses: false }));
     }
@@ -265,40 +368,41 @@ export default function SpazioPage() {
 
   const fetchIncomes = useCallback(async (
     page = incPage, rpp = incRowsPP, start = incStart, end = incEnd,
-    search = incSearch, type = incType, accId = incAccId,
+    search = incSearch, categoryId = incCategoryId, accId = incAccId,
     sortBy = incSortBy, sortDir = incSortDir,
   ) => {
     setLoading(l => ({ ...l, incomes: true }));
     try {
-      const params = new URLSearchParams({ limit: String(rpp), offset: String(page * rpp), start, end });
-      if (search) params.set("search", search);
-      if (type) params.set("income_type", type);
-      if (accId) params.set("account_id", accId);
-      params.set("sort_by", sortBy);
-      params.set("sort_dir", sortDir);
-      const res = await fetch(`/api/space/incomes?${params}`, { headers: await buildHeaders() });
-      const json = await res.json();
+      const params: Record<string, string> = { limit: String(rpp), offset: String(page * rpp), start, end };
+      if (search) params.search = search;
+      if (categoryId) params.income_category_id = categoryId;
+      if (accId) params.account_id = accId;
+      params.sort_by = sortBy;
+      params.sort_dir = sortDir;
+      const json = await apiFetch<{ incomes: Income[]; total: number }>("/api/space/incomes", { params });
       setIncomes(json.incomes ?? []);
       setIncTotal(json.total ?? 0);
+    } catch {
+      // Elenco best-effort: nessun errore mostrato all'utente se la chiamata fallisce.
     } finally {
       setLoading(l => ({ ...l, incomes: false }));
     }
-  }, [incPage, incRowsPP, incStart, incEnd, incSearch, incType, incAccId, incSortBy, incSortDir]);
+  }, [incPage, incRowsPP, incStart, incEnd, incSearch, incCategoryId, incAccId, incSortBy, incSortDir]);
 
   const fetchTransfers = useCallback(async (start = transStart, end = transEnd) => {
     setLoading(l => ({ ...l, transfers: true }));
     try {
-      const params = new URLSearchParams({ start, end });
-      const res = await fetch(`/api/space/transfers?${params}`, { headers: await buildHeaders() });
-      const json = await res.json();
+      const json = await apiFetch<{ transfers: Transfer[] }>("/api/space/transfers", { params: { start, end } });
       setTransfers(json.transfers ?? []);
+    } catch {
+      // Elenco best-effort: nessun errore mostrato all'utente se la chiamata fallisce.
     } finally {
       setLoading(l => ({ ...l, transfers: false }));
     }
   }, [transStart, transEnd]);
 
   // Carica tutto al mount e poi su cambio tab
-  useEffect(() => { fetchAccounts(); fetchCategories(); fetchSubscriptions(); fetchSuggestions(); }, [fetchAccounts, fetchCategories, fetchSubscriptions, fetchSuggestions]);
+  useEffect(() => { fetchAccounts(); fetchCategories(); fetchSubscriptions(); fetchIncomeCategories(); fetchSuggestions(); fetchPreferences(); }, [fetchAccounts, fetchCategories, fetchSubscriptions, fetchIncomeCategories, fetchSuggestions, fetchPreferences]);
   useEffect(() => { if (tab === 1) fetchSuggestions(); }, [tab, fetchSuggestions]);
   useEffect(() => { if (tab === 3) fetchExpenses(); }, [tab, fetchExpenses]);
   useEffect(() => { if (tab === 4) fetchIncomes(); }, [tab, fetchIncomes]);
@@ -314,7 +418,8 @@ export default function SpazioPage() {
       category: { name: "", monthly_budget: "", description: "" },
       subscription: { name: "", amount: "", sub_type: "", last_billed: "", account_id: "", category_id: "" },
       expense: { name: "", amount: "", date: todayIso(), category: "", category_id: "", account_id: "" },
-      income: { name: "", amount: "", date: todayIso(), income_type: "", account_id: "" },
+      incomeCategory: { name: "", description: "" },
+      income: { name: "", amount: "", date: todayIso(), income_category_id: "", income_category: "", account_id: "" },
       transfer: { name: "", amount: "", date: todayIso(), from_account_id: "", to_account_id: "" },
     };
     setDialog({ open: true, mode: "add", entity, data: defaults[entity] });
@@ -337,7 +442,10 @@ export default function SpazioPage() {
   async function handleSave() {
     const { mode, entity, data } = dialog;
     const path = ENTITY_PATH[entity];
-    const url = mode === "add" ? `/api/space/${path}` : `/api/space/${path}/${data.id}`;
+    const collectionUrl = entity === "incomeCategory"
+      ? "/api/income-categories"
+      : `/api/space/${path}`;
+    const url = mode === "add" ? collectionUrl : `${collectionUrl}/${data.id}`;
     const method = mode === "add" ? "POST" : "PUT";
 
     // Per le spese, risolvi category_id → nome categoria per la POST
@@ -348,21 +456,34 @@ export default function SpazioPage() {
     }
 
     try {
-      const res = await fetch(url, {
-        method,
-        headers: await buildHeaders(),
-        body: JSON.stringify(bodyData),
-      });
-      if (!res.ok) {
-        const err = await res.json().catch(() => ({}));
-        throw new Error(err.error || "Errore sconosciuto");
-      }
+      await apiFetch(url, { method, body: bodyData });
       closeDialog();
-      setSnack({ open: true, msg: mode === "add" ? "Aggiunto con successo" : "Aggiornato con successo", severity: "success" });
+      showSuccess(mode === "add" ? "Aggiunto con successo" : "Aggiornato con successo");
       refreshEntity(entity);
     } catch (e: unknown) {
-      const msg = e instanceof Error ? e.message : "Errore";
-      setSnack({ open: true, msg, severity: "error" });
+      showError(apiErrorMessage(e, "Errore sconosciuto"));
+    }
+  }
+
+  async function saveGeneralMonthlyBudget() {
+    const validation = validateGeneralMonthlyBudget(
+      generalBudgetInput,
+      monthlyBudgetGuidance.categoryBudgetTotal,
+    );
+    if (!validation.ok) {
+      showError(validation.error);
+      return;
+    }
+
+    setSavingGeneralBudget(true);
+    try {
+      await apiFetch("/api/user/preferences", { method: "PUT", body: { monthly_budget: validation.value } });
+      setGeneralBudgetInput(validation.value == null ? "" : String(validation.value));
+      showSuccess("Budget mensile generale aggiornato");
+    } catch (e: unknown) {
+      showError(apiErrorMessage(e, "Errore sconosciuto"));
+    } finally {
+      setSavingGeneralBudget(false);
     }
   }
 
@@ -373,22 +494,13 @@ export default function SpazioPage() {
   async function quickUpdateCategory(expenseId: number, category: Category) {
     setCatMenu(null);
     try {
-      const res = await fetch(`/api/space/expenses/${expenseId}`, {
-        method: "PUT",
-        headers: await buildHeaders(),
-        body: JSON.stringify({ category_id: category.id }),
-      });
-      if (!res.ok) {
-        const err = await res.json().catch(() => ({}));
-        throw new Error(err.error || "Errore sconosciuto");
-      }
+      await apiFetch(`/api/space/expenses/${expenseId}`, { method: "PUT", body: { category_id: category.id } });
       setExpenses(prev => prev.map(e =>
         e.id === expenseId ? { ...e, category_id: category.id, category: category.name } : e
       ));
-      setSnack({ open: true, msg: "Categoria aggiornata", severity: "success" });
+      showSuccess("Categoria aggiornata");
     } catch (e: unknown) {
-      const msg = e instanceof Error ? e.message : "Errore";
-      setSnack({ open: true, msg, severity: "error" });
+      showError(apiErrorMessage(e, "Errore sconosciuto"));
     }
   }
 
@@ -397,26 +509,22 @@ export default function SpazioPage() {
   // ---------------------------------------------------------------------------
 
   async function handleDelete(entity: EntityType, id: number) {
+    const collectionUrl = entity === "incomeCategory"
+      ? "/api/income-categories"
+      : `/api/space/${ENTITY_PATH[entity]}`;
     try {
-      const res = await fetch(`/api/space/${ENTITY_PATH[entity]}/${id}`, {
-        method: "DELETE",
-        headers: await buildHeaders(),
-      });
-      if (!res.ok) {
-        const err = await res.json().catch(() => ({}));
-        throw new Error(err.error || "Errore sconosciuto");
-      }
-      setSnack({ open: true, msg: "Eliminato", severity: "success" });
+      await apiFetch(`${collectionUrl}/${id}`, { method: "DELETE" });
+      showSuccess("Eliminato");
       refreshEntity(entity);
     } catch (e: unknown) {
-      const msg = e instanceof Error ? e.message : "Errore";
-      setSnack({ open: true, msg, severity: "error" });
+      showError(apiErrorMessage(e, "Errore sconosciuto"));
     }
   }
 
   function refreshEntity(entity: EntityType) {
     if (entity === "account") fetchAccounts();
     else if (entity === "category") fetchCategories();
+    else if (entity === "incomeCategory") fetchIncomeCategories();
     else if (entity === "subscription") fetchSubscriptions();
     else if (entity === "expense") fetchExpenses();
     else if (entity === "income") fetchIncomes();
@@ -429,22 +537,16 @@ export default function SpazioPage() {
 
   async function acceptSuggestion(cat: Category, suggested: number) {
     try {
-      const res = await fetch(`/api/space/categories/${cat.id}/accept-suggestion`, {
+      await apiFetch(`/api/space/categories/${cat.id}/accept-suggestion`, {
         method: "POST",
-        headers: await buildHeaders(),
-        body: JSON.stringify({ suggested_budget: suggested }),
+        body: { suggested_budget: suggested },
       });
-      if (!res.ok) {
-        const err = await res.json().catch(() => ({}));
-        throw new Error(err.error || "Errore");
-      }
       // Dismetti subito così non ricompare dopo il ricalcolo
       setDismissed(prev => new Set(prev).add(cat.name));
-      setSnack({ open: true, msg: `Budget ${cat.name} aggiornato a ${fmtCurrency(suggested)}`, severity: "success" });
+      showSuccess(`Budget ${cat.name} aggiornato a ${fmtCurrency(suggested)}`);
       await fetchCategories();
     } catch (e: unknown) {
-      const msg = e instanceof Error ? e.message : "Errore";
-      setSnack({ open: true, msg, severity: "error" });
+      showError(apiErrorMessage(e, "Errore"));
     }
   }
 
@@ -453,11 +555,23 @@ export default function SpazioPage() {
   }
 
   async function acceptAllSuggestions() {
-    const toAccept = Object.entries(suggestions).filter(([name]) => !dismissed.has(name));
+    const toAccept = Object.entries(suggestions).filter(([name, suggested]) => {
+      if (dismissed.has(name)) return false;
+      const cat = categories.find(c => c.name === name);
+      return isSuggestionRelevant(cat?.monthly_budget ?? null, suggested);
+    });
     for (const [name, amount] of toAccept) {
       const cat = categories.find(c => c.name === name);
       if (cat) await acceptSuggestion(cat, amount);
     }
+  }
+
+  // Un consiglio budget si mostra solo se non c'è ancora un budget impostato, oppure
+  // se differisce di più del 5% da quello attuale: sotto quella soglia il consiglio
+  // non aggiunge informazione utile e sarebbe solo rumore in lista.
+  function isSuggestionRelevant(currentBudget: number | null, suggested: number): boolean {
+    if (!currentBudget) return true;
+    return Math.abs((suggested - currentBudget) / currentBudget) > 0.05;
   }
 
   // ---------------------------------------------------------------------------
@@ -512,54 +626,60 @@ export default function SpazioPage() {
   // ---------------------------------------------------------------------------
 
   function renderAccounts() {
+    const columns: Column<Account>[] = [
+      { key: "name", header: "Nome", render: row => row.name },
+      {
+        key: "account_type", header: "Tipo",
+        render: row => row.account_type
+          ? <Chip label={row.account_type} size="small" sx={{ fontSize: "0.7rem" }} />
+          : <span style={{ color: MUTED }}>—</span>,
+      },
+      {
+        key: "current_balance", header: "Saldo", align: "right",
+        render: row => (
+          <span style={{ fontWeight: 600, color: row.current_balance >= 0 ? PRIMARY : ACCENT }}>
+            {fmtSignedCurrency(row.current_balance)}
+          </span>
+        ),
+      },
+    ];
     return (
       <Box data-tour="spazio-conti">
         <TabToolbar label="Conti" onAdd={() => openAdd("account")} loading={loading.accounts} />
-        <TableContainer sx={{ overflowX: "auto" }}>
-          <Table size="small" sx={{ minWidth: 500 }}>
-            <TableHead>
-              <TableRow>
-                <TableCell sx={HEAD_SX}>Nome</TableCell>
-                <TableCell sx={HEAD_SX}>Tipo</TableCell>
-                <TableCell sx={{ ...HEAD_SX, textAlign: "right" }}>Saldo</TableCell>
-                <TableCell sx={{ ...HEAD_SX, width: 80 }} />
-              </TableRow>
-            </TableHead>
-            <TableBody>
-              {accounts.map(row => (
-                <TableRow key={row.id} hover>
-                  <TableCell sx={CELL_SX}>{row.name}</TableCell>
-                  <TableCell sx={CELL_SX}>
-                    {row.account_type
-                      ? <Chip label={row.account_type} size="small" sx={{ fontSize: "0.7rem" }} />
-                      : <span style={{ color: "#9CA3AF" }}>—</span>}
-                  </TableCell>
-                  <TableCell sx={{ ...CELL_SX, textAlign: "right", fontWeight: 600, color: row.current_balance >= 0 ? PRIMARY : "#EF4444" }}>
-                    {fmtCurrency(row.current_balance)}
-                  </TableCell>
-                  <TableCell sx={CELL_SX}>
-                    <RowActions
-                      onEdit={() => openEdit("account", {
-                        id: row.id, name: row.name, account_type: row.account_type ?? "",
-                        balance: row.opening_balance,
-                      })}
-                      onDelete={() => handleDelete("account", row.id)}
-                    />
-                  </TableCell>
-                </TableRow>
-              ))}
-              {!loading.accounts && accounts.length === 0 && (
-                <EmptyRow colSpan={4} />
-              )}
-            </TableBody>
-          </Table>
-        </TableContainer>
+        <ResponsiveDataTable
+          ariaLabel="Elenco conti"
+          columns={columns}
+          rows={accounts}
+          rowKey={row => row.id}
+          loading={loading.accounts}
+          minWidth={500}
+          mobilePrimary={row => row.name}
+          mobileSecondary={row => row.account_type ?? undefined}
+          mobileAmount={row => (
+            <span style={{ color: row.current_balance >= 0 ? PRIMARY : ACCENT }}>
+              {fmtSignedCurrency(row.current_balance)}
+            </span>
+          )}
+          actions={row => (
+            <RowActions
+              onEdit={() => openEdit("account", {
+                id: row.id, name: row.name, account_type: row.account_type ?? "",
+                balance: row.opening_balance,
+              })}
+              onDelete={() => handleDelete("account", row.id)}
+            />
+          )}
+        />
       </Box>
     );
   }
 
-  function renderCategories() {
-    const activeSuggestions = Object.entries(suggestions).filter(([name]) => !dismissed.has(name));
+  function renderExpenseCategories() {
+    const activeSuggestions = Object.entries(suggestions).filter(([name, suggested]) => {
+      if (dismissed.has(name)) return false;
+      const cat = categories.find(c => c.name === name);
+      return isSuggestionRelevant(cat?.monthly_budget ?? null, suggested);
+    });
     const hasSuggestions = activeSuggestions.length > 0;
 
     function handleCatSort(field: string) {
@@ -570,9 +690,48 @@ export default function SpazioPage() {
 
     return (
       <Box data-tour="spazio-categorie">
-        <TabToolbar label="Categorie" onAdd={() => openAdd("category")} loading={loading.categories || loadingSuggestions}>
+        <TabToolbar label="Categorie di spesa" onAdd={() => openAdd("category")} loading={loading.categories || loadingSuggestions}>
           <SearchInput value={catSearch} onChange={setCatSearch} placeholder="Cerca categoria..." />
         </TabToolbar>
+
+        <Box sx={{
+          display: "flex", flexDirection: { xs: "column", sm: "row" }, gap: 1,
+          alignItems: { xs: "stretch", sm: "flex-end" },
+          px: 2, py: 1.5, borderBottom: `1px solid ${BORDER}`,
+        }}>
+          <TextField
+            label="Budget mensile generale (€)"
+            type="number"
+            value={generalBudgetInput}
+            onChange={e => setGeneralBudgetInput(e.target.value)}
+            helperText={monthlyBudgetGuidance.hasCategoryBudgets
+              ? `Minimo: ${fmtCurrency(monthlyBudgetGuidance.categoryBudgetTotal)}`
+              : "Facoltativo: puoi lasciarlo vuoto."}
+            fullWidth
+            sx={{ maxWidth: { sm: 280 } }}
+            slotProps={{
+              input: {
+                endAdornment: (
+                  <InfoButton
+                    label="Come funziona il budget mensile generale"
+                    explanation={monthlyBudgetGuidance.suggestedBudget == null
+                      ? "Imposta il limite complessivo del mese quando hai abbastanza storico per sceglierlo. Puoi anche lasciarlo vuoto: in quel caso Expensum usa la somma dei budget di categoria come riferimento."
+                      : `Imposta il limite complessivo del mese quando hai abbastanza storico per sceglierlo. Consiglio Expensum: almeno ${fmtCurrency(monthlyBudgetGuidance.suggestedBudget)}, pari alla somma dei budget categoria.`}
+                  />
+                ),
+              },
+            }}
+          />
+          <Button
+            variant="contained"
+            disableElevation
+            disabled={savingGeneralBudget}
+            onClick={saveGeneralMonthlyBudget}
+            sx={{ minHeight: 40, flexShrink: 0, bgcolor: PRIMARY, color: "primary.contrastText", "&:hover": { bgcolor: "#4AA7AE" } }}
+          >
+            Salva
+          </Button>
+        </Box>
 
         {hasSuggestions && (
           <Alert
@@ -583,8 +742,8 @@ export default function SpazioPage() {
                 size="small"
                 variant="contained"
                 disableElevation
-                sx={{ bgcolor: PRIMARY, color: "#fff", fontSize: "0.75rem", whiteSpace: "nowrap",
-                      "&:hover": { bgcolor: "#142d5e" } }}
+                sx={{ bgcolor: PRIMARY, color: "primary.contrastText", fontSize: "0.75rem", whiteSpace: "nowrap",
+                      "&:hover": { bgcolor: "#4AA7AE" } }}
                 onClick={acceptAllSuggestions}
               >
                 Accetta tutti
@@ -595,67 +754,150 @@ export default function SpazioPage() {
           </Alert>
         )}
 
-        <TableContainer sx={{ overflowX: "auto" }}>
-          <Table size="small" sx={{ minWidth: hasSuggestions ? 620 : 400 }}>
-            <TableHead>
-              <TableRow>
-                <SortableHead label="Nome" field="name" sortBy={catSortBy} sortDir={catSortDir} onSort={handleCatSort} />
-                <SortableHead label="Budget mensile" field="budget" sortBy={catSortBy} sortDir={catSortDir} onSort={handleCatSort} sx={{ textAlign: "right" }} />
-                {hasSuggestions && <TableCell sx={{ ...HEAD_SX, textAlign: "right" }}>Consiglio</TableCell>}
-                <TableCell sx={{ ...HEAD_SX, width: 80 }} />
-              </TableRow>
-            </TableHead>
-            <TableBody>
-              {filteredCats.map((row, catIdx) => {
-                const suggested = suggestions[row.name];
-                const showSuggestion = suggested != null && !dismissed.has(row.name);
-                const delta = suggested != null && row.monthly_budget != null
-                  ? (suggested - row.monthly_budget) / row.monthly_budget
-                  : null;
-                const trendIcon = delta == null ? "" : delta > 0.05 ? " ↑" : delta < -0.05 ? " ↓" : " ≈";
-                return (
-                  <TableRow key={row.id} hover>
-                    <TableCell sx={CELL_SX}>{row.name}</TableCell>
-                    <TableCell sx={{ ...CELL_SX, textAlign: "right", color: ACCENT }}>
-                      {row.monthly_budget != null ? fmtCurrency(row.monthly_budget) : <span style={{ color: "#9CA3AF" }}>—</span>}
-                    </TableCell>
-                    {hasSuggestions && (
-                      <TableCell sx={{ ...CELL_SX, textAlign: "right" }}>
-                        {showSuggestion ? (
-                          <Box sx={{ display: "flex", alignItems: "center", justifyContent: "flex-end", gap: 0.5 }}>
-                            <Typography variant="caption" sx={{ color: PRIMARY, fontWeight: 600 }}>
-                              {fmtCurrency(suggested)}{trendIcon}
-                            </Typography>
-                            <Tooltip title="Accetta">
-                              <IconButton size="small" sx={{ color: "#16A34A" }} onClick={() => acceptSuggestion(row, suggested)}>
-                                <Check size={14} />
-                              </IconButton>
-                            </Tooltip>
-                            <Tooltip title="Scarta">
-                              <IconButton size="small" sx={{ color: "#9CA3AF" }} onClick={() => dismissSuggestion(row.name)}>
-                                <X size={14} />
-                              </IconButton>
-                            </Tooltip>
-                          </Box>
-                        ) : null}
-                      </TableCell>
-                    )}
-                    <TableCell sx={CELL_SX}>
-                      <RowActions
-                        onEdit={() => openEdit("category", { id: row.id, name: row.name, monthly_budget: row.monthly_budget ?? "", description: row.description ?? "" })}
-                        onDelete={() => handleDelete("category", row.id)}
-                        editTourAttr={catIdx === 0 ? "category-edit-button" : undefined}
-                      />
-                    </TableCell>
-                  </TableRow>
-                );
-              })}
-              {!loading.categories && filteredCats.length === 0 && <EmptyRow colSpan={hasSuggestions ? 4 : 3} />}
-            </TableBody>
-          </Table>
-        </TableContainer>
+        <ResponsiveDataTable
+          ariaLabel="Elenco categorie"
+          minWidth={hasSuggestions ? 620 : 400}
+          columns={buildCategoryColumns(hasSuggestions)}
+          rows={filteredCats}
+          rowKey={row => row.id}
+          loading={loading.categories}
+          sortBy={catSortBy}
+          sortDir={catSortDir}
+          onSort={field => handleCatSort(field)}
+          mobilePrimary={row => row.name}
+          mobileSecondary={row => {
+            const suggested = suggestions[row.name];
+            const showSuggestion = suggested != null && !dismissed.has(row.name) && isSuggestionRelevant(row.monthly_budget, suggested);
+            return showSuggestion ? `Consiglio: ${fmtCurrency(suggested)}` : undefined;
+          }}
+          mobileAmount={row => (
+            <span style={{ color: PRIMARY }}>
+              {row.monthly_budget != null ? fmtCurrency(row.monthly_budget) : <span style={{ color: MUTED }}>—</span>}
+            </span>
+          )}
+          actions={row => {
+            const suggested = suggestions[row.name];
+            const showSuggestion = suggested != null && !dismissed.has(row.name) && isSuggestionRelevant(row.monthly_budget, suggested);
+            return (
+              <Box sx={{ display: "flex", alignItems: "center", gap: 0.5 }}>
+                {showSuggestion && (
+                  <>
+                    <Tooltip title="Accetta consiglio budget">
+                      <IconButton aria-label="Accetta consiglio budget" sx={{ width: 44, height: 44, color: "success.main" }} onClick={() => acceptSuggestion(row, suggested)}>
+                        <Check size={14} />
+                      </IconButton>
+                    </Tooltip>
+                    <Tooltip title="Scarta consiglio budget">
+                      <IconButton aria-label="Scarta consiglio budget" sx={{ width: 44, height: 44, color: MUTED }} onClick={() => dismissSuggestion(row.name)}>
+                        <X size={14} />
+                      </IconButton>
+                    </Tooltip>
+                  </>
+                )}
+                <RowActions
+                  onEdit={() => openEdit("category", { id: row.id, name: row.name, monthly_budget: row.monthly_budget ?? "", description: row.description ?? "" })}
+                  onDelete={() => handleDelete("category", row.id)}
+                  editTourAttr={filteredCats[0]?.id === row.id ? "category-edit-button" : undefined}
+                />
+              </Box>
+            );
+          }}
+        />
       </Box>
     );
+  }
+
+  function renderIncomeCategories() {
+    return (
+      <Box>
+        <TabToolbar
+          label="Categorie di entrata"
+          onAdd={() => openAdd("incomeCategory")}
+          loading={loading.incomeCategories}
+        />
+        <ResponsiveDataTable
+          ariaLabel="Elenco categorie entrata"
+          minWidth={360}
+          columns={[
+            { key: "name", header: "Nome", render: row => row.name },
+            { key: "description", header: "Descrizione", render: row => row.description || "—" },
+          ]}
+          rows={incomeCategories}
+          rowKey={row => row.id}
+          loading={loading.incomeCategories}
+          mobilePrimary={row => row.name}
+          mobileSecondary={row => row.description || undefined}
+          actions={row => (
+            <RowActions
+              onEdit={() => openEdit("incomeCategory", {
+                id: row.id, name: row.name, description: row.description ?? "",
+              })}
+              onDelete={() => handleDelete("incomeCategory", row.id)}
+            />
+          )}
+        />
+      </Box>
+    );
+  }
+
+  function renderCategories() {
+    return (
+      <Box data-tour="spazio-categorie">
+        <Box sx={{ px: 2, pt: 2, pb: 1.5, borderBottom: `1px solid ${BORDER}` }}>
+          <Typography variant="h6" sx={{ fontWeight: 600, fontSize: "1rem", mb: 0.25 }}>
+            Categorie
+          </Typography>
+          <Typography variant="body2" color="text.secondary" sx={{ mb: 1.25 }}>
+            Scegli se gestire le categorie per le spese o per le entrate.
+          </Typography>
+          <ToggleButtonGroup
+            value={categoryKind}
+            exclusive
+            onChange={(_, kind) => kind && setCategoryKind(kind)}
+            aria-label="Tipo di categorie"
+            fullWidth
+            size="small"
+            sx={{ "& .MuiToggleButton-root": { minHeight: 44, textTransform: "none", fontWeight: 600 } }}
+          >
+            <ToggleButton value="expense">Spese</ToggleButton>
+            <ToggleButton value="income">Entrate</ToggleButton>
+          </ToggleButtonGroup>
+        </Box>
+        {categoryKind === "expense" ? renderExpenseCategories() : renderIncomeCategories()}
+      </Box>
+    );
+  }
+
+  function buildCategoryColumns(hasSuggestions: boolean): Column<Category>[] {
+    const columns: Column<Category>[] = [
+      { key: "name", header: "Nome", sortable: true, render: row => row.name },
+      {
+        key: "budget", header: "Budget mensile", align: "right", sortable: true,
+        render: row => (
+          <span style={{ color: PRIMARY }}>
+            {row.monthly_budget != null ? fmtCurrency(row.monthly_budget) : <span style={{ color: MUTED }}>—</span>}
+          </span>
+        ),
+      },
+    ];
+    if (hasSuggestions) {
+      columns.push({
+        key: "suggestion", header: "Consiglio", align: "right", hideOnMobileCard: true,
+        render: row => {
+          const suggested = suggestions[row.name];
+          const showSuggestion = suggested != null && !dismissed.has(row.name) && isSuggestionRelevant(row.monthly_budget, suggested);
+          if (!showSuggestion) return null;
+          const delta = row.monthly_budget != null ? (suggested - row.monthly_budget) / row.monthly_budget : null;
+          const trendIcon = delta == null ? "" : delta > 0.05 ? " ↑" : delta < -0.05 ? " ↓" : " ≈";
+          return (
+            <Typography component="span" variant="caption" sx={{ color: "primary.main", fontWeight: 600 }}>
+              {fmtCurrency(suggested)}{trendIcon}
+            </Typography>
+          );
+        },
+      });
+    }
+    return columns;
   }
 
   function renderSubscriptions() {
@@ -676,52 +918,58 @@ export default function SpazioPage() {
             options={SUB_TYPES.map(t => ({ value: t, label: t }))}
           />
         </TabToolbar>
-        <TableContainer sx={{ overflowX: "auto" }}>
-          <Table size="small" sx={{ minWidth: 700 }}>
-            <TableHead>
-              <TableRow>
-                <SortableHead label="Nome" field="name" sortBy={subSortBy} sortDir={subSortDir} onSort={handleSubSort} />
-                <SortableHead label="Importo" field="amount" sortBy={subSortBy} sortDir={subSortDir} onSort={handleSubSort} sx={{ textAlign: "right" }} />
-                <TableCell sx={HEAD_SX}>Frequenza</TableCell>
-                <TableCell sx={HEAD_SX}>Ultima fattura</TableCell>
-                <TableCell sx={HEAD_SX}>Conto</TableCell>
-                <TableCell sx={{ ...HEAD_SX, width: 80 }} />
-              </TableRow>
-            </TableHead>
-            <TableBody>
-              {filteredSubs.map(row => (
-                <TableRow key={row.id} hover>
-                  <TableCell sx={CELL_SX}>{row.name}</TableCell>
-                  <TableCell sx={{ ...CELL_SX, textAlign: "right", color: ACCENT, fontWeight: 600 }}>
-                    {row.amount != null ? fmtCurrency(row.amount) : <span style={{ color: "#9CA3AF" }}>—</span>}
-                  </TableCell>
-                  <TableCell sx={CELL_SX}>
-                    {row.sub_type
-                      ? <Chip label={row.sub_type} size="small" sx={{ fontSize: "0.7rem", textTransform: "capitalize" }} />
-                      : <span style={{ color: "#9CA3AF" }}>—</span>}
-                  </TableCell>
-                  <TableCell sx={{ ...CELL_SX, color: "#6B7280" }}>{formatDateIt(row.last_billed)}</TableCell>
-                  <TableCell sx={{ ...CELL_SX, color: "#6B7280" }}>{row.account_name || "—"}</TableCell>
-                  <TableCell sx={CELL_SX}>
-                    <RowActions
-                      onEdit={() => openEdit("subscription", {
-                        id: row.id, name: row.name,
-                        amount: row.amount ?? "", sub_type: row.sub_type ?? "",
-                        last_billed: row.last_billed ?? "", account_id: row.account_id ?? "",
-                        category_id: row.category_id ?? "",
-                      })}
-                      onDelete={() => handleDelete("subscription", row.id)}
-                    />
-                  </TableCell>
-                </TableRow>
-              ))}
-              {!loading.subscriptions && filteredSubs.length === 0 && <EmptyRow colSpan={6} />}
-            </TableBody>
-          </Table>
-        </TableContainer>
+        <ResponsiveDataTable
+          ariaLabel="Elenco abbonamenti"
+          minWidth={700}
+          columns={subscriptionColumns}
+          rows={filteredSubs}
+          rowKey={row => row.id}
+          loading={loading.subscriptions}
+          sortBy={subSortBy}
+          sortDir={subSortDir}
+          onSort={field => handleSubSort(field)}
+          mobilePrimary={row => row.name}
+          mobileSecondary={row => [row.sub_type, row.account_name || null].filter(Boolean).join(" · ") || undefined}
+          mobileAmount={row => (
+            <span style={{ color: ACCENT }}>
+              {row.amount != null ? fmtCurrency(row.amount) : <span style={{ color: MUTED }}>—</span>}
+            </span>
+          )}
+          actions={row => (
+            <RowActions
+              onEdit={() => openEdit("subscription", {
+                id: row.id, name: row.name,
+                amount: row.amount ?? "", sub_type: row.sub_type ?? "",
+                last_billed: row.last_billed ?? "", account_id: row.account_id ?? "",
+                category_id: row.category_id ?? "",
+              })}
+              onDelete={() => handleDelete("subscription", row.id)}
+            />
+          )}
+        />
       </>
     );
   }
+
+  const subscriptionColumns: Column<Subscription>[] = [
+    { key: "name", header: "Nome", sortable: true, render: row => row.name },
+    {
+      key: "amount", header: "Importo", align: "right", sortable: true,
+      render: row => (
+        <span style={{ color: ACCENT, fontWeight: 600 }}>
+          {row.amount != null ? fmtCurrency(row.amount) : <span style={{ color: MUTED }}>—</span>}
+        </span>
+      ),
+    },
+    {
+      key: "sub_type", header: "Frequenza", hideOnMobileCard: true,
+      render: row => row.sub_type
+        ? <Chip label={row.sub_type} size="small" sx={{ fontSize: "0.7rem", textTransform: "capitalize" }} />
+        : <span style={{ color: MUTED }}>—</span>,
+    },
+    { key: "last_billed", header: "Ultima fattura", hideOnMobileCard: true, render: row => <span style={{ color: MUTED }}>{formatDateIt(row.last_billed)}</span> },
+    { key: "account_name", header: "Conto", hideOnMobileCard: true, render: row => <span style={{ color: MUTED }}>{row.account_name || "—"}</span> },
+  ];
 
   function renderExpenses() {
     function onExpSearch(v: string) { setExpSearch(v); setExpPage(0); fetchExpenses(0, expRowsPP, expStart, expEnd, v, expCatId, expAccId, expSortBy, expSortDir); }
@@ -731,6 +979,28 @@ export default function SpazioPage() {
       const newDir: "asc" | "desc" = expSortBy === field ? (expSortDir === "asc" ? "desc" : "asc") : "asc";
       setExpSortBy(field); setExpSortDir(newDir); setExpPage(0);
       fetchExpenses(0, expRowsPP, expStart, expEnd, expSearch, expCatId, expAccId, field, newDir);
+    }
+    function renderExpenseCategoryChip(row: Expense) {
+      return row.category
+        ? (
+          <Chip
+            label={row.category}
+            size="small"
+            clickable
+            onClick={e => setCatMenu({ anchorEl: e.currentTarget, expenseId: row.id })}
+            sx={{ fontSize: "0.7rem", bgcolor: "rgba(233,241,234,0.06)" }}
+          />
+        )
+        : (
+          <Chip
+            label="Assegna categoria"
+            size="small"
+            clickable
+            variant="outlined"
+            onClick={e => setCatMenu({ anchorEl: e.currentTarget, expenseId: row.id })}
+            sx={{ fontSize: "0.7rem", color: MUTED, borderStyle: "dashed" }}
+          />
+        );
     }
 
     return (
@@ -751,69 +1021,48 @@ export default function SpazioPage() {
           />
           <DateRangeFilter
             start={expStart} end={expEnd}
-            onStart={v => { setExpStart(v); setExpPage(0); fetchExpenses(0, expRowsPP, v, expEnd, expSearch, expCatId, expAccId, expSortBy, expSortDir); }}
-            onEnd={v => { setExpEnd(v); setExpPage(0); fetchExpenses(0, expRowsPP, expStart, v, expSearch, expCatId, expAccId, expSortBy, expSortDir); }}
+            onChange={(s, e) => { setExpStart(s); setExpEnd(e); setExpPage(0); fetchExpenses(0, expRowsPP, s, e, expSearch, expCatId, expAccId, expSortBy, expSortDir); }}
           />
         </TabToolbar>
-        <TableContainer sx={{ overflowX: "auto" }}>
-          <Table size="small" sx={{ minWidth: 700 }}>
-            <TableHead>
-              <TableRow>
-                <SortableHead label="Data" field="date" sortBy={expSortBy} sortDir={expSortDir} onSort={handleExpSort} />
-                <SortableHead label="Descrizione" field="name" sortBy={expSortBy} sortDir={expSortDir} onSort={handleExpSort} />
-                <SortableHead label="Importo" field="amount" sortBy={expSortBy} sortDir={expSortDir} onSort={handleExpSort} sx={{ textAlign: "right" }} />
-                <TableCell sx={HEAD_SX}>Categoria</TableCell>
-                <TableCell sx={HEAD_SX}>Conto</TableCell>
-                <TableCell sx={{ ...HEAD_SX, width: 80 }} />
-              </TableRow>
-            </TableHead>
-            <TableBody>
-              {expenses.map(row => (
-                <TableRow key={row.id} hover>
-                  <TableCell sx={{ ...CELL_SX, color: "#6B7280" }}>{formatDateIt(row.date)}</TableCell>
-                  <TableCell sx={CELL_SX}>{row.name}</TableCell>
-                  <TableCell sx={{ ...CELL_SX, textAlign: "right", color: ACCENT, fontWeight: 600 }}>
-                    {fmtCurrency(row.amount)}
-                  </TableCell>
-                  <TableCell sx={CELL_SX}>
-                    {row.category
-                      ? (
-                        <Chip
-                          label={row.category}
-                          size="small"
-                          clickable
-                          onClick={e => setCatMenu({ anchorEl: e.currentTarget, expenseId: row.id })}
-                          sx={{ fontSize: "0.7rem", bgcolor: "#F0EDE8" }}
-                        />
-                      )
-                      : (
-                        <Chip
-                          label="Assegna categoria"
-                          size="small"
-                          clickable
-                          variant="outlined"
-                          onClick={e => setCatMenu({ anchorEl: e.currentTarget, expenseId: row.id })}
-                          sx={{ fontSize: "0.7rem", color: "#9CA3AF", borderStyle: "dashed" }}
-                        />
-                      )}
-                  </TableCell>
-                  <TableCell sx={{ ...CELL_SX, color: "#6B7280" }}>{row.account || "—"}</TableCell>
-                  <TableCell sx={CELL_SX}>
-                    <RowActions
-                      onEdit={() => openEdit("expense", {
-                        id: row.id, name: row.name, amount: row.amount,
-                        date: row.date, category_id: row.category_id ?? "",
-                        account_id: row.account_id ?? "",
-                      })}
-                      onDelete={() => handleDelete("expense", row.id)}
-                    />
-                  </TableCell>
-                </TableRow>
-              ))}
-              {!loading.expenses && expenses.length === 0 && <EmptyRow colSpan={6} />}
-            </TableBody>
-          </Table>
-        </TableContainer>
+        <ResponsiveDataTable
+          ariaLabel="Elenco spese"
+          minWidth={700}
+          columns={[
+            { key: "date", header: "Data", sortable: true, hideOnMobileCard: true, render: row => <span style={{ color: MUTED }}>{formatDateIt(row.date)}</span> },
+            { key: "name", header: "Descrizione", sortable: true, render: row => row.name },
+            {
+              key: "amount", header: "Importo", align: "right", sortable: true,
+              render: row => <span style={{ color: ACCENT, fontWeight: 600 }}>{fmtCurrency(row.amount)}</span>,
+            },
+            { key: "category", header: "Categoria", render: row => renderExpenseCategoryChip(row) },
+            { key: "account", header: "Conto", hideOnMobileCard: true, render: row => <span style={{ color: MUTED }}>{row.account || "—"}</span> },
+          ]}
+          rows={expenses}
+          rowKey={row => row.id}
+          loading={loading.expenses}
+          sortBy={expSortBy}
+          sortDir={expSortDir}
+          onSort={handleExpSort}
+          mobilePrimary={row => row.name}
+          mobileSecondary={row => (
+            <Box sx={{ display: "flex", alignItems: "center", gap: 0.75, flexWrap: "wrap" }}>
+              <span>{formatDateIt(row.date)}</span>
+              {renderExpenseCategoryChip(row)}
+              {row.account && <span>{row.account}</span>}
+            </Box>
+          )}
+          mobileAmount={row => <span style={{ color: ACCENT }}>{fmtCurrency(row.amount)}</span>}
+          actions={row => (
+            <RowActions
+              onEdit={() => openEdit("expense", {
+                id: row.id, name: row.name, amount: row.amount,
+                date: row.date, category_id: row.category_id ?? "",
+                account_id: row.account_id ?? "",
+              })}
+              onDelete={() => handleDelete("expense", row.id)}
+            />
+          )}
+        />
         <TablePagination
           component="div"
           count={expTotal}
@@ -842,24 +1091,28 @@ export default function SpazioPage() {
   }
 
   function renderIncomes() {
-    function onIncSearch(v: string) { setIncSearch(v); setIncPage(0); fetchIncomes(0, incRowsPP, incStart, incEnd, v, incType, incAccId, incSortBy, incSortDir); }
-    function onIncType(v: string) { setIncType(v); setIncPage(0); fetchIncomes(0, incRowsPP, incStart, incEnd, incSearch, v, incAccId, incSortBy, incSortDir); }
-    function onIncAcc(v: string) { setIncAccId(v); setIncPage(0); fetchIncomes(0, incRowsPP, incStart, incEnd, incSearch, incType, v, incSortBy, incSortDir); }
+    const activeCategories = activeIncomeCategories(incomeCategories);
+    function onIncSearch(v: string) { setIncSearch(v); setIncPage(0); fetchIncomes(0, incRowsPP, incStart, incEnd, v, incCategoryId, incAccId, incSortBy, incSortDir); }
+    function onIncCategory(v: string) { setIncCategoryId(v); setIncPage(0); fetchIncomes(0, incRowsPP, incStart, incEnd, incSearch, v, incAccId, incSortBy, incSortDir); }
+    function onIncAcc(v: string) { setIncAccId(v); setIncPage(0); fetchIncomes(0, incRowsPP, incStart, incEnd, incSearch, incCategoryId, v, incSortBy, incSortDir); }
     function handleIncSort(field: string) {
       const newDir: "asc" | "desc" = incSortBy === field ? (incSortDir === "asc" ? "desc" : "asc") : "asc";
       setIncSortBy(field); setIncSortDir(newDir); setIncPage(0);
-      fetchIncomes(0, incRowsPP, incStart, incEnd, incSearch, incType, incAccId, field, newDir);
+      fetchIncomes(0, incRowsPP, incStart, incEnd, incSearch, incCategoryId, incAccId, field, newDir);
     }
 
     return (
       <>
         <TabToolbar label="Entrate" onAdd={() => openAdd("income")} loading={loading.incomes}>
+          <Button size="small" onClick={() => { setTab(1); setCategoryKind("income"); }} sx={{ minHeight: 44 }}>
+            Gestisci categorie
+          </Button>
           <SearchInput value={incSearch} onChange={onIncSearch} placeholder="Cerca entrata..." />
           <FilterSelect
-            label="Tipo"
-            value={incType}
-            onChange={onIncType}
-            options={INCOME_TYPES.map(t => ({ value: t, label: t }))}
+            label="Categoria"
+            value={incCategoryId}
+            onChange={onIncCategory}
+            options={activeCategories.map(category => ({ value: String(category.id), label: category.name }))}
           />
           <FilterSelect
             label="Conto"
@@ -869,60 +1122,62 @@ export default function SpazioPage() {
           />
           <DateRangeFilter
             start={incStart} end={incEnd}
-            onStart={v => { setIncStart(v); setIncPage(0); fetchIncomes(0, incRowsPP, v, incEnd, incSearch, incType, incAccId, incSortBy, incSortDir); }}
-            onEnd={v => { setIncEnd(v); setIncPage(0); fetchIncomes(0, incRowsPP, incStart, v, incSearch, incType, incAccId, incSortBy, incSortDir); }}
+            onChange={(s, e) => { setIncStart(s); setIncEnd(e); setIncPage(0); fetchIncomes(0, incRowsPP, s, e, incSearch, incCategoryId, incAccId, incSortBy, incSortDir); }}
           />
         </TabToolbar>
-        <TableContainer sx={{ overflowX: "auto" }}>
-          <Table size="small" sx={{ minWidth: 700 }}>
-            <TableHead>
-              <TableRow>
-                <SortableHead label="Data" field="date" sortBy={incSortBy} sortDir={incSortDir} onSort={handleIncSort} />
-                <SortableHead label="Descrizione" field="name" sortBy={incSortBy} sortDir={incSortDir} onSort={handleIncSort} />
-                <SortableHead label="Importo" field="amount" sortBy={incSortBy} sortDir={incSortDir} onSort={handleIncSort} sx={{ textAlign: "right" }} />
-                <TableCell sx={HEAD_SX}>Tipo</TableCell>
-                <TableCell sx={HEAD_SX}>Conto</TableCell>
-                <TableCell sx={{ ...HEAD_SX, width: 80 }} />
-              </TableRow>
-            </TableHead>
-            <TableBody>
-              {incomes.map(row => (
-                <TableRow key={row.id} hover>
-                  <TableCell sx={{ ...CELL_SX, color: "#6B7280" }}>{formatDateIt(row.date)}</TableCell>
-                  <TableCell sx={CELL_SX}>{row.name}</TableCell>
-                  <TableCell sx={{ ...CELL_SX, textAlign: "right", color: PRIMARY, fontWeight: 600 }}>
-                    {fmtCurrency(row.amount)}
-                  </TableCell>
-                  <TableCell sx={CELL_SX}>
-                    {row.income_type
-                      ? <Chip label={row.income_type} size="small" sx={{ fontSize: "0.7rem", bgcolor: "#EEF2FF", color: PRIMARY, textTransform: "capitalize" }} />
-                      : <span style={{ color: "#9CA3AF" }}>—</span>}
-                  </TableCell>
-                  <TableCell sx={{ ...CELL_SX, color: "#6B7280" }}>{row.account || "—"}</TableCell>
-                  <TableCell sx={CELL_SX}>
-                    <RowActions
-                      onEdit={() => openEdit("income", {
-                        id: row.id, name: row.name, amount: row.amount,
-                        date: row.date, income_type: row.income_type ?? "",
-                        account_id: row.account_id ?? "",
-                      })}
-                      onDelete={() => handleDelete("income", row.id)}
-                    />
-                  </TableCell>
-                </TableRow>
-              ))}
-              {!loading.incomes && incomes.length === 0 && <EmptyRow colSpan={6} />}
-            </TableBody>
-          </Table>
-        </TableContainer>
+        <ResponsiveDataTable
+          ariaLabel="Elenco entrate"
+          minWidth={700}
+          columns={[
+            { key: "date", header: "Data", sortable: true, hideOnMobileCard: true, render: row => <span style={{ color: MUTED }}>{formatDateIt(row.date)}</span> },
+            { key: "name", header: "Descrizione", sortable: true, render: row => row.name },
+            {
+              key: "amount", header: "Importo", align: "right", sortable: true,
+              render: row => <span style={{ color: INCOME_COLOR, fontWeight: 600 }}>{fmtCurrency(row.amount)}</span>,
+            },
+            {
+              key: "income_category", header: "Categoria",
+              render: row => incomeCategoryLabel(row)
+                ? <Chip label={incomeCategoryLabel(row)} size="small" sx={{ fontSize: "0.7rem", bgcolor: "var(--color-primary-light)", color: PRIMARY, textTransform: "capitalize" }} />
+                : <span style={{ color: MUTED }}>—</span>,
+            },
+            { key: "account", header: "Conto", hideOnMobileCard: true, render: row => <span style={{ color: MUTED }}>{row.account || "—"}</span> },
+          ]}
+          rows={incomes}
+          rowKey={row => row.id}
+          loading={loading.incomes}
+          sortBy={incSortBy}
+          sortDir={incSortDir}
+          onSort={handleIncSort}
+          mobilePrimary={row => row.name}
+          mobileSecondary={row => (
+            <Box sx={{ display: "flex", alignItems: "center", gap: 0.75, flexWrap: "wrap" }}>
+              <span>{formatDateIt(row.date)}</span>
+              {incomeCategoryLabel(row) && <Chip label={incomeCategoryLabel(row)} size="small" sx={{ fontSize: "0.7rem", bgcolor: "var(--color-primary-light)", color: PRIMARY, textTransform: "capitalize" }} />}
+              {row.account && <span>{row.account}</span>}
+            </Box>
+          )}
+          mobileAmount={row => <span style={{ color: INCOME_COLOR }}>{fmtCurrency(row.amount)}</span>}
+          actions={row => (
+            <RowActions
+              onEdit={() => openEdit("income", {
+                id: row.id, name: row.name, amount: row.amount,
+                date: row.date, income_category_id: row.income_category_id ?? "",
+                income_category: incomeCategoryLabel(row),
+                account_id: row.account_id ?? "",
+              })}
+              onDelete={() => handleDelete("income", row.id)}
+            />
+          )}
+        />
         <TablePagination
           component="div"
           count={incTotal}
           page={incPage}
           rowsPerPage={incRowsPP}
           rowsPerPageOptions={[10, 25, 50]}
-          onPageChange={(_, p) => { setIncPage(p); fetchIncomes(p, incRowsPP, incStart, incEnd, incSearch, incType, incAccId, incSortBy, incSortDir); }}
-          onRowsPerPageChange={e => { const rpp = parseInt(e.target.value); setIncRowsPP(rpp); setIncPage(0); fetchIncomes(0, rpp, incStart, incEnd, incSearch, incType, incAccId, incSortBy, incSortDir); }}
+          onPageChange={(_, p) => { setIncPage(p); fetchIncomes(p, incRowsPP, incStart, incEnd, incSearch, incCategoryId, incAccId, incSortBy, incSortDir); }}
+          onRowsPerPageChange={e => { const rpp = parseInt(e.target.value); setIncRowsPP(rpp); setIncPage(0); fetchIncomes(0, rpp, incStart, incEnd, incSearch, incCategoryId, incAccId, incSortBy, incSortDir); }}
           labelRowsPerPage="Righe:"
           sx={{ fontSize: "0.75rem" }}
         />
@@ -949,42 +1204,47 @@ export default function SpazioPage() {
           />
           <DateRangeFilter
             start={transStart} end={transEnd}
-            onStart={v => { setTransStart(v); fetchTransfers(v, transEnd); }}
-            onEnd={v => { setTransEnd(v); fetchTransfers(transStart, v); }}
+            onChange={(s, e) => { setTransStart(s); setTransEnd(e); fetchTransfers(s, e); }}
           />
           {accounts.length < 2 && (
-            <Typography variant="caption" sx={{ color: "#9CA3AF" }}>
+            <Typography variant="caption" color="text.secondary">
               Servono almeno due conti per creare un trasferimento
             </Typography>
           )}
         </TabToolbar>
-        <TableContainer sx={{ overflowX: "auto" }}>
-          <Table size="small" sx={{ minWidth: 600 }}>
-            <TableHead>
-              <TableRow>
-                <SortableHead label="Data" field="date" sortBy={transSortBy} sortDir={transSortDir} onSort={handleTransSort} />
-                <SortableHead label="Descrizione" field="name" sortBy={transSortBy} sortDir={transSortDir} onSort={handleTransSort} />
-                <TableCell sx={HEAD_SX}>Da</TableCell>
-                <TableCell sx={HEAD_SX}>A</TableCell>
-                <SortableHead label="Importo" field="amount" sortBy={transSortBy} sortDir={transSortDir} onSort={handleTransSort} sx={{ textAlign: "right" }} />
-              </TableRow>
-            </TableHead>
-            <TableBody>
-              {filteredTransfers.map(row => (
-                <TableRow key={row.id} hover>
-                  <TableCell sx={{ ...CELL_SX, color: "#6B7280" }}>{formatDateIt(row.date)}</TableCell>
-                  <TableCell sx={CELL_SX}>{row.name}</TableCell>
-                  <TableCell sx={{ ...CELL_SX, color: "#6B7280" }}>{accName(row.from_account_id)}</TableCell>
-                  <TableCell sx={{ ...CELL_SX, color: "#6B7280" }}>{accName(row.to_account_id)}</TableCell>
-                  <TableCell sx={{ ...CELL_SX, textAlign: "right", color: PRIMARY, fontWeight: 600 }}>
-                    {fmtCurrency(row.amount)}
-                  </TableCell>
-                </TableRow>
-              ))}
-              {!loading.transfers && filteredTransfers.length === 0 && <EmptyRow colSpan={5} />}
-            </TableBody>
-          </Table>
-        </TableContainer>
+        <ResponsiveDataTable
+          ariaLabel="Elenco trasferimenti"
+          minWidth={600}
+          columns={[
+            { key: "date", header: "Data", sortable: true, hideOnMobileCard: true, render: row => <span style={{ color: MUTED }}>{formatDateIt(row.date)}</span> },
+            { key: "name", header: "Descrizione", sortable: true, render: row => row.name },
+            { key: "from", header: "Da", hideOnMobileCard: true, render: row => <span style={{ color: MUTED }}>{accName(row.from_account_id)}</span> },
+            { key: "to", header: "A", hideOnMobileCard: true, render: row => <span style={{ color: MUTED }}>{accName(row.to_account_id)}</span> },
+            {
+              key: "amount", header: "Importo", align: "right", sortable: true,
+              render: row => <span style={{ color: PRIMARY, fontWeight: 600 }}>{fmtCurrency(row.amount)}</span>,
+            },
+          ]}
+          rows={filteredTransfers}
+          rowKey={row => row.id}
+          loading={loading.transfers}
+          sortBy={transSortBy}
+          sortDir={transSortDir}
+          onSort={handleTransSort}
+          mobilePrimary={row => row.name}
+          mobileSecondary={row => `${formatDateIt(row.date)} · ${accName(row.from_account_id)} → ${accName(row.to_account_id)}`}
+          mobileAmount={row => <span style={{ color: PRIMARY }}>{fmtCurrency(row.amount)}</span>}
+          actions={row => (
+            <RowActions
+              onEdit={() => openEdit("transfer", {
+                id: row.id, name: row.name, amount: row.amount,
+                date: row.date, from_account_id: row.from_account_id,
+                to_account_id: row.to_account_id,
+              })}
+              onDelete={() => handleDelete("transfer", row.id)}
+            />
+          )}
+        />
       </Box>
     );
   }
@@ -1025,6 +1285,19 @@ export default function SpazioPage() {
           multiline minRows={2} inputProps={{ maxLength: 500 }}
           placeholder="Es. spese fatte per uscire fuori a cena o pranzo"
           helperText="Aiuta l'assistente a categorizzare meglio le spese ambigue"
+          value={data.description ?? ""}
+          onChange={e => setField("description", e.target.value)} />
+      </>
+    );
+
+    if (entity === "incomeCategory") return (
+      <>
+        <TextField label="Nome *" fullWidth size="small" margin="dense" value={data.name ?? ""}
+          onChange={e => setField("name", e.target.value)} />
+        <TextField label="Descrizione (facoltativa)" fullWidth size="small" margin="dense"
+          multiline minRows={2} inputProps={{ maxLength: 500 }}
+          placeholder="Es. rimborsi per trasferte o spese anticipate"
+          helperText="Aiuta l'assistente a classificare meglio entrate ambigue"
           value={data.description ?? ""}
           onChange={e => setField("description", e.target.value)} />
       </>
@@ -1110,11 +1383,17 @@ export default function SpazioPage() {
           slotProps={{ inputLabel: { shrink: true } }}
           onChange={e => setField("date", e.target.value)} />
         <FormControl fullWidth size="small" margin="dense">
-          <InputLabel>Tipo entrata</InputLabel>
-          <Select label="Tipo entrata" value={data.income_type ?? ""}
-            onChange={e => setField("income_type", e.target.value)}>
+          <InputLabel>Categoria entrata</InputLabel>
+          <Select label="Categoria entrata" value={data.income_category_id ?? ""}
+            onChange={e => {
+              const category = incomeCategories.find(item => item.id === Number(e.target.value));
+              setField("income_category_id", e.target.value);
+              setField("income_category", category?.name ?? "");
+            }}>
             <MenuItem value=""><em>Nessuno</em></MenuItem>
-            {INCOME_TYPES.map(t => <MenuItem key={t} value={t} sx={{ textTransform: "capitalize" }}>{t}</MenuItem>)}
+            {activeIncomeCategories(incomeCategories).map(category => (
+              <MenuItem key={category.id} value={category.id}>{category.name}</MenuItem>
+            ))}
           </Select>
         </FormControl>
         <FormControl fullWidth size="small" margin="dense">
@@ -1167,7 +1446,7 @@ export default function SpazioPage() {
   }
 
   const ENTITY_LABELS: Record<EntityType, string> = {
-    account: "Conto", category: "Categoria", subscription: "Abbonamento",
+    account: "Conto", category: "Categoria", incomeCategory: "Categoria entrata", subscription: "Abbonamento",
     expense: "Spesa", income: "Entrata", transfer: "Trasferimento",
   };
 
@@ -1179,11 +1458,11 @@ export default function SpazioPage() {
     <Box sx={{ p: { xs: 1.5, sm: 3 }, width: "100%", maxWidth: 1400, mx: "auto", overflowX: "hidden" }}>
       {/* Header */}
       <Box sx={{ mb: 3 }}>
-        <Typography variant="h5" sx={{ fontWeight: 700, color: PRIMARY, mb: 0.5 }}>
-          Il mio spazio
+        <Typography component="h1" variant="h5" sx={{ fontWeight: 300, letterSpacing: "0.015em", color: PRIMARY, mb: 0.5 }}>
+          Gestisci
         </Typography>
-        <Typography variant="body2" sx={{ color: "#6B7280" }}>
-          Gestisci conti, categorie, abbonamenti, spese ed entrate
+        <Typography variant="body2" color="text.secondary">
+          Gestisci conti, categorie e budget, abbonamenti, entrate, spese e trasferimenti
         </Typography>
       </Box>
 
@@ -1205,29 +1484,69 @@ export default function SpazioPage() {
       )}
 
       {/* Card con tabs */}
-      <Card sx={{ border: `1px solid ${BORDER}`, boxShadow: "0 1px 4px rgba(0,0,0,0.06)", borderRadius: 2, overflow: "hidden" }}>
-        <Tabs
-          value={tab}
-          onChange={(_, v) => setTab(v)}
-          variant="scrollable"
-          scrollButtons="auto"
-          allowScrollButtonsMobile
-          data-tour="spazio-tabs"
-          sx={{
-            borderBottom: `1px solid ${BORDER}`,
-            px: 2,
-            "& .MuiTab-root": { fontWeight: 600, fontSize: "0.85rem", textTransform: "none", minHeight: 48 },
-            "& .Mui-selected": { color: PRIMARY },
-            "& .MuiTabs-indicator": { bgcolor: PRIMARY },
-          }}
-        >
-          <Tab label="Conti" />
-          <Tab label="Categorie" />
-          <Tab label="Abbonamenti" />
-          <Tab label="Spese" />
-          <Tab label="Entrate" />
-          <Tab label="Trasferimenti" />
-        </Tabs>
+      <Card sx={{ border: `1px solid ${BORDER}`, borderRadius: 2, overflow: "hidden" }}>
+        {isMobile ? (
+          <Box
+            data-tour="spazio-tabs"
+            role="tablist"
+            aria-label="Sezioni di Gestisci"
+            sx={{
+              borderBottom: `1px solid ${BORDER}`,
+              display: "grid",
+              gridTemplateColumns: "repeat(3, 1fr)",
+              gap: 0.5,
+              p: 1,
+            }}
+          >
+            {SPAZIO_TAB_ICONS.map(({ label, Icon }, index) => (
+              <Box
+                key={label}
+                component="button"
+                type="button"
+                role="tab"
+                aria-selected={tab === index}
+                aria-label={label}
+                onClick={() => setTab(index)}
+                sx={{
+                  display: "grid",
+                  justifyItems: "center",
+                  gap: 0.4,
+                  border: "none",
+                  borderRadius: 1.5,
+                  py: 1,
+                  cursor: "pointer",
+                  color: tab === index ? PRIMARY : "text.secondary",
+                  bgcolor: tab === index ? "rgba(233,241,234,0.07)" : "transparent",
+                  minHeight: 44,
+                }}
+              >
+                <Icon size={20} strokeWidth={1.75} aria-hidden="true" />
+              </Box>
+            ))}
+          </Box>
+        ) : (
+          <Tabs
+            value={tab}
+            onChange={(_, v) => setTab(v)}
+            variant="scrollable"
+            scrollButtons="auto"
+            data-tour="spazio-tabs"
+            sx={{
+              borderBottom: `1px solid ${BORDER}`,
+              px: 2,
+              "& .MuiTab-root": { fontWeight: 600, fontSize: "0.85rem", textTransform: "none", minHeight: 48 },
+              "& .Mui-selected": { color: PRIMARY },
+              "& .MuiTabs-indicator": { bgcolor: PRIMARY },
+            }}
+          >
+            <Tab label="Conti" />
+            <Tab label="Categorie" />
+            <Tab label="Abbonamenti" />
+            <Tab label="Spese" />
+            <Tab label="Entrate" />
+            <Tab label="Trasferimenti" />
+          </Tabs>
+        )}
 
         <CardContent sx={{ p: 0, "&:last-child": { pb: 0 } }}>
           {tab === 0 && renderAccounts()}
@@ -1247,37 +1566,27 @@ export default function SpazioPage() {
         fullWidth
         slotProps={{ paper: { "data-tour": "entity-dialog" } as Record<string, string> }}
       >
-        <DialogTitle sx={{ fontWeight: 700, fontSize: "1rem", color: PRIMARY }}>
+        <DialogTitle sx={{ fontWeight: 500, fontSize: "1rem", color: PRIMARY }}>
           {dialog.mode === "add" ? "Aggiungi" : "Modifica"} {ENTITY_LABELS[dialog.entity]}
         </DialogTitle>
         <DialogContent sx={{ pt: 0 }}>
           {renderDialogFields()}
         </DialogContent>
         <DialogActions sx={{ px: 3, pb: 2 }}>
-          <Button onClick={closeDialog} data-tour="entity-dialog-close" sx={{ color: "#6B7280", textTransform: "none" }}>
+          <Button onClick={closeDialog} data-tour="entity-dialog-close" sx={{ color: "text.secondary", textTransform: "none" }}>
             Annulla
           </Button>
           <Button
             variant="contained"
             onClick={handleSave}
-            sx={{ bgcolor: PRIMARY, textTransform: "none", fontWeight: 600, "&:hover": { bgcolor: "#142959" } }}
+            sx={{ bgcolor: PRIMARY, textTransform: "none", fontWeight: 600, "&:hover": { bgcolor: "#4AA7AE" } }}
           >
             {dialog.mode === "add" ? "Aggiungi" : "Salva"}
           </Button>
         </DialogActions>
       </Dialog>
 
-      {/* Snackbar */}
-      <Snackbar
-        open={snack.open}
-        autoHideDuration={3000}
-        onClose={() => setSnack(s => ({ ...s, open: false }))}
-        anchorOrigin={{ vertical: "bottom", horizontal: "center" }}
-      >
-        <Alert severity={snack.severity} sx={{ width: "100%" }} onClose={() => setSnack(s => ({ ...s, open: false }))}>
-          {snack.msg}
-        </Alert>
-      </Snackbar>
+      <AppSnackbar snack={snack} onClose={closeSnack} />
     </Box>
   );
 }
@@ -1291,11 +1600,11 @@ function TabToolbar({
 }: { label: string; onAdd: () => void; loading?: boolean; children?: React.ReactNode }) {
   return (
     <Box sx={{ display: "flex", alignItems: "center", gap: 1, px: 2, py: 1.5, flexWrap: "wrap", borderBottom: `1px solid ${BORDER}` }}>
-      <Typography variant="subtitle2" sx={{ fontWeight: 700, color: "#374151", flexGrow: 1 }}>
+      <Typography variant="subtitle2" sx={{ fontWeight: 500, color: "var(--color-text)", flexGrow: 1 }}>
         {label}
       </Typography>
       {children}
-      {loading && <CircularProgress size={16} sx={{ color: "#9CA3AF" }} />}
+      {loading && <CircularProgress size={16} sx={{ color: "text.secondary" }} />}
       <Button
         variant="contained"
         size="small"
@@ -1303,7 +1612,7 @@ function TabToolbar({
         onClick={onAdd}
         sx={{
           bgcolor: PRIMARY, textTransform: "none", fontWeight: 600, fontSize: "0.8rem",
-          px: 1.5, py: 0.5, "&:hover": { bgcolor: "#142959" },
+          px: 1.5, py: 0.5, "&:hover": { bgcolor: "#4AA7AE" },
         }}
       >
         Aggiungi
@@ -1316,12 +1625,12 @@ function RowActions({ onEdit, onDelete, editTourAttr }: { onEdit: () => void; on
   return (
     <Box sx={{ display: "flex", gap: 0.5, justifyContent: "flex-end" }}>
       <Tooltip title="Modifica">
-        <IconButton size="small" onClick={onEdit} data-tour={editTourAttr} sx={{ color: "#6B7280", "&:hover": { color: PRIMARY } }}>
+        <IconButton aria-label="Modifica" onClick={onEdit} data-tour={editTourAttr} sx={{ width: 44, height: 44, color: "text.secondary", "&:hover": { color: "primary.main" } }}>
           <Pencil size={14} />
         </IconButton>
       </Tooltip>
       <Tooltip title="Elimina">
-        <IconButton size="small" onClick={onDelete} sx={{ color: "#6B7280", "&:hover": { color: "#EF4444" } }}>
+        <IconButton aria-label="Elimina" onClick={onDelete} sx={{ width: 44, height: 44, color: "text.secondary", "&:hover": { color: "error.main" } }}>
           <Trash2 size={14} />
         </IconButton>
       </Tooltip>
@@ -1329,34 +1638,50 @@ function RowActions({ onEdit, onDelete, editTourAttr }: { onEdit: () => void; on
   );
 }
 
-function EmptyRow({ colSpan }: { colSpan: number }) {
-  return (
-    <TableRow>
-      <TableCell colSpan={colSpan} sx={{ textAlign: "center", py: 4, color: "#9CA3AF", fontSize: "0.85rem" }}>
-        Nessun elemento trovato
-      </TableCell>
-    </TableRow>
-  );
-}
-
 function DateRangeFilter({
-  start, end, onStart, onEnd,
-}: { start: string; end: string; onStart: (v: string) => void; onEnd: (v: string) => void }) {
+  start, end, onChange,
+}: { start: string; end: string; onChange: (start: string, end: string) => void }) {
+  const [anchorEl, setAnchorEl] = useState<HTMLElement | null>(null);
+  const activePreset = DATE_RANGE_PRESETS.find(p => p.start() === start && p.end() === end);
+  const label = activePreset ? activePreset.label : `${formatDateIt(start)} – ${formatDateIt(end)}`;
+
+  function applyRange(rangeStart: string, rangeEnd: string) {
+    onChange(rangeStart, rangeEnd);
+    setAnchorEl(null);
+  }
+
   return (
-    <Box sx={{ display: "flex", gap: 1, alignItems: "center" }}>
-      <TextField
-        size="small" type="date" label="Dal" value={start}
-        slotProps={{ inputLabel: { shrink: true } }}
-        onChange={e => onStart(e.target.value)}
-        sx={{ "& .MuiInputBase-input": { fontSize: "0.75rem" }, width: 140 }}
-      />
-      <TextField
-        size="small" type="date" label="Al" value={end}
-        slotProps={{ inputLabel: { shrink: true } }}
-        onChange={e => onEnd(e.target.value)}
-        sx={{ "& .MuiInputBase-input": { fontSize: "0.75rem" }, width: 140 }}
-      />
-    </Box>
+    <>
+      <Button
+        variant="outlined"
+        size="small"
+        startIcon={<CalendarDays size={14} />}
+        onClick={e => setAnchorEl(e.currentTarget)}
+        sx={{
+          fontSize: "0.75rem", textTransform: "none", fontWeight: 500, minHeight: 40,
+          color: "text.primary", borderColor: "divider", whiteSpace: "nowrap",
+        }}
+      >
+        {label}
+      </Button>
+      <Menu anchorEl={anchorEl} open={Boolean(anchorEl)} onClose={() => setAnchorEl(null)}>
+        {DATE_RANGE_PRESETS.map(p => (
+          <MenuItem
+            key={p.label}
+            selected={p.start() === start && p.end() === end}
+            onClick={() => applyRange(p.start(), p.end())}
+            sx={{ fontSize: "0.85rem" }}
+          >
+            {p.label}
+          </MenuItem>
+        ))}
+        <Divider sx={{ my: 0.5 }} />
+        <Box sx={{ px: 1, py: 1 }}>
+          <Typography variant="caption" color="text.secondary" sx={{ px: 0.5 }}>Intervallo personalizzato</Typography>
+          <SwipeCalendar mode="range" start={start} end={end} onRangeSelected={applyRange} />
+        </Box>
+      </Menu>
+    </>
   );
 }
 
@@ -1392,25 +1717,5 @@ function FilterSelect({ label, value, onChange, options }: {
         ))}
       </Select>
     </FormControl>
-  );
-}
-
-function SortableHead({ label, field, sortBy, sortDir, onSort, sx: sxProp }: {
-  label: string; field: string;
-  sortBy: string; sortDir: "asc" | "desc";
-  onSort: (field: string) => void;
-  sx?: object;
-}) {
-  return (
-    <TableCell sx={{ ...HEAD_SX, ...sxProp }}>
-      <TableSortLabel
-        active={sortBy === field}
-        direction={sortBy === field ? sortDir : "asc"}
-        onClick={() => onSort(field)}
-        sx={{ fontSize: "inherit", fontWeight: "inherit", color: "inherit", "&.Mui-active": { color: PRIMARY } }}
-      >
-        {label}
-      </TableSortLabel>
-    </TableCell>
   );
 }

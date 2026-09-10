@@ -14,9 +14,19 @@ load_dotenv()
 config = context.config
 
 # Le migration girano come ruolo OWNER (privilegi DDL), separato dal ruolo
-# runtime DML-only dell'app. Preferisci MIGRATION_DATABASE_URL; se assente ricadi
-# su DATABASE_URL (dev "single-role") e infine sull'URL in alembic.ini.
-db_url = os.getenv("MIGRATION_DATABASE_URL") or os.getenv("DATABASE_URL")
+# runtime DML-only dell'app. SQLite resta supportato nei test e nello sviluppo
+# locale, ma un URL PostgreSQL deve essere esplicitamente quello dell'owner.
+migration_db_url = os.getenv("MIGRATION_DATABASE_URL")
+runtime_db_url = os.getenv("DATABASE_URL")
+if not migration_db_url and runtime_db_url and runtime_db_url.lower().startswith(
+    ("postgresql", "postgres")
+):
+    raise RuntimeError(
+        "MIGRATION_DATABASE_URL is required for PostgreSQL migrations; "
+        "DATABASE_URL must only be used by the runtime role."
+    )
+
+db_url = migration_db_url or runtime_db_url
 if db_url:
     # configparser (usato da Alembic) interpreta '%' come sintassi di interpolazione:
     # va raddoppiato ('%%') o la set_main_option solleva ValueError. NB: i caratteri

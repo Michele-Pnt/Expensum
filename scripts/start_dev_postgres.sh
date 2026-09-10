@@ -34,7 +34,7 @@ set -a
 # shellcheck disable=SC1091
 source "$PROJECT_DIR/.env.local"
 set +a
-echo "[postgres]  DATABASE_URL attiva: $DATABASE_URL"
+echo "[postgres]  DATABASE_URL caricata dall'.env.local (segreto nascosto)"
 
 # Pulizia frontend residuo da esecuzioni precedenti (stesso motivo di start_dev.sh:
 # terminale chiuso senza Ctrl+C lascia processi orfani).
@@ -61,4 +61,10 @@ tail -f "$LOG_DIR/frontend.log" | sed 's/^/\033[35m[frontend]\033[0m /' &
 # ricadere silenziosamente su sqlite. Il trap/cleanup di start_dev.sh resta invariato
 # per ngrok/bot/dashboard; quello qui sopra copre solo il frontend aggiunto da questo
 # script.
-"$SCRIPT_DIR/start_dev.sh"
+# start_dev.sh usa sed -i in sintassi GNU (Linux); su macOS BSD sed richiede
+# l'argomento di estensione backup, quindi lì si usa la variante start_dev_mac.sh.
+if [[ "$(uname)" == "Darwin" ]]; then
+    "$SCRIPT_DIR/start_dev_mac.sh"
+else
+    "$SCRIPT_DIR/start_dev.sh"
+fi

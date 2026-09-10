@@ -1,5 +1,12 @@
 This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
 
+## Configurazione sviluppo
+
+Per consentire a Next.js di accettare un tunnel ngrok durante `npm run dev`, esporta
+facoltativamente `NEXT_DEV_ALLOWED_HOST` con il solo hostname, per esempio
+`tunnel-esempio.ngrok-free.app`. Questa e' configurazione pubblica di sviluppo: il frontend non
+legge il `.env` backend e non deve mai ricevere secret applicativi.
+
 ## Getting Started
 
 First, run the development server:

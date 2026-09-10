@@ -4,6 +4,499 @@ from unittest.mock import patch, MagicMock
 pytestmark = pytest.mark.e2e
 
 
+def test_analytics_bucket_yearly_marks_current_year_partial():
+    from datetime import date
+
+    from src.dashboard.blueprints.analytics_routes import _analytics_bucket
+
+    assert _analytics_bucket(date(2026, 2, 1), "yearly", date(2026, 8, 24)) == (
+        "2026",
+        "2026",
+        True,
+    )
+
+
+def test_analytics_bucket_quarterly_has_stable_key_and_label():
+    from datetime import date
+
+    from src.dashboard.blueprints.analytics_routes import _analytics_bucket
+
+    assert _analytics_bucket(date(2025, 5, 1), "quarterly", date(2026, 8, 24)) == (
+        "2025-Q2",
+        "Q2 2025",
+        False,
+    )
+
+
+def _login_analytics_user(client, store, chat_id: str) -> None:
+    store.add_user(chat_id=chat_id, username="analytics-user", storage_backend="postgres")
+    store.set_user_plan(chat_id, "pro")
+    with client.session_transaction() as sess:
+        sess["user_logged_in"] = True
+        sess["chat_id"] = chat_id
+        sess["token_version"] = store.get_token_version(chat_id)
+
+
+def test_user_preferences_rejects_general_budget_below_category_total(client):
+    from src.dashboard.app import store
+    from src.storage.postgres_storage import PostgresStorage
+
+    chat_id = "preferences_budget_minimum"
+    _login_analytics_user(client, store, chat_id)
+    with store.Session() as session:
+        storage = PostgresStorage(session=session, user_id=chat_id)
+        storage.create_category("Casa", monthly_budget=300.0)
+        storage.create_category("Spesa", monthly_budget=200.0)
+
+    response = client.put("/api/user/preferences", json={"monthly_budget": 400.0})
+
+    assert response.status_code == 400
+    assert response.json["error"] == (
+        "Il budget mensile generale non puo' essere minore della somma dei budget categoria."
+    )
+
+
+def test_user_preferences_saves_general_monthly_budget(client):
+    from src.dashboard.app import store
+
+    chat_id = "preferences_budget_save"
+    _login_analytics_user(client, store, chat_id)
+
+    response = client.put("/api/user/preferences", json={"monthly_budget": 650.0})
+
+    assert response.status_code == 200
+    assert float(store.get_user_preferences(chat_id)["monthly_budget"]) == 650.0
+
+
+def test_user_preferences_allows_general_budget_equal_to_active_category_total(client):
+    from src.dashboard.app import store
+    from src.storage.postgres_storage import PostgresStorage
+
+    chat_id = "preferences_budget_equal_minimum"
+    _login_analytics_user(client, store, chat_id)
+    with store.Session() as session:
+        storage = PostgresStorage(session=session, user_id=chat_id)
+        storage.create_category("Casa", monthly_budget=300.0)
+        archived = storage.create_category("Vecchia", monthly_budget=200.0)
+        storage.set_category_archived(archived["id"], True)
+
+    response = client.put("/api/user/preferences", json={"monthly_budget": 300.0})
+
+    assert response.status_code == 200
+    assert float(store.get_user_preferences(chat_id)["monthly_budget"]) == 300.0
+
+
+def test_user_preferences_rejects_non_finite_general_budget(client):
+    from src.dashboard.app import store
+
+    chat_id = "preferences_budget_nan"
+    _login_analytics_user(client, store, chat_id)
+
+    response = client.put("/api/user/preferences", json={"monthly_budget": "nan"})
+
+    assert response.status_code == 400
+    assert response.json["error"] == "monthly_budget deve essere un numero finito"
+
+
+def test_user_preferences_rejects_infinite_general_budget(client):
+    from src.dashboard.app import store
+
+    chat_id = "preferences_budget_infinity"
+    _login_analytics_user(client, store, chat_id)
+
+    response = client.put("/api/user/preferences", json={"monthly_budget": "inf"})
+
+    assert response.status_code == 400
+    assert response.json["error"] == "monthly_budget deve essere un numero finito"
+
+
+def test_user_preferences_clears_general_monthly_budget(client):
+    from src.dashboard.app import store
+
+    chat_id = "preferences_budget_clear"
+    _login_analytics_user(client, store, chat_id)
+    assert client.put("/api/user/preferences", json={"monthly_budget": 650.0}).status_code == 200
+
+    response = client.put("/api/user/preferences", json={"monthly_budget": None})
+
+    assert response.status_code == 200
+    assert store.get_user_preferences(chat_id)["monthly_budget"] is None
+
+
+def test_user_preferences_update_does_not_rewrite_onboarding_step(client):
+    from src.dashboard.app import store
+
+    chat_id = "preferences_budget_keeps_onboarding"
+    _login_analytics_user(client, store, chat_id)
+    store.complete_onboarding(chat_id)
+
+    response = client.put("/api/user/preferences", json={"monthly_budget": 650.0})
+
+    assert response.status_code == 200
+    assert store.get_user_preferences(chat_id)["onboarding_step"] == "completed"
+
+
+def _has_demo_data_flag(store, chat_id: str) -> bool:
+    from src.user_store import User
+
+    with store.Session() as session:
+        user = session.query(User).filter(User.chat_id == chat_id).first()
+        return bool(user.has_demo_data)
+
+
+def test_demo_load_then_clear_round_trip(client):
+    # Regressione: l'estrazione in blueprint aveva lasciato le due route su un nome
+    # (`_get_storage`) mai importato in privacy_routes.py — un NameError silenzioso,
+    # mai catturato da un test perché nessuno esercitava questi due endpoint.
+    from src.dashboard.app import store
+
+    chat_id = "demo_data_round_trip"
+    store.add_user(chat_id=chat_id, username="demo-user", storage_backend="postgres")
+    with client.session_transaction() as sess:
+        sess["user_logged_in"] = True
+        sess["chat_id"] = chat_id
+        sess["token_version"] = store.get_token_version(chat_id)
+
+    load_response = client.post("/api/demo/load")
+    assert load_response.status_code == 200
+    assert load_response.json["ok"] is True
+    assert load_response.json["expense_count"] > 0
+    assert _has_demo_data_flag(store, chat_id) is True
+
+    clear_response = client.post("/api/demo/clear")
+    assert clear_response.status_code == 200
+    assert clear_response.json["ok"] is True
+    assert clear_response.json["deleted"] == load_response.json["expense_count"]
+    assert _has_demo_data_flag(store, chat_id) is False
+
+
+def test_onboarding_completes_without_general_monthly_budget(client):
+    from src.dashboard.app import store
+
+    chat_id = "onboarding_without_budget"
+    store.add_user(chat_id=chat_id, username="onboarding-user", storage_backend="postgres")
+    with client.session_transaction() as sess:
+        sess["user_logged_in"] = True
+        sess["chat_id"] = chat_id
+        sess["token_version"] = store.get_token_version(chat_id)
+
+    step_response = client.post(
+        "/api/onboarding/step",
+        json={"step": "notifications", "data": {"notifications_enabled": True}},
+    )
+    complete_response = client.post("/api/onboarding/complete", json={"hobbies": []})
+
+    preferences = store.get_user_preferences(chat_id)
+    assert step_response.status_code == 200
+    assert complete_response.status_code == 200
+    assert preferences["monthly_budget"] is None
+    assert preferences["onboarding_step"] == "completed"
+
+
+def test_analytics_budget_status_includes_general_monthly_budget(client):
+    from src.dashboard.app import store
+
+    chat_id = "analytics_budget_general"
+    _login_analytics_user(client, store, chat_id)
+    assert client.put("/api/user/preferences", json={"monthly_budget": 900.0}).status_code == 200
+
+    response = client.get("/api/analytics/budget-status")
+
+    assert response.status_code == 200
+    assert float(response.json["monthly_budget"]) == 900.0
+
+
+def test_space_category_create_rejects_budget_that_exceeds_general_budget(client):
+    from src.dashboard.app import store
+
+    chat_id = "category_budget_over_general"
+    _login_analytics_user(client, store, chat_id)
+    csrf_token = client.get("/api/csrf-token").json["csrf_token"]
+    assert client.put("/api/user/preferences", json={"monthly_budget": 300.0}).status_code == 200
+
+    response = client.post(
+        "/api/space/categories",
+        json={"name": "Casa", "monthly_budget": 350.0},
+        headers={"X-CSRFToken": csrf_token},
+    )
+
+    assert response.status_code == 400
+    assert response.json["error"] == (
+        "La somma dei budget categoria non puo' superare il budget mensile generale."
+    )
+
+
+def test_space_category_update_rejects_budget_that_exceeds_general_budget(client):
+    from src.dashboard.app import store
+    from src.storage.postgres_storage import PostgresStorage
+
+    chat_id = "category_budget_update_over_general"
+    _login_analytics_user(client, store, chat_id)
+    csrf_token = client.get("/api/csrf-token").json["csrf_token"]
+    assert client.put("/api/user/preferences", json={"monthly_budget": 300.0}).status_code == 200
+    with store.Session() as session:
+        storage = PostgresStorage(session=session, user_id=chat_id)
+        category = storage.create_category("Casa", monthly_budget=200.0)
+
+    response = client.put(
+        f"/api/space/categories/{category['id']}",
+        json={"monthly_budget": 350.0},
+        headers={"X-CSRFToken": csrf_token},
+    )
+
+    assert response.status_code == 400
+    assert response.json["error"] == (
+        "La somma dei budget categoria non puo' superare il budget mensile generale."
+    )
+
+
+def test_space_category_unarchive_rejects_budget_that_exceeds_general_budget(client):
+    from src.dashboard.app import store
+    from src.storage.postgres_storage import PostgresStorage
+
+    chat_id = "category_budget_unarchive_over_general"
+    _login_analytics_user(client, store, chat_id)
+    csrf_token = client.get("/api/csrf-token").json["csrf_token"]
+    assert client.put("/api/user/preferences", json={"monthly_budget": 300.0}).status_code == 200
+    with store.Session() as session:
+        storage = PostgresStorage(session=session, user_id=chat_id)
+        storage.create_category("Casa", monthly_budget=200.0)
+        archived = storage.create_category("Extra", monthly_budget=200.0)
+        storage.set_category_archived(archived["id"], True)
+
+    response = client.post(
+        f"/api/space/categories/{archived['id']}/unarchive",
+        headers={"X-CSRFToken": csrf_token},
+    )
+
+    assert response.status_code == 400
+    assert response.json["error"] == (
+        "La somma dei budget categoria non puo' superare il budget mensile generale."
+    )
+
+
+def test_manage_add_category_rejects_budget_that_exceeds_general_budget(client):
+    from src.dashboard.app import store
+
+    chat_id = "manage_add_category_budget_over_general"
+    store.add_user(chat_id=chat_id, username="manage-user", storage_backend="postgres")
+    reg_token = store.create_oauth_session(chat_id)
+    store.update_user_preferences(chat_id, {"monthly_budget": 300.0})
+
+    response = client.post(
+        "/api/manage/add",
+        json={
+            "reg_token": reg_token,
+            "entity_type": "category",
+            "data": {"name": "Casa", "monthly_budget": 350.0},
+        },
+    )
+
+    assert response.status_code == 400
+    assert response.json["error"] == (
+        "La somma dei budget categoria non puo' superare il budget mensile generale."
+    )
+
+
+def test_manage_edit_category_rejects_budget_that_exceeds_general_budget(client):
+    from src.dashboard.app import store
+    from src.storage.postgres_storage import PostgresStorage
+
+    chat_id = "manage_edit_category_budget_over_general"
+    store.add_user(chat_id=chat_id, username="manage-user", storage_backend="postgres")
+    reg_token = store.create_oauth_session(chat_id)
+    store.update_user_preferences(chat_id, {"monthly_budget": 300.0})
+    with store.Session() as session:
+        storage = PostgresStorage(session=session, user_id=chat_id)
+        category = storage.create_category("Casa", monthly_budget=200.0)
+
+    response = client.put(
+        "/api/manage/update",
+        json={
+            "reg_token": reg_token,
+            "entity_type": "category",
+            "entity_id": category["id"],
+            "data": {"monthly_budget": 350.0},
+        },
+    )
+
+    assert response.status_code == 400
+    assert response.json["error"] == (
+        "La somma dei budget categoria non puo' superare il budget mensile generale."
+    )
+
+
+def test_categories_expense_yearly_api_aggregates_and_marks_partial(client, monkeypatch):
+    from datetime import date
+
+    from src.dashboard.app import store
+    from src.storage.postgres_storage import PostgresStorage
+
+    _login_analytics_user(client, store, "analytics_categories_yearly")
+    monkeypatch.setattr(PostgresStorage, "fetch_all_transactions", lambda self, start, end: [
+        {"date": date(2025, 1, 10), "amount": 300.0, "category": "Casa"},
+        {"date": date(2025, 2, 10), "amount": 350.0, "category": "Casa"},
+        {"date": date(2026, 1, 10), "amount": 650.0, "category": "Casa"},
+    ])
+    monkeypatch.setattr(PostgresStorage, "get_categories", lambda self, include_archived=True: [])
+
+    response = client.get("/api/analytics/categories-expense?months=24&granularity=yearly")
+
+    assert response.status_code == 200
+    row_2026 = next(row for row in response.json["by_category"] if row["period_key"] == "2026")
+    assert row_2026["amount"] == 650.0
+    assert row_2026["is_partial"] is True
+
+
+def test_savings_rate_yearly_api_uses_aggregated_income_and_expenses(client, monkeypatch):
+    from datetime import date
+
+    from src.dashboard.app import store
+    from src.storage.postgres_storage import PostgresStorage
+
+    _login_analytics_user(client, store, "analytics_savings_yearly")
+    monkeypatch.setattr(PostgresStorage, "fetch_all_transactions", lambda self, start, end: [
+        {"date": date(2025, 1, 10), "amount": 600.0},
+        {"date": date(2025, 2, 10), "amount": 1200.0},
+    ])
+    monkeypatch.setattr(PostgresStorage, "fetch_income", lambda self, start, end: [
+        {"date": date(2025, 1, 10), "amount": 1000.0},
+        {"date": date(2025, 2, 10), "amount": 2000.0},
+    ])
+
+    response = client.get("/api/analytics/savings-rate?months=24&granularity=yearly")
+
+    assert response.status_code == 200
+    entry = next(row for row in response.json["savings_rate"] if row["period_key"] == "2025")
+    assert entry["savings"] == 1200.0
+    assert entry["rate"] == 40.0
+    assert entry["months_included"] == 2
+
+
+def test_income_yearly_api_returns_bucket_metadata(client, monkeypatch):
+    from datetime import date
+
+    from src.dashboard.app import store
+    from src.storage.postgres_storage import PostgresStorage
+
+    _login_analytics_user(client, store, "analytics_income_yearly")
+    monkeypatch.setattr(PostgresStorage, "fetch_income", lambda self, start, end: [
+        {"date": date(2025, 1, 10), "amount": 1000.0},
+    ])
+
+    response = client.get("/api/analytics/income?months=24&granularity=yearly")
+
+    assert response.status_code == 200
+    assert response.json["monthly"][0]["period_key"] == "2025"
+
+
+def test_capital_trend_quarterly_uses_last_snapshot_in_each_bucket(client, monkeypatch):
+    from datetime import date
+    from types import SimpleNamespace
+
+    from src.dashboard.app import store
+    from src.storage.postgres_storage import PostgresStorage
+
+    _login_analytics_user(client, store, "analytics_capital_quarterly")
+    monkeypatch.setattr(PostgresStorage, "fetch_accounts", lambda self: [{
+        "id": 1, "name": "Corrente", "opening_balance": 0.0,
+    }])
+    points = [
+        SimpleNamespace(year=2025, month=1, total=100.0, by_account={1: 100.0}),
+        SimpleNamespace(year=2025, month=2, total=130.0, by_account={1: 130.0}),
+        SimpleNamespace(year=2025, month=4, total=200.0, by_account={1: 200.0}),
+    ]
+    monkeypatch.setattr(
+        "src.wealth.build_wealth_series",
+        lambda storage, end, since=None: SimpleNamespace(
+            points=points, account_names={1: "Corrente"},
+            unassigned_expenses=0.0, unassigned_incomes=0.0,
+        ),
+    )
+
+    response = client.get("/api/analytics/capital-trend?months=24&granularity=quarterly")
+
+    assert response.status_code == 200
+    q1 = next(row for row in response.json["capital_trend"] if row["period_key"] == "2025-Q1")
+    assert q1["total"] == 130.0
+    assert q1["months_included"] == 2
+
+
+def test_month_comparison_yearly_compares_previous_and_three_prior_buckets(client, monkeypatch):
+    from datetime import date
+
+    from src.dashboard.app import store
+    from src.storage.postgres_storage import PostgresStorage
+
+    _login_analytics_user(client, store, "analytics_comparison_yearly")
+
+    # Anni relativi a oggi: con anni fissi il test scadrebbe al cambio d'anno.
+    current_year = date.today().year
+    monkeypatch.setattr(PostgresStorage, "fetch_all_transactions", lambda self, start, end: [
+        {"date": date(current_year - 4, 5, 1), "amount": 10.0, "category": "Casa"},
+        {"date": date(current_year - 3, 5, 1), "amount": 20.0, "category": "Casa"},
+        {"date": date(current_year - 2, 5, 1), "amount": 30.0, "category": "Casa"},
+        {"date": date(current_year - 1, 5, 1), "amount": 40.0, "category": "Casa"},
+        {"date": date(current_year, 5, 1), "amount": 50.0, "category": "Casa"},
+    ])
+
+    response = client.get("/api/analytics/month-comparison?granularity=yearly")
+
+    assert response.status_code == 200
+    row = next(item for item in response.json["comparisons"] if item["category"] == "Casa")
+    assert row["current_month"] == 50.0
+    assert row["last_month"] == 40.0
+    assert row["avg_3m"] == 30.0
+    assert row["period_key"] == str(current_year)
+
+
+def test_month_comparison_monthly_keeps_legacy_denominator_for_missing_month(client, monkeypatch):
+    from datetime import date
+
+    from src.dashboard.app import store
+    from src.storage.postgres_storage import PostgresStorage
+
+    _login_analytics_user(client, store, "analytics_comparison_monthly_gap")
+
+    # Date relative al mese corrente: con date fisse il test inizia a fallire da
+    # solo quando il calendario avanza (la finestra dei bucket è ancorata a oggi).
+    def month_start(months_ago: int) -> date:
+        absolute = date.today().year * 12 + date.today().month - 1 - months_ago
+        return date(absolute // 12, absolute % 12 + 1, 1)
+
+    monkeypatch.setattr(PostgresStorage, "fetch_all_transactions", lambda self, start, end: [
+        {"date": month_start(3), "amount": 20.0, "category": "Casa"},
+        {"date": month_start(1), "amount": 10.0, "category": "Casa"},
+        {"date": month_start(0), "amount": 40.0, "category": "Casa"},
+    ])
+
+    response = client.get("/api/analytics/month-comparison")
+
+    assert response.status_code == 200
+    row = next(item for item in response.json["comparisons"] if item["category"] == "Casa")
+    assert row["avg_3m"] == 15.0
+
+
+def test_month_comparison_bucket_context_includes_months_included(client, monkeypatch):
+    from datetime import date
+
+    from src.dashboard.app import store
+    from src.storage.postgres_storage import PostgresStorage
+
+    _login_analytics_user(client, store, "analytics_comparison_metadata")
+    monkeypatch.setattr(PostgresStorage, "fetch_all_transactions", lambda self, start, end: [
+        {"date": date(2025, 5, 1), "amount": 20.0, "category": "Casa"},
+        {"date": date(2026, 5, 1), "amount": 40.0, "category": "Casa"},
+    ])
+
+    response = client.get("/api/analytics/month-comparison?granularity=yearly")
+
+    assert response.status_code == 200
+    assert response.json["current_bucket"]["months_included"] == 1
+    assert response.json["previous_bucket"]["months_included"] == 1
+    assert all("months_included" in bucket for bucket in response.json["average_buckets"])
+
+
 def _create_dashboard_user(store, chat_id="chat_123", email="test@example.com", password="Password123"):
     store.add_user(chat_id=chat_id, username="test-user", storage_backend="postgres")
     store.set_credentials(chat_id, email, password)
@@ -31,7 +524,7 @@ def test_web_login_success_redirects_to_setup(client):
     assert "/setup?reg_token=" in response.headers["Location"]
 
 
-def test_web_login_completed_user_redirects_to_chat(client):
+def test_web_login_completed_user_redirects_to_home(client):
     from src.dashboard.app import store
 
     chat_id, email, password = _create_dashboard_user(
@@ -40,11 +533,12 @@ def test_web_login_completed_user_redirects_to_chat(client):
         email="completed@example.com",
     )
     store.mark_setup_completed(chat_id)
+    store.complete_onboarding(chat_id)
 
     response = client.post("/login", data={"email": email, "password": password}, follow_redirects=False)
 
     assert response.status_code == 302
-    assert response.headers["Location"].endswith("/chat")
+    assert response.headers["Location"].endswith("/home")
 
 
 def test_web_login_reactivates_suspended_user(client):
@@ -232,7 +726,7 @@ def test_web_login_session_guard_uses_user_logged_in(client):
     assert "/setup?reg_token=" in response.headers["Location"]
 
 
-def test_web_login_session_guard_redirects_completed_user_to_chat(client):
+def test_web_login_session_guard_redirects_completed_user_to_home(client):
     from src.dashboard.app import store
 
     chat_id, email, password = _create_dashboard_user(
@@ -241,6 +735,7 @@ def test_web_login_session_guard_redirects_completed_user_to_chat(client):
         email="guard-completed@example.com",
     )
     store.mark_setup_completed(chat_id)
+    store.complete_onboarding(chat_id)
 
     login_response = client.post("/login", data={"email": email, "password": password}, follow_redirects=False)
     assert login_response.status_code == 302
@@ -248,7 +743,7 @@ def test_web_login_session_guard_redirects_completed_user_to_chat(client):
     response = client.get("/login", follow_redirects=False)
 
     assert response.status_code == 302
-    assert response.headers["Location"].endswith("/chat")
+    assert response.headers["Location"].endswith("/home")
 
 
 def test_web_app_entry_redirects_anonymous_users_to_login(client):
@@ -272,7 +767,7 @@ def test_web_app_entry_redirects_logged_in_users_to_chat(client):
     assert "/setup?reg_token=" in response.headers["Location"]
 
 
-def test_web_app_entry_redirects_completed_users_to_chat(client):
+def test_web_app_entry_redirects_completed_users_to_home(client):
     from src.dashboard.app import store
 
     chat_id, email, password = _create_dashboard_user(
@@ -281,6 +776,7 @@ def test_web_app_entry_redirects_completed_users_to_chat(client):
         email="app-done@example.com",
     )
     store.mark_setup_completed(chat_id)
+    store.complete_onboarding(chat_id)
 
     login_response = client.post("/login", data={"email": email, "password": password}, follow_redirects=False)
     assert login_response.status_code == 302
@@ -288,7 +784,7 @@ def test_web_app_entry_redirects_completed_users_to_chat(client):
     response = client.get("/app", follow_redirects=False)
 
     assert response.status_code == 302
-    assert response.headers["Location"].endswith("/chat")
+    assert response.headers["Location"].endswith("/home")
 
 
 def test_setup_without_token_denies_access_with_generic_message(client):
@@ -326,7 +822,7 @@ def test_api_auth_session_returns_setup_redirect_for_incomplete_browser_session(
     assert response.json["redirect_to"].startswith("/setup?reg_token=")
 
 
-def test_api_auth_session_returns_chat_for_completed_browser_session(client):
+def test_api_auth_session_returns_home_for_completed_browser_session(client):
     from src.dashboard.app import store
 
     chat_id, email, password = _create_dashboard_user(
@@ -335,6 +831,7 @@ def test_api_auth_session_returns_chat_for_completed_browser_session(client):
         email="auth-done@example.com",
     )
     store.mark_setup_completed(chat_id)
+    store.complete_onboarding(chat_id)
 
     login_response = client.post("/login", data={"email": email, "password": password}, follow_redirects=False)
     assert login_response.status_code == 302
@@ -435,7 +932,11 @@ def test_telegram_login_template_has_mobile_keyboard_guards(client):
     html = response.get_data(as_text=True)
 
     assert response.status_code == 200
-    assert 'inputmode="email"' in html
+    # Niente type="email" né inputmode="email": su Telegram WebApp Android quella
+    # tastiera nasconde la @ (vedi commento in templates/telegram_login.html).
+    assert 'inputmode="email"' not in html
+    assert 'type="email"' not in html
+    assert r'pattern="[^@\s]+@[^@\s]+\.[^@\s]+"' in html
     assert 'autocapitalize="none"' in html
     assert 'autocorrect="off"' in html
     assert 'spellcheck="false"' in html
@@ -488,8 +989,8 @@ def test_oauth_callback_error_no_code(client):
     assert response.status_code == 400
     assert b"Parametri mancanti" in response.data
 
-@patch("src.dashboard.app.threading.Thread")
-@patch("src.dashboard.app.requests.post")
+@patch("src.dashboard.blueprints.auth_routes.threading.Thread")
+@patch("src.dashboard.blueprints.auth_routes.requests.post")
 @patch("src.user_store.UserStore.get_and_delete_oauth_session")
 def test_oauth_callback_success(mock_get_sess, mock_post, mock_thread, client):
     """Verifica che la callback OAuth sincrona risponda 302 e avvii il thread di setup.
@@ -562,7 +1063,7 @@ def test_privacy_export_json_requires_auth(client):
 
 
 def test_privacy_export_json_excludes_secrets_and_includes_financial_data(client):
-    from src.storage.models import Account, Expense
+    from src.storage.models import Account, Expense, Income, UserIncomeCategory
     from datetime import date
 
     from src.dashboard.app import store
@@ -578,6 +1079,13 @@ def test_privacy_export_json_excludes_secrets_and_includes_financial_data(client
             user_id=chat_id, expense_date=date.today(), amount=10, name="Caffè",
             account_id=account.id,
         ))
+        income_category = UserIncomeCategory(user_id=chat_id, name="Consulenza")
+        s.add(income_category)
+        s.flush()
+        s.add(Income(
+            user_id=chat_id, income_date=date.today(), amount=150, name="Cliente",
+            account_id=account.id, income_type="Consulenza", income_category_id=income_category.id,
+        ))
         s.commit()
 
     response = client.get("/api/privacy/export-json")
@@ -589,6 +1097,8 @@ def test_privacy_export_json_excludes_secrets_and_includes_financial_data(client
     assert "notion_access_token" not in body["account"]
     assert len(body["financial_data"]["expenses"]) == 1
     assert body["financial_data"]["expenses"][0]["name"] == "Caffè"
+    assert any(row["name"] == "Consulenza" for row in body["financial_data"]["income_categories"])
+    assert body["financial_data"]["incomes"][0]["income_category"] == "Consulenza"
     assert "your_rights" in body
 
     with store.Session() as s:
@@ -880,7 +1390,7 @@ def test_admin_login_locks_out_after_threshold_failures(client):
     """
     from config import Config
     from src.rate_limiter import reset_failed_logins
-    from src.dashboard.app import ADMIN_LOCKOUT_KEY
+    from src.dashboard.blueprints.auth_routes import ADMIN_LOCKOUT_KEY
 
     reset_failed_logins(ADMIN_LOCKOUT_KEY)
     csrf_token = client.get("/api/csrf-token").json["csrf_token"]
@@ -910,7 +1420,7 @@ def test_admin_login_lockout_persists_across_different_ips(client):
     """
     from config import Config
     from src.rate_limiter import reset_failed_logins
-    from src.dashboard.app import ADMIN_LOCKOUT_KEY
+    from src.dashboard.blueprints.auth_routes import ADMIN_LOCKOUT_KEY
 
     reset_failed_logins(ADMIN_LOCKOUT_KEY)
     csrf_token = client.get("/api/csrf-token").json["csrf_token"]
@@ -943,7 +1453,7 @@ def test_safe_next_url_rejects_external_and_protocol_relative_urls():
     quasi-URL arriva da querystring/form. Deve accettare solo path relativi
     interni, mai host esterni (open redirect, imparentato con SSRF).
     """
-    from src.dashboard.app import _safe_next_url
+    from src.dashboard.blueprints.auth_routes import _safe_next_url
 
     assert _safe_next_url("/reports") == "/reports"
     assert _safe_next_url(None) is None
@@ -1076,7 +1586,8 @@ def test_telegram_link_already_linked_for_telegram_chat_id(client):
 
 
 def test_telegram_link_generates_deep_link_for_web_chat_id(client):
-    from src.dashboard.app import store, Config
+    from config import Config
+    from src.dashboard.app import store
 
     _login_completed(client, store, "web_test123", "web-link@example.com")
 
@@ -1094,7 +1605,8 @@ def test_telegram_link_generates_deep_link_for_web_chat_id(client):
 
 
 def test_telegram_link_returns_500_without_bot_username(client):
-    from src.dashboard.app import store, Config
+    from config import Config
+    from src.dashboard.app import store
 
     _login_completed(client, store, "web_test456", "web-link-2@example.com")
 
@@ -1373,6 +1885,143 @@ def test_space_transfers_rejects_same_account(client):
     assert resp.status_code == 400
 
 
+def test_space_transfers_update(client):
+    """PUT /api/space/transfers/<id> aggiorna il trasferimento e ribilancia i conti."""
+    from datetime import date
+    from src.dashboard.app import store
+    from src.storage.postgres_storage import PostgresStorage
+
+    store.add_user(chat_id="chat_transfer_update", username="transfer-update", storage_backend="postgres")
+    with client.session_transaction() as sess:
+        sess["user_logged_in"] = True
+        sess["chat_id"] = "chat_transfer_update"
+        sess["token_version"] = store.get_token_version("chat_transfer_update")
+    csrf_token = client.get("/api/csrf-token").json["csrf_token"]
+
+    with store.Session() as s:
+        pg = PostgresStorage(session=s, user_id="chat_transfer_update")
+        acc_from = pg.create_account("Corrente", initial_balance=500.0)
+        acc_to = pg.create_account("Risparmio", initial_balance=0.0)
+        created = pg.create_transfer(
+            transfer_date=date(2026, 4, 10), amount=150.0,
+            from_account_id=acc_from["id"], to_account_id=acc_to["id"], name="Giroconto",
+        )
+
+    resp = client.put(
+        f"/api/space/transfers/{created['id']}",
+        json={"amount": 200.0},
+        headers={"X-CSRFToken": csrf_token},
+    )
+    assert resp.status_code == 200
+    assert resp.json["amount"] == 200.0
+
+    resp = client.get("/api/space/accounts")
+    balances = {a["name"]: a["current_balance"] for a in resp.json["accounts"]}
+    assert balances["Corrente"] == 500.0 - 200.0
+    assert balances["Risparmio"] == 0.0 + 200.0
+
+
+def test_space_transfers_update_rejects_same_account(client):
+    """PUT /api/space/transfers/<id> rifiuta from == to (400)."""
+    from datetime import date
+    from src.dashboard.app import store
+    from src.storage.postgres_storage import PostgresStorage
+
+    store.add_user(chat_id="chat_transfer_update_same", username="transfer-update-same", storage_backend="postgres")
+    with client.session_transaction() as sess:
+        sess["user_logged_in"] = True
+        sess["chat_id"] = "chat_transfer_update_same"
+        sess["token_version"] = store.get_token_version("chat_transfer_update_same")
+    csrf_token = client.get("/api/csrf-token").json["csrf_token"]
+
+    with store.Session() as s:
+        pg = PostgresStorage(session=s, user_id="chat_transfer_update_same")
+        acc_from = pg.create_account("Corrente", initial_balance=500.0)
+        acc_to = pg.create_account("Risparmio", initial_balance=0.0)
+        created = pg.create_transfer(
+            transfer_date=date(2026, 4, 10), amount=150.0,
+            from_account_id=acc_from["id"], to_account_id=acc_to["id"],
+        )
+
+    resp = client.put(
+        f"/api/space/transfers/{created['id']}",
+        json={"to_account_id": acc_from["id"]},
+        headers={"X-CSRFToken": csrf_token},
+    )
+    assert resp.status_code == 400
+
+
+def test_space_transfers_update_not_found(client):
+    """PUT /api/space/transfers/<id> con id inesistente restituisce 404."""
+    from src.dashboard.app import store
+
+    store.add_user(chat_id="chat_transfer_update_404", username="transfer-update-404", storage_backend="postgres")
+    with client.session_transaction() as sess:
+        sess["user_logged_in"] = True
+        sess["chat_id"] = "chat_transfer_update_404"
+        sess["token_version"] = store.get_token_version("chat_transfer_update_404")
+    csrf_token = client.get("/api/csrf-token").json["csrf_token"]
+
+    resp = client.put(
+        "/api/space/transfers/999999",
+        json={"amount": 10.0},
+        headers={"X-CSRFToken": csrf_token},
+    )
+    assert resp.status_code == 404
+
+
+def test_space_transfers_delete(client):
+    """DELETE /api/space/transfers/<id> elimina il trasferimento e ripristina i saldi."""
+    from datetime import date
+    from src.dashboard.app import store
+    from src.storage.postgres_storage import PostgresStorage
+
+    store.add_user(chat_id="chat_transfer_delete", username="transfer-delete", storage_backend="postgres")
+    with client.session_transaction() as sess:
+        sess["user_logged_in"] = True
+        sess["chat_id"] = "chat_transfer_delete"
+        sess["token_version"] = store.get_token_version("chat_transfer_delete")
+    csrf_token = client.get("/api/csrf-token").json["csrf_token"]
+
+    with store.Session() as s:
+        pg = PostgresStorage(session=s, user_id="chat_transfer_delete")
+        acc_from = pg.create_account("Corrente", initial_balance=500.0)
+        acc_to = pg.create_account("Risparmio", initial_balance=0.0)
+        created = pg.create_transfer(
+            transfer_date=date(2026, 4, 10), amount=150.0,
+            from_account_id=acc_from["id"], to_account_id=acc_to["id"],
+        )
+
+    resp = client.delete(
+        f"/api/space/transfers/{created['id']}",
+        headers={"X-CSRFToken": csrf_token},
+    )
+    assert resp.status_code == 200
+
+    resp = client.get("/api/space/accounts")
+    balances = {a["name"]: a["current_balance"] for a in resp.json["accounts"]}
+    assert balances["Corrente"] == 500.0
+    assert balances["Risparmio"] == 0.0
+
+
+def test_space_transfers_delete_not_found(client):
+    """DELETE /api/space/transfers/<id> con id inesistente restituisce 404."""
+    from src.dashboard.app import store
+
+    store.add_user(chat_id="chat_transfer_delete_404", username="transfer-delete-404", storage_backend="postgres")
+    with client.session_transaction() as sess:
+        sess["user_logged_in"] = True
+        sess["chat_id"] = "chat_transfer_delete_404"
+        sess["token_version"] = store.get_token_version("chat_transfer_delete_404")
+    csrf_token = client.get("/api/csrf-token").json["csrf_token"]
+
+    resp = client.delete(
+        "/api/space/transfers/999999",
+        headers={"X-CSRFToken": csrf_token},
+    )
+    assert resp.status_code == 404
+
+
 def test_space_categories_create_with_description_synthesizes_summary(client, monkeypatch):
     """POST /api/space/categories con `description` chiama la sintesi LLM una tantum
     e salva sia il testo grezzo che la sintesi."""
@@ -1468,6 +2117,285 @@ def _login_chat_user(client, store, chat_id):
         sess["chat_id"] = chat_id
         sess["token_version"] = store.get_token_version(chat_id)
     return client.get("/api/csrf-token").json["csrf_token"]
+
+
+def test_chat_quick_expenses_requires_authentication(client):
+    """I suggerimenti rapidi chat non sono disponibili senza una sessione valida."""
+    response = client.get("/api/chat/quick-expenses")
+
+    assert response.status_code == 401
+    assert response.json == {"error": "Unauthorized"}
+
+
+def test_chat_quick_expenses_ranks_non_subscription_expenses(client, monkeypatch):
+    """Il ranking usa frequenza, poi ultima occorrenza, ed esclude gli abbonamenti."""
+    from datetime import date
+    from src.dashboard.blueprints import chat_routes as app_module
+    from src.dashboard.app import store
+
+    _login_chat_user(client, store, "quick_expenses")
+    fake_storage = MagicMock()
+    fake_storage.fetch_all_transactions.return_value = [
+        {"name": "Pranzo", "account_id": "1", "date": date(2026, 8, 20)},
+        {"name": " benzina ", "account_id": "1", "date": date(2026, 8, 19)},
+        {"name": "Pranzo", "account_id": "2", "date": date(2026, 8, 21)},
+        {"name": "Benzina", "account_id": "1", "date": date(2026, 8, 21)},
+        {"name": "Netflix", "account_id": "1", "date": date(2026, 8, 22)},
+        {"name": "Senza conto", "date": date(2026, 8, 22)},
+        {"name": "Senza data", "account_id": "1"},
+    ]
+    fake_storage.fetch_subscriptions.return_value = [{"name": "  netflix  "}]
+    fake_storage.fetch_accounts.return_value = [
+        {"id": "1", "name": "Conto"},
+        {"id": "2", "name": "Carta"},
+    ]
+    monkeypatch.setattr(app_module, "_get_storage_for_chat", lambda _chat_id: fake_storage)
+
+    response = client.get("/api/chat/quick-expenses")
+
+    assert response.status_code == 200
+    assert response.json["quick_expenses"] == [
+        {
+            "label": "Pranzo", "name": "Pranzo", "category": "", "account_id": "2",
+            "account_name": "Carta", "source": "auto",
+        },
+    ]
+
+
+def test_chat_quick_expenses_closes_storage_after_read(client, monkeypatch):
+    """Il suggerimento rapido rilascia lo storage tramite l'interfaccia pubblica."""
+    from datetime import date
+    from src.dashboard.blueprints import chat_routes as app_module
+    from src.dashboard.app import store
+
+    _login_chat_user(client, store, "quick_expenses_close")
+    fake_storage = MagicMock()
+    fake_storage.fetch_all_transactions.return_value = [
+        {"name": "Pranzo", "account_id": "1", "date": date(2026, 8, 22)},
+    ]
+    fake_storage.fetch_subscriptions.return_value = []
+    fake_storage.fetch_accounts.return_value = [{"id": "1", "name": "Conto"}]
+    monkeypatch.setattr(app_module, "_get_storage_for_chat", lambda _chat_id: fake_storage)
+
+    response = client.get("/api/chat/quick-expenses")
+
+    assert response.status_code == 200
+    fake_storage.close.assert_called_once_with()
+
+
+def test_chat_quick_expenses_returns_generic_error_when_storage_build_fails(client, monkeypatch):
+    """Un errore di costruzione storage non espone dettagli interni al client."""
+    from src.dashboard.blueprints import chat_routes as app_module
+    from src.dashboard.app import store
+
+    _login_chat_user(client, store, "quick_expenses_build_error")
+
+    def _raise_storage_build_error(_chat_id):
+        raise RuntimeError("database credentials unavailable")
+
+    monkeypatch.setattr(app_module, "_get_storage_for_chat", _raise_storage_build_error)
+
+    response = client.get("/api/chat/quick-expenses")
+
+    assert response.status_code == 500
+    assert response.json == {"error": "Impossibile caricare i suggerimenti"}
+
+
+def test_chat_quick_expenses_returns_empty_without_eligible_expenses(client, monkeypatch):
+    """Righe incomplete o legate ad abbonamenti non generano chip rapidi."""
+    from datetime import date
+    from src.dashboard.blueprints import chat_routes as app_module
+    from src.dashboard.app import store
+
+    _login_chat_user(client, store, "quick_expenses_empty")
+    fake_storage = MagicMock()
+    fake_storage.fetch_all_transactions.return_value = [
+        {"name": "Netflix", "account_id": "1", "date": date(2026, 8, 22)},
+        {"name": "", "account_id": "1", "date": date(2026, 8, 22)},
+        {"name": "Pranzo", "account_id": None, "date": date(2026, 8, 22)},
+    ]
+    fake_storage.fetch_subscriptions.return_value = [{"name": "Netflix"}]
+    fake_storage.fetch_accounts.return_value = [{"id": "1", "name": "Conto"}]
+    monkeypatch.setattr(app_module, "_get_storage_for_chat", lambda _chat_id: fake_storage)
+
+    response = client.get("/api/chat/quick-expenses")
+
+    assert response.status_code == 200
+    assert response.json == {"quick_expenses": []}
+
+
+def test_chat_quick_expenses_custom_create_list_delete(client):
+    """Ciclo completo del bottone personalizzato: creazione, comparsa in elenco, cancellazione."""
+    from src.dashboard.app import store
+    from src.storage.models import UserCategory, Account
+
+    csrf = _login_chat_user(client, store, "quick_expenses_custom")
+    with store.Session() as s:
+        cat = UserCategory(user_id="quick_expenses_custom", name="Sport")
+        acc = Account(user_id="quick_expenses_custom", name="Conto Test", opening_balance=0)
+        s.add_all([cat, acc])
+        s.commit()
+        category_id, account_id = cat.id, acc.id
+
+    create_resp = client.post(
+        "/api/chat/quick-expenses/custom",
+        json={"name": "Palestra abbonamento", "category_id": category_id, "account_id": account_id},
+        headers={"X-CSRFToken": csrf},
+    )
+    assert create_resp.status_code == 201
+    shortcut_id = create_resp.json["id"]
+
+    list_resp = client.get("/api/chat/quick-expenses")
+    assert list_resp.status_code == 200
+    custom_entries = [q for q in list_resp.json["quick_expenses"] if q["source"] == "custom"]
+    assert custom_entries == [
+        {
+            "id": shortcut_id, "label": "Palestra abbonamento", "name": "Palestra abbonamento",
+            "category": "Sport", "account_id": str(account_id), "account_name": "Conto Test",
+            "source": "custom",
+        },
+    ]
+
+    delete_resp = client.delete(
+        f"/api/chat/quick-expenses/custom/{shortcut_id}", headers={"X-CSRFToken": csrf}
+    )
+    assert delete_resp.status_code == 200
+
+    list_after = client.get("/api/chat/quick-expenses")
+    assert [q for q in list_after.json["quick_expenses"] if q["source"] == "custom"] == []
+
+
+def test_chat_quick_expenses_custom_reorder(client):
+    """Il riordino (tocca-e-trascina in chat) persiste e si riflette nell'elenco."""
+    from src.dashboard.app import store
+
+    csrf = _login_chat_user(client, store, "quick_expenses_reorder")
+    ids = []
+    for name in ("Prima", "Seconda", "Terza"):
+        r = client.post(
+            "/api/chat/quick-expenses/custom", json={"name": name}, headers={"X-CSRFToken": csrf}
+        )
+        ids.append(r.json["id"])
+
+    # Ordine iniziale = ordine di creazione.
+    initial = [q["name"] for q in client.get("/api/chat/quick-expenses").json["quick_expenses"] if q["source"] == "custom"]
+    assert initial == ["Prima", "Seconda", "Terza"]
+
+    reversed_ids = list(reversed(ids))
+    reorder_resp = client.put(
+        "/api/chat/quick-expenses/custom/reorder", json={"order": reversed_ids}, headers={"X-CSRFToken": csrf}
+    )
+    assert reorder_resp.status_code == 200
+
+    after = [q["name"] for q in client.get("/api/chat/quick-expenses").json["quick_expenses"] if q["source"] == "custom"]
+    assert after == ["Terza", "Seconda", "Prima"]
+
+
+def test_chat_quick_expenses_custom_reorder_ignores_foreign_ids(client):
+    """Un id che non appartiene all'utente viene ignorato, non rompe il riordino."""
+    from src.dashboard.app import store
+
+    csrf_a = _login_chat_user(client, store, "quick_expenses_reorder_a")
+    r = client.post("/api/chat/quick-expenses/custom", json={"name": "Mio"}, headers={"X-CSRFToken": csrf_a})
+    my_id = r.json["id"]
+
+    resp = client.put(
+        "/api/chat/quick-expenses/custom/reorder",
+        json={"order": [999999, my_id]},
+        headers={"X-CSRFToken": csrf_a},
+    )
+    assert resp.status_code == 200
+
+    names = [q["name"] for q in client.get("/api/chat/quick-expenses").json["quick_expenses"] if q["source"] == "custom"]
+    assert names == ["Mio"]
+
+
+def test_chat_quick_expenses_custom_create_requires_name(client):
+    from src.dashboard.app import store
+
+    csrf = _login_chat_user(client, store, "quick_expenses_custom_noname")
+    resp = client.post(
+        "/api/chat/quick-expenses/custom", json={"name": "  "}, headers={"X-CSRFToken": csrf}
+    )
+    assert resp.status_code == 400
+
+
+def test_chat_quick_expenses_custom_requires_authentication(client):
+    resp = client.post("/api/chat/quick-expenses/custom", json={"name": "Palestra"})
+    assert resp.status_code == 401
+    resp = client.delete("/api/chat/quick-expenses/custom/1")
+    assert resp.status_code == 401
+
+
+def test_chat_quick_expenses_custom_create_rejects_invalid_ids(client):
+    """category_id/account_id non numerici devono essere rifiutati con 400, non 500."""
+    from src.dashboard.app import store
+
+    csrf = _login_chat_user(client, store, "quick_expenses_custom_badids")
+    resp = client.post(
+        "/api/chat/quick-expenses/custom",
+        json={"name": "Palestra", "category_id": "not-an-int"},
+        headers={"X-CSRFToken": csrf},
+    )
+    assert resp.status_code == 400
+
+    resp = client.post(
+        "/api/chat/quick-expenses/custom",
+        json={"name": "Palestra", "account_id": "also-not-an-int"},
+        headers={"X-CSRFToken": csrf},
+    )
+    assert resp.status_code == 400
+
+
+def test_chat_quick_expenses_custom_delete_nonexistent_returns_404(client):
+    from src.dashboard.app import store
+
+    csrf = _login_chat_user(client, store, "quick_expenses_del_missing")
+    resp = client.delete("/api/chat/quick-expenses/custom/999999", headers={"X-CSRFToken": csrf})
+    assert resp.status_code == 404
+
+
+def test_chat_quick_expenses_custom_delete_ignores_other_users_shortcut(client):
+    """Un utente non può cancellare il bottone personalizzato di un altro utente."""
+    from src.dashboard.app import store
+
+    csrf_a = _login_chat_user(client, store, "quick_expenses_del_owner")
+    r = client.post(
+        "/api/chat/quick-expenses/custom", json={"name": "Suo"}, headers={"X-CSRFToken": csrf_a}
+    )
+    other_id = r.json["id"]
+
+    csrf_b = _login_chat_user(client, store, "quick_expenses_del_attacker")
+    resp = client.delete(
+        f"/api/chat/quick-expenses/custom/{other_id}", headers={"X-CSRFToken": csrf_b}
+    )
+    assert resp.status_code == 404
+
+    # Rimane ancora visibile per il proprietario originale.
+    _login_chat_user(client, store, "quick_expenses_del_owner")
+    names = [
+        q["name"]
+        for q in client.get("/api/chat/quick-expenses").json["quick_expenses"]
+        if q["source"] == "custom"
+    ]
+    assert names == ["Suo"]
+
+
+def test_chat_quick_expenses_custom_reorder_rejects_non_list_order(client):
+    from src.dashboard.app import store
+
+    csrf = _login_chat_user(client, store, "quick_expenses_reorder_badtype")
+    resp = client.put(
+        "/api/chat/quick-expenses/custom/reorder",
+        json={"order": "not-a-list"},
+        headers={"X-CSRFToken": csrf},
+    )
+    assert resp.status_code == 400
+
+
+def test_chat_quick_expenses_custom_reorder_requires_authentication(client):
+    resp = client.put("/api/chat/quick-expenses/custom/reorder", json={"order": []})
+    assert resp.status_code == 401
 
 
 def _fake_parsed(**overrides):
@@ -1783,3 +2711,136 @@ def test_space_transfers_requires_auth(client):
     """GET /api/space/transfers senza sessione/init-data valido risponde 401."""
     resp = client.get("/api/space/transfers")
     assert resp.status_code == 401
+
+
+def test_chat_message_income_exposes_income_categories_for_picker(client):
+    """/api/chat/message per un'entrata popola parsed['categories'] con le categorie
+    entrata dell'utente (_build_chat_parse_result + ramo income di
+    _build_transaction_payload) — replica il picker "Cambia categoria" già esistente
+    per le spese, ora anche per le entrate."""
+    from src.dashboard.app import store
+    from src.storage.postgres_storage import PostgresStorage
+    from src.expense_parser import ExpenseParser
+
+    csrf_token = _login_chat_user(client, store, "chat_income_categories_user")
+    with store.Session() as s:
+        pg = PostgresStorage(session=s, user_id="chat_income_categories_user")
+        pg.create_account("Corrente", initial_balance=100.0)
+        # "Stipendio" ecc. sono già seminate di default per un nuovo utente
+        # (DEFAULT_INCOME_CATEGORIES): qui aggiungiamo una categoria custom per
+        # verificare che il fetch arrivi davvero da get_income_category_names()
+        # e non da un elenco statico.
+        pg.create_income_category("Consulenza Extra")
+
+    transactions = [_fake_parsed(
+        type="income", name="Stipendio marzo", amount=1500.0,
+        category=None, income_type="Stipendio",
+    )]
+    with patch.object(ExpenseParser, "parse_multi_with_usage", return_value=(transactions, {})):
+        resp = client.post(
+            "/api/chat/message",
+            json={"text": "stipendio 1500"},
+            headers={"X-CSRFToken": csrf_token},
+        )
+
+    assert resp.status_code == 200
+    tx = resp.json["transactions"][0]
+    assert tx["type"] == "income"
+    assert "Consulenza Extra" in tx["parsed"]["categories"]
+    assert "Stipendio" in tx["parsed"]["categories"]
+
+
+def test_chat_message_expense_does_not_leak_income_categories(client):
+    """Il ramo spesa di _build_transaction_payload deve continuare a esporre le
+    categorie spesa, non quelle entrata, anche ora che entrambe vengono caricate
+    da _build_chat_parse_result."""
+    from src.dashboard.app import store
+    from src.storage.postgres_storage import PostgresStorage
+    from src.expense_parser import ExpenseParser
+
+    csrf_token = _login_chat_user(client, store, "chat_expense_categories_user")
+    with store.Session() as s:
+        pg = PostgresStorage(session=s, user_id="chat_expense_categories_user")
+        pg.create_account("Corrente", initial_balance=100.0)
+
+    transactions = [_fake_parsed(name="Pizza", amount=20.0, category="Ristoranti")]
+    with patch.object(ExpenseParser, "parse_multi_with_usage", return_value=(transactions, {})):
+        resp = client.post(
+            "/api/chat/message",
+            json={"text": "20€ pizza"},
+            headers={"X-CSRFToken": csrf_token},
+        )
+
+    assert resp.status_code == 200
+    tx = resp.json["transactions"][0]
+    assert "Stipendio" not in tx["parsed"]["categories"]
+
+
+def test_chat_confirm_income_with_category_correction_records_reason(client):
+    """/api/chat/confirm per un'entrata con category_was_corrected=true propaga
+    reason='category_corrected' a record_tx_event (parità col ramo spesa)."""
+    from src.dashboard.app import store
+    from src.storage.postgres_storage import PostgresStorage
+    from src.user_store import TxEvent
+
+    csrf_token = _login_chat_user(client, store, "chat_income_corrected_user")
+    with store.Session() as s:
+        pg = PostgresStorage(session=s, user_id="chat_income_corrected_user")
+        acc = pg.create_account("Corrente", initial_balance=100.0)
+
+    resp = client.post(
+        "/api/chat/confirm",
+        json={
+            "parsed": {
+                "type": "income", "amount": 1500.0, "date": "2026-04-10",
+                "name": "Stipendio", "income_type": "Stipendio",
+            },
+            "account_id": acc["id"],
+            "category_was_corrected": True,
+        },
+        headers={"X-CSRFToken": csrf_token},
+    )
+    assert resp.status_code == 200
+    assert resp.json["saved"] is True
+
+    with store.Session() as s:
+        event = s.query(TxEvent).filter_by(
+            chat_id="chat_income_corrected_user", tx_type="income", outcome="confirmed",
+        ).order_by(TxEvent.id.desc()).first()
+        assert event is not None
+        assert event.reason == "category_corrected"
+
+
+def test_chat_confirm_expense_without_correction_flag_has_no_reason(client):
+    """Comportamento invariato: senza category_was_corrected nel payload,
+    record_tx_event riceve reason=None esattamente come prima dell'introduzione
+    del picker categoria per le entrate."""
+    from src.dashboard.app import store
+    from src.storage.postgres_storage import PostgresStorage
+    from src.user_store import TxEvent
+
+    csrf_token = _login_chat_user(client, store, "chat_expense_no_correction_user")
+    with store.Session() as s:
+        pg = PostgresStorage(session=s, user_id="chat_expense_no_correction_user")
+        acc = pg.create_account("Corrente", initial_balance=100.0)
+
+    resp = client.post(
+        "/api/chat/confirm",
+        json={
+            "parsed": {
+                "type": "expense", "amount": 20.0, "date": "2026-04-10",
+                "name": "Pizza", "category": "Ristoranti",
+            },
+            "account_id": acc["id"],
+        },
+        headers={"X-CSRFToken": csrf_token},
+    )
+    assert resp.status_code == 200
+    assert resp.json["saved"] is True
+
+    with store.Session() as s:
+        event = s.query(TxEvent).filter_by(
+            chat_id="chat_expense_no_correction_user", tx_type="expense", outcome="confirmed",
+        ).order_by(TxEvent.id.desc()).first()
+        assert event is not None
+        assert event.reason is None

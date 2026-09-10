@@ -5,7 +5,7 @@ import { useSearchParams } from "next/navigation";
 import Link from "next/link";
 import { CircularProgress, Select, MenuItem } from "@mui/material";
 import type { SelectChangeEvent } from "@mui/material";
-import { Lock } from "lucide-react";
+import { Lock, Calendar, CalendarDays, AlertTriangle, FileText, Inbox } from "lucide-react";
 import styles from "./reports.module.css";
 import { trackReportViewed, trackReportGenerated } from "@/lib/analytics";
 import { getCsrfToken } from "@/lib/csrf";
@@ -33,7 +33,10 @@ const API_BASE = process.env.NEXT_PUBLIC_API_URL ?? "";
 function formatDate(iso: string): string {
   if (!iso) return "";
   const d = new Date(iso);
-  return d.toLocaleDateString("it-IT", { day: "2-digit", month: "long", year: "numeric" });
+  if (Number.isNaN(d.getTime())) return "";
+  const day = String(d.getDate()).padStart(2, "0");
+  const month = String(d.getMonth() + 1).padStart(2, "0");
+  return `${day}-${month}-${d.getFullYear()}`;
 }
 
 function authHeaders(): HeadersInit {
@@ -147,7 +150,6 @@ function ReportsPageInner() {
       })
       .catch((e) => setError(e.message))
       .finally(() => setLoading(false));
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // Se si arriva da un link (Telegram o condiviso) con ?highlight=<token>,
@@ -156,8 +158,7 @@ function ReportsPageInner() {
     if (!highlightToken || loading) return;
     setExpandedToken(highlightToken);
     loadDetail(highlightToken);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [highlightToken, loading]);
+  }, [highlightToken, loading, loadDetail]);
 
   if (loading) {
     return (
@@ -174,7 +175,7 @@ function ReportsPageInner() {
     : reports.filter((r) => r.report_type === typeFilter);
 
   return (
-    <div className={styles.container} data-tour="reports-list">
+    <div className={styles.container}>
       <div className={styles.header}>
         <div className={styles.headerTop}>
           <div>
@@ -202,6 +203,7 @@ function ReportsPageInner() {
                 },
               }}
               aria-label="Filtra per tipo di report"
+              inputProps={{ "aria-label": "Filtra per tipo di report" }}
             >
               <MenuItem value="all">Tutti i report</MenuItem>
               <MenuItem value="weekly">Solo settimanali</MenuItem>
@@ -213,17 +215,31 @@ function ReportsPageInner() {
           <div className={styles.generateRow}>
             <button
               className={styles.generateBtn}
+              style={{ display: "inline-flex", alignItems: "center", gap: "0.4rem" }}
               disabled={generating !== null}
               onClick={() => handleGenerate("weekly")}
             >
-              {generating === "weekly" ? "Generazione..." : "📅 Genera report settimanale"}
+              {generating === "weekly" ? (
+                "Generazione..."
+              ) : (
+                <>
+                  <Calendar size={14} strokeWidth={1.75} aria-hidden="true" /> Genera report settimanale
+                </>
+              )}
             </button>
             <button
               className={styles.generateBtn}
+              style={{ display: "inline-flex", alignItems: "center", gap: "0.4rem" }}
               disabled={generating !== null}
               onClick={() => handleGenerate("monthly")}
             >
-              {generating === "monthly" ? "Generazione..." : "📆 Genera report mensile"}
+              {generating === "monthly" ? (
+                "Generazione..."
+              ) : (
+                <>
+                  <CalendarDays size={14} strokeWidth={1.75} aria-hidden="true" /> Genera report mensile
+                </>
+              )}
             </button>
           </div>
         ) : (
@@ -247,7 +263,9 @@ function ReportsPageInner() {
 
       {error && (
         <div className={styles.empty}>
-          <div className={styles.emptyIcon}>⚠️</div>
+          <div className={styles.emptyIcon}>
+            <AlertTriangle size={40} strokeWidth={1.5} aria-hidden="true" />
+          </div>
           <p>
             {error === "auth_401"
               ? "Sessione non valida. Accedi di nuovo per vedere i tuoi report."
@@ -258,14 +276,18 @@ function ReportsPageInner() {
 
       {!error && reports.length === 0 && (
         <div className={styles.empty}>
-          <div className={styles.emptyIcon}>📊</div>
+          <div className={styles.emptyIcon}>
+            <FileText size={40} strokeWidth={1.5} aria-hidden="true" />
+          </div>
           <p>Nessun report ancora. Il primo arriverà lunedì mattina!</p>
         </div>
       )}
 
       {!error && reports.length > 0 && filteredReports.length === 0 && (
         <div className={styles.empty}>
-          <div className={styles.emptyIcon}>📭</div>
+          <div className={styles.emptyIcon}>
+            <Inbox size={40} strokeWidth={1.5} aria-hidden="true" />
+          </div>
           <p>Nessun report {typeFilter === "weekly" ? "settimanale" : "mensile"} per ora.</p>
         </div>
       )}
@@ -283,7 +305,11 @@ function ReportsPageInner() {
               >
                 <div className={styles.reportCardLeft}>
                   <span className={styles.reportIcon}>
-                    {r.report_type === "weekly" ? "📅" : "📆"}
+                    {r.report_type === "weekly" ? (
+                      <Calendar size={22} strokeWidth={1.5} aria-hidden="true" />
+                    ) : (
+                      <CalendarDays size={22} strokeWidth={1.5} aria-hidden="true" />
+                    )}
                   </span>
                   <div>
                     <div className={styles.reportType}>

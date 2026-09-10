@@ -1123,7 +1123,9 @@ class NotionFinanceClient:
             "date": tx_date, 
             "name": name, 
             "amount": amount, 
-            "income_type": income_type
+            "income_type": income_type,
+            "income_category": income_type,
+            "income_category_id": None,
         }
 
     def fetch_transfers(
@@ -1636,6 +1638,16 @@ class NotionFinanceClient:
         before_sleep=before_sleep_log(logger, logging.WARNING),
         reraise=True,
     )
+    def _update_page_with_retry(self, page_id: str, properties: dict) -> dict:
+        """Update a Notion page with the standard retry policy."""
+        return self._client.pages.update(page_id=page_id, properties=properties)
+
+    @retry(
+        stop=stop_after_attempt(5),
+        wait=wait_exponential(multiplier=1, min=2, max=60),
+        before_sleep=before_sleep_log(logger, logging.WARNING),
+        reraise=True,
+    )
     def _retrieve_page_property_with_retry(
         self,
         page_id: str,
@@ -1905,8 +1917,9 @@ class NotionFinanceClient:
             logger.warning(f"Attenzione: nessun Monthly Balance trovato per {income_date.strftime('%m/%Y')}")
 
         logger.info(
-            f"Creazione introito su Notion: {name} — €{amount:.2f} — "
-            f"{income_date.isoformat()} — tipo: {income_type or 'nessuno'} — conto_id: {account_id or 'nessuno'}"
+            "Creazione entrata Notion per account_id=%s, has_income_category=%s",
+            bool(account_id), bool(income_type),
+            extra={"domain": "financial", "event": "notion_income_create", "meta": {}},
         )
 
         # Spediamo la entry al db
@@ -1917,6 +1930,85 @@ class NotionFinanceClient:
 
         logger.info(f"Introito creato con successo: page_id={result['id'][:8]}...")
         return result
+
+    def get_income_type_page_ids(self, income_type: str) -> list[str]:
+        """Snapshot IDs currently using an Income Type select value."""
+        if not self.income_db_id:
+            return []
+        data_source_id = self._get_data_source_id(self.income_db_id)
+        income_type_column = self._get_property_name(
+            "income_db_id", "income_type", "Income Type",
+        )
+        page_ids: list[str] = []
+        cursor = None
+        while True:
+            response = self._query_with_retry(data_source_id, {}, cursor)
+            for page in response.get("results", []):
+                select_value = (
+                    page.get("properties", {})
+                    .get(income_type_column, {})
+                    .get("select")
+                    or {}
+                ).get("name")
+                if select_value != income_type:
+                    continue
+                page_ids.append(page["id"])
+            if not response.get("has_more"):
+                break
+            cursor = response.get("next_cursor")
+        return page_ids
+
+    def replace_income_type_page_ids(
+        self, page_ids: list[str], previous_name: str, next_name: str,
+    ) -> int:
+        """CAS-update only unchanged pages saved by a durable outbox task.
+
+        A row edited or removed directly in Notion after the snapshot is left
+        untouched: the task can complete without overwriting that user action.
+        """
+        if not self.income_db_id or previous_name == next_name:
+            return 0
+        income_type_column = self._get_property_name(
+            "income_db_id", "income_type", "Income Type",
+        )
+        updated = 0
+        for page_id in page_ids:
+            try:
+                page = self._client.pages.retrieve(page_id=page_id)
+            except APIResponseError as error:
+                if error.status == 404:
+                    continue
+                raise
+            current_name = (
+                page.get("properties", {})
+                .get(income_type_column, {})
+                .get("select")
+                or {}
+            ).get("name")
+            if current_name != previous_name:
+                continue
+            try:
+                self._update_page_with_retry(
+                    page_id=page_id,
+                    properties={income_type_column: {"select": {"name": next_name}}},
+                )
+            except APIResponseError as error:
+                if error.status == 404:
+                    continue
+                raise
+            updated += 1
+        logger.info(
+            "Categorie entrata Notion riallineate: count=%s",
+            updated,
+            extra={"domain": "financial", "event": "notion_income_category_reassigned", "meta": {}},
+        )
+        return updated
+
+    def replace_income_type(self, previous_name: str, next_name: str) -> int:
+        """Replace all currently matching rows for legacy reconciliation tasks."""
+        return self.replace_income_type_page_ids(
+            self.get_income_type_page_ids(previous_name), previous_name, next_name,
+        )
 
     # ------------------------------------------------------------------
     # Write: creazione nuovo trasferimento tra conti
@@ -2108,4 +2200,3 @@ class NotionFinanceClient:
             except Exception as e:
                 lines.append(f"❌ {label}: {str(e)[:80]}")
         return "\n".join(lines)
-

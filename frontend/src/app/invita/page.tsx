@@ -13,7 +13,7 @@ import {
   Stack,
   Typography,
 } from "@mui/material";
-import { Gift, Trophy } from "lucide-react";
+import { Gift, Trophy, Share2, Check } from "lucide-react";
 import { trackReferralLinkGenerated } from "@/lib/analytics";
 
 type ReferralLinkResponse = {
@@ -78,12 +78,12 @@ export default function InvitaPage() {
   return (
     <Box sx={{ p: { xs: 2, md: 4 }, maxWidth: 980 }}>
       <Box sx={{ mb: 4 }}>
-        <Typography variant="h4" fontWeight={800} color="primary.main" gutterBottom>
+        <Typography component="h1" variant="h4" fontWeight={300} color="primary.main" gutterBottom>
           Invita amici
         </Typography>
         <Typography color="text.secondary">
           Condividi il tuo link personale: chi si iscrive tramite il tuo invito riceve 14 giorni di
-          Pro gratis, e tu ricevi gli stessi 14 giorni per ciascuno dei tuoi primi 3 inviti — fino a
+          Pro gratis, e tu ricevi gli stessi 14 giorni per ciascuno dei tuoi primi 3 inviti, fino a
           42 giorni.
         </Typography>
       </Box>
@@ -100,7 +100,7 @@ export default function InvitaPage() {
             <CardContent>
               <Stack direction="row" spacing={1} alignItems="center" sx={{ mb: 2 }}>
                 <Gift size={20} />
-                <Typography variant="h6" fontWeight={700}>
+                <Typography variant="h6" fontWeight={500}>
                   Il tuo link
                 </Typography>
               </Stack>
@@ -121,12 +121,19 @@ export default function InvitaPage() {
                   href={whatsappUrl}
                   target="_blank"
                   rel="noopener noreferrer"
-                  sx={{ bgcolor: "#25D366", "&:hover": { bgcolor: "#1ebe57" }, textTransform: "none" }}
+                  startIcon={<Share2 size={18} strokeWidth={1.5} aria-hidden="true" />}
+                  sx={{ textTransform: "none" }}
                 >
-                  📲 Condividi su WhatsApp
+                  Condividi su WhatsApp
                 </Button>
-                <Button variant="outlined" size="large" onClick={handleCopy} sx={{ textTransform: "none" }}>
-                  {copied ? "✅ Copiato!" : "Copia link"}
+                <Button
+                  variant="outlined"
+                  size="large"
+                  onClick={handleCopy}
+                  startIcon={copied ? <Check size={18} strokeWidth={1.5} aria-hidden="true" /> : undefined}
+                  sx={{ textTransform: "none" }}
+                >
+                  {copied ? "Copiato!" : "Copia link"}
                 </Button>
               </Stack>
             </CardContent>
@@ -136,7 +143,7 @@ export default function InvitaPage() {
             <CardContent>
               <Stack direction="row" spacing={1} alignItems="center" sx={{ mb: 2 }}>
                 <Trophy size={20} />
-                <Typography variant="h6" fontWeight={700}>
+                <Typography variant="h6" fontWeight={500}>
                   I tuoi inviti
                 </Typography>
               </Stack>
@@ -154,7 +161,8 @@ export default function InvitaPage() {
               {data.lifetime_founder_guaranteed ? (
                 <Chip
                   color="warning"
-                  label="🏆 Accesso garantito a Lifetime Founder sbloccato"
+                  icon={<Trophy size={16} strokeWidth={1.5} aria-hidden="true" />}
+                  label="Accesso garantito a Lifetime Founder sbloccato"
                   sx={{ fontWeight: 600 }}
                 />
               ) : (
@@ -166,7 +174,7 @@ export default function InvitaPage() {
 
               <Typography variant="caption" color="text.secondary" sx={{ display: "block", mt: 2 }}>
                 Raggiunti i 3 inviti hai ottenuto il massimo per te: 42 giorni di Pro e l&apos;accesso
-                garantito a Lifetime Founder. Il link però non scade mai — puoi continuare a
+                garantito a Lifetime Founder. Il link però non scade mai: puoi continuare a
                 condividerlo e chi lo usa riceve sempre i suoi 14 giorni.
               </Typography>
             </CardContent>

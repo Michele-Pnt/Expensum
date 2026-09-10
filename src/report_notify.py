@@ -5,6 +5,7 @@ mantenere lo stesso messaggio di saluto con link al report, indipendentemente da
 ha generato il report.
 """
 
+from src.notification_service import create_notification
 from src.user_store import UserStore
 
 
@@ -36,5 +37,28 @@ def notify_webapp_report(
             str(chat_id), source="webapp", role="bot", text=text,
             metadata={"report_type": report_type, "share_token": share_token},
         )
+    except Exception:
+        pass
+
+    # Stesso opt-out (Art. 21 GDPR) già rispettato dal job che invia il piano su
+    # Telegram: qui si aggiunge solo la copia in-app dello stesso avviso.
+    try:
+        user = store.get_user(chat_id)
+    except Exception:
+        user = None
+    if not user or not user.notifications_enabled:
+        return
+
+    is_weekly = report_type == "weekly"
+    try:
+        with store.Session() as session:
+            create_notification(
+                session,
+                user_id=str(chat_id),
+                notification_type="weekly_report" if is_weekly else "monthly_report",
+                title="Report settimanale pronto" if is_weekly else "Report mensile pronto",
+                body=text,
+                payload={"report_type": report_type, "share_token": share_token},
+            )
     except Exception:
         pass

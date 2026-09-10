@@ -20,6 +20,7 @@ Modalità:
 
 import argparse
 import asyncio
+import json
 import logging
 import sys
 import os
@@ -36,9 +37,11 @@ from src.forecaster import Forecaster
 from src.mistral_client import MistralClient
 from src.telegram_client import TelegramClient
 from src.report_builder import ReportBuilder
+from src.report_schema import render_plain_text
 from src.chart_generator import ChartGenerator
 from src.llm_usage_tracker import build_request_key, estimate_reserved_tokens, normalize_usage_metadata
 from src.user_store import UserStore
+from src.application.structured_logging import log_exception
 from src.report_notify import notify_webapp_report
 
 
@@ -82,34 +85,6 @@ MOCK_TRANSACTIONS = [
     {"date": date(2025, 12, 26),"category": "Abbigliamento",  "name": "Saldi invernali",    "amount": 120.00},
     {"date": date(2025, 12, 28),"category": "Utility",        "name": "Bolletta Luce",      "amount": 110.00},
 ]
-
-
-def _build_accounts_liquidity_section(accounts: list[dict]) -> str:
-    """Costruisce una sezione Markdown con la liquidità per ogni account."""
-    lines = ["🏦 *Liquidità per account*"]
-    if not accounts:
-        lines.append("- Nessun conto disponibile")
-        return "\n".join(lines)
-
-    for acc in accounts:
-        name = acc.get("name", "Sconosciuto")
-        balance = float(acc.get("current_balance", 0.0))
-        lines.append(f"- {name}: *€{balance:.2f}*")
-
-    return "\n".join(lines)
-
-
-def _insert_accounts_section_near_summary(report_text: str, accounts: list[dict]) -> str:
-    """Inserisce la sezione liquidità account subito dopo 'Risparmio mensile'."""
-    section = _build_accounts_liquidity_section(accounts)
-    lines = report_text.splitlines()
-
-    for idx, line in enumerate(lines):
-        if line.strip().startswith("Risparmio mensile:"):
-            insertion = ["", section]
-            return "\n".join(lines[: idx + 1] + insertion + lines[idx + 1 :])
-
-    return report_text + "\n\n---\n" + section
 
 
 def _resolve_default_target_month(today: date) -> tuple[int, int]:
@@ -180,11 +155,21 @@ async def run_agent(
     debug_data: bool = False,
     chat_id: str | None = None,
     shared_store: UserStore | None = None,
+    notify_telegram: bool = True,
+    source: str = "job",
 ) -> str | None:
     """Esegue la pipeline completa dell'agente finanziario.
 
     `shared_store` è opzionale: se passato (es. dal bot o dalla webapp, già connessi
     al DB), viene riusato invece di aprire nuove connessioni Postgres per ogni chiamata.
+
+    `notify_telegram=False` salva comunque il report ma non manda il teaser su
+    Telegram: usato quando la generazione parte già dalla webapp (l'utente sta
+    guardando lo schermo giusto, un secondo avviso duplicherebbe il primo).
+
+    `source` ('job'|'webapp') finisce in `record_report_event` per distinguere
+    davvero chi ha generato il report — di default 'job' (lo scheduler mensile
+    resta il chiamante più comune).
 
     Ritorna lo `share_token` del report salvato, o `None` se non è stato generato
     nulla (nessuna transazione nel mese target, dry-run, debug-data).
@@ -195,8 +180,12 @@ async def run_agent(
     if not chat_id:
         chat_id = Config.TELEGRAM_CHAT_ID
     logger.info(
-        f"{'[DRY-RUN] ' if dry_run else ''}Avvio agente — target: "
-        f"{target_month:02d}/{target_year}"
+        "report_agent_started",
+        extra={
+            "domain": "reports",
+            "event": "report_agent_started",
+            "meta": {"dry_run": dry_run, "target_month": target_month, "target_year": target_year},
+        },
     )
 
     # Calcola mese successivo
@@ -213,7 +202,10 @@ async def run_agent(
         incomes = []           # nessun dato Income in dry-run
         accounts = [{"name": "Mock Bank", "current_balance": 1500.0}]
         budget_by_cat: dict[str, float] = {}
-        logger.info(f"  [DRY-RUN] Usando {len(transactions)} transazioni mock")
+        logger.info(
+            "dry_run_transactions_loaded",
+            extra={"domain": "reports", "event": "dry_run_transactions_loaded", "meta": {"count": len(transactions)}},
+        )
     else:
         user_store = shared_store or UserStore(db_url=Config.DATABASE_URL)
         user = user_store.get_user(chat_id) if chat_id else None
@@ -228,7 +220,7 @@ async def run_agent(
         end_date = date(target_year, target_month, monthrange(target_year, target_month)[1])
 
         if user and user.storage_backend == "postgres":
-            logger.info(f"Usando PostgreSQL storage per utente {chat_id}")
+            logger.info("postgres_storage_selected", extra={"domain": "reports", "event": "postgres_storage_selected", "chat_id": str(chat_id), "meta": {}})
             _pg_session = user_store.Session()
             try:
                 storage = PostgresStorage(_pg_session, user_id=chat_id)
@@ -254,10 +246,10 @@ async def run_agent(
                     pay_transfer_db_id=user.pay_transfer_db_id,
                     db_schemas=db_schemas,
                 )
-                logger.info(f"Usando Notion OAuth per utente {chat_id}")
+                logger.info("notion_oauth_storage_selected", extra={"domain": "reports", "event": "notion_oauth_storage_selected", "chat_id": str(chat_id), "meta": {}})
             else:
                 notion_client = NotionFinanceClient()
-                logger.warning(f"Utente {chat_id} senza token Notion — fallback a Config .env")
+                logger.warning("notion_token_missing", extra={"domain": "reports", "event": "notion_token_missing", "chat_id": str(chat_id), "meta": {}})
             storage = NotionStorage(notion_client)
             transactions = storage.fetch_all_transactions(start_date=start_date, end_date=end_date)
             logger.info("▶ Step 1b/7: Estrazione Monthly Balance (Risparmio Netto)")
@@ -266,11 +258,7 @@ async def run_agent(
             incomes = storage.fetch_income(start_date=start_date, end_date=end_date)
             accounts = storage.fetch_accounts()
         if accounts:
-            accounts_log = ", ".join(
-                f"{acc.get('name', 'Sconosciuto')}=€{float(acc.get('current_balance', 0.0)):.2f}"
-                for acc in accounts
-            )
-            logger.info(f"Bilanci account letti da Notion: {accounts_log}")
+            logger.info("accounts_loaded", extra={"domain": "reports", "event": "accounts_loaded", "meta": {"count": len(accounts)}})
         else:
             logger.warning("Nessun account valido letto da Notion.")
 
@@ -282,8 +270,8 @@ async def run_agent(
                 for c in categories_data
                 if c.get("monthly_budget") is not None
             }
-        except Exception as e:
-            logger.warning(f"Impossibile recuperare budget categorie: {e}")
+        except Exception as exc:  # noqa: BLE001 -- il report degrada senza budget
+            log_exception(logger, level="warning", domain="reports", event="category_budgets_fetch_failed", exception=exc)
             budget_by_cat = {}
 
     if not transactions:
@@ -302,8 +290,8 @@ async def run_agent(
                     "tua prossima spesa o entrata e scopri tutti i vantaggi che Expensum può "
                     "portarti nella gestione delle tue finanze! 💪"
                 )
-            except Exception as e:
-                logger.warning(f"Impossibile inviare nudge 'nessuna transazione' a utente: {e}")
+            except Exception as exc:  # noqa: BLE001 -- il nudge è best-effort
+                log_exception(logger, level="warning", domain="reports", event="no_transactions_nudge_failed", exception=exc, chat_id=str(chat_id))
         return None
 
     # 2. ELABORAZIONE DATI
@@ -311,10 +299,6 @@ async def run_agent(
     processor = DataProcessor()
     report = processor.process(transactions, target_year, target_month, incomes=incomes)
     data_text = processor.to_prompt_text(report)
-    
-    # Genera i grafici
-    chart_gen = ChartGenerator()
-    chart_paths = chart_gen.generate_all_charts(report)
 
     # Aggiungi dati Monthly Balance al blocco di testo per Gemini
     if monthly_balances:
@@ -331,8 +315,8 @@ async def run_agent(
         )
         if current_mb:
             logger.info(
-                f"Risparmio Netto {report.current_month.label}: "
-                f"€{current_mb['net_savings']:.2f} (dato Monthly Balance)"
+                "monthly_balance_loaded",
+                extra={"domain": "reports", "event": "monthly_balance_loaded", "meta": {}},
             )
     else:
         current_mb = None
@@ -344,24 +328,28 @@ async def run_agent(
     forecast_text = forecast.to_prompt_text()
 
     if debug_data:
-        import json
-        
+        # Genera i grafici solo qui: unico consumatore rimasto è questa stampa di
+        # ispezione manuale (non più allegati a Telegram, il report si legge in
+        # webapp con i grafici Recharts costruiti lato client da `report_data`).
+        chart_gen = ChartGenerator()
+        chart_paths = chart_gen.generate_all_charts(report)
+
         # Salva le transazioni estratte in locale per poterle ispezionare
         def default_serializer(obj):
             if isinstance(obj, (date, datetime)):
                 return obj.isoformat()
             raise TypeError(f"Type {type(obj)} not serializable")
-            
+
         with open("debug_transactions.json", "w", encoding="utf-8") as f:
             json.dump(transactions, f, default=default_serializer, indent=2, ensure_ascii=False)
-            
+
         print("\n\n" + "="*80)
         print("🛑 MODALITÀ --debug-data ATTIVA 🛑")
         print("I dati reali sono stati estratti da Notion, salvati in 'debug_transactions.json'")
         print("ed elaborati statisticamente. Mostro di seguito il PROMPT che verrebbe")
         print("inviato all'Intelligenza Artificiale (Gemini):")
         print("="*80 + "\n")
-        
+
         print("=== TESTO DATI (data_text) ===")
         print(data_text)
         print("\n=== TESTO PREVISIONI (forecast_text) ===")
@@ -371,7 +359,7 @@ async def run_agent(
             print(f"- {p}")
         print("\n" + "="*80)
         print("Chiamata API cancellata pre-risoluzione come richiesto. Fine esecuzione.")
-        
+
         # Cleanup immagini mock debug
         for path in chart_paths:
             if os.path.exists(path):
@@ -392,9 +380,12 @@ async def run_agent(
     # 4. ANALISI AI
     logger.info("▶ Step 4/7: Analisi AI con Mistral Small 3.1")
     net_savings_str = f"€{current_mb['net_savings']:.2f}" if current_mb else "n/d"
+    net_savings_val = current_mb["net_savings"] if current_mb else None
     if dry_run:
         logger.info("  [DRY-RUN] Salto Mistral, uso report statistico locale")
-        final_report = ReportBuilder.build_fallback_report(report, forecast, accounts=accounts, budget_by_cat=budget_by_cat)
+        final_report = ReportBuilder.build_content(
+            report, forecast, accounts=accounts, budget_by_cat=budget_by_cat, net_savings=net_savings_val
+        )
     else:
         request_key = build_request_key("monthly_report", target_year, target_month, report.current_month.label, forecast.target_month_label)
         reservation_created = False
@@ -404,7 +395,7 @@ async def run_agent(
                 request_key=request_key,
                 operation="monthly_report",
                 provider="mistral",
-                model=Config.MISTRAL_SMALL_MODEL,
+                model=Config.MISTRAL_EXPENSE_PARSER_MODEL,
                 reserved_tokens=estimate_reserved_tokens("monthly_report"),
             )
             reservation_created = True
@@ -413,10 +404,10 @@ async def run_agent(
 
         try:
             llm_client = MistralClient()
-            logger.info(f"  Usando Mistral con modello {Config.MISTRAL_SMALL_MODEL}")
+            logger.info("mistral_report_started", extra={"domain": "reports", "event": "mistral_report_started", "meta": {}})
 
             llm_start = time.time()
-            final_report, _llm_usage = llm_client.analyze_and_generate_report(
+            ai_narrative, _llm_usage = llm_client.analyze_and_generate_report(
                 data_text=data_text,
                 accounts_text=accounts_text,
                 forecast_text=forecast_text,
@@ -426,6 +417,14 @@ async def run_agent(
                 total_amount=f"{report.current_month.total:.2f}",
                 total_accounts_balance=f"{total_accounts_balance:.2f}",
                 net_savings=net_savings_str,
+            )
+            final_report = ReportBuilder.build_content(
+                report,
+                forecast,
+                accounts=accounts,
+                budget_by_cat=budget_by_cat,
+                net_savings=net_savings_val,
+                ai_narrative=ai_narrative,
             )
             if _llm_usage:
                 _llm_usage = normalize_usage_metadata(_llm_usage)
@@ -437,7 +436,7 @@ async def run_agent(
                         completion_tokens=_llm_usage.get("completion_tokens", 0),
                         total_tokens=_llm_usage.get("total_tokens", 0),
                         provider=_llm_usage.get("provider", "mistral"),
-                        model=_llm_usage.get("model", Config.MISTRAL_SMALL_MODEL),
+                        model=_llm_usage.get("model", Config.MISTRAL_EXPENSE_PARSER_MODEL),
                         operation="monthly_report",
                     )
                 except Exception as e:
@@ -459,16 +458,19 @@ async def run_agent(
                     usage_store.release_llm_reservation(chat_id, request_key, reason=str(e))
                 except Exception:
                     pass
-            logger.error(f"Errore Mistral: {e}. Uso fallback statistico.")
-            final_report = ReportBuilder.build_fallback_report(report, forecast, accounts=accounts, budget_by_cat=budget_by_cat)
-
-    final_report = _insert_accounts_section_near_summary(final_report, accounts)
+            log_exception(logger, level="error", domain="reports", event="mistral_report_failed", exception=e, chat_id=str(chat_id) if chat_id else None)
+            final_report = ReportBuilder.build_content(
+                report, forecast, accounts=accounts, budget_by_cat=budget_by_cat, net_savings=net_savings_val
+            )
 
     if not dry_run:
         try:
-            final_report += user_store.get_referral_footer_text(user.email if user else None)
-        except Exception as e:
-            logger.warning(f"Impossibile aggiungere footer referral al report: {e}")
+            email = ((user.email if user else None) or "").strip().lower()
+            if email:
+                referral_code = user_store.get_or_create_referral_code(email)
+                final_report["referral_url"] = f"{Config.WEBAPP_BASE_URL}?ref={referral_code}"
+        except Exception as exc:  # noqa: BLE001 -- il link referral è opzionale
+            log_exception(logger, level="warning", domain="reports", event="referral_link_failed", exception=exc, chat_id=str(chat_id) if chat_id else None)
 
     # 5. LOG DEL REPORT
     logger.info("▶ Step 5/7: Report generato")
@@ -476,13 +478,13 @@ async def run_agent(
         print("\n" + "=" * 60)
         print("📱 ANTEPRIMA REPORT TELEGRAM")
         print("=" * 60)
-        print(final_report)
+        print(render_plain_text(final_report))
         print("=" * 60 + "\n")
         logger.info("[DRY-RUN] Report mostrato a schermo. Nessun messaggio inviato.")
         return None
 
     # 6. SALVATAGGIO + INVIO
-    telegram_connected = bool(chat_id) and not str(chat_id).startswith("web_")
+    telegram_connected = bool(chat_id) and not str(chat_id).startswith("web_") and notify_telegram
 
     # Salva report nel DB (sessione dedicata, indipendente dalla sessione di lettura)
     report_share_token: str = ""
@@ -500,7 +502,7 @@ async def run_agent(
                         # report_date = 1° del mese successivo a quello analizzato (es. analisi
                         # di giugno -> datata 1 luglio, il giorno in cui diventa disponibile).
                         report_date=date(next_year, next_month, 1),
-                        text_content=final_report,
+                        text_content=json.dumps(final_report, ensure_ascii=False),
                         report_data=_build_monthly_report_payload(
                             report=report,
                             target_year=target_year,
@@ -511,35 +513,32 @@ async def run_agent(
                     )
                 finally:
                     _save_session.close()
-        except Exception as e:
-            logger.warning(f"Salvataggio report mensile nel DB fallito: {e}")
+        except Exception as exc:  # noqa: BLE001 -- l'invio Telegram ha un fallback
+            log_exception(logger, level="warning", domain="reports", event="monthly_report_persist_failed", exception=exc, chat_id=str(chat_id) if chat_id else None)
 
-    if telegram_connected:
-        logger.info("▶ Step 6/7: Invio report su Telegram")
+    if telegram_connected and report_share_token:
+        # Teaser + link: il report completo (grafici, dettagli) si legge in
+        # webapp, non più riversato per intero in chat (vedi piano
+        # depotenziamento Telegram).
+        logger.info("▶ Step 6/7: Invio teaser report su Telegram")
         telegram = TelegramClient(chat_id=chat_id)
-        # Invia prima i grafici
-        for path in chart_paths:
-            try:
-                await telegram.send_photo(photo_path=path)
-            except Exception as e:
-                logger.error(f"Errore durante l'invio del grafico {path}: {e}")
-        # Poi invia il testo
-        await telegram.send_report(final_report)
+        await telegram.send_browser_link_button(
+            text=f"📊 Il tuo report mensile (*{report.current_month.label}*) è pronto.",
+            path=f"/reports/{report_share_token}",
+            parse_mode="Markdown",
+        )
+    elif telegram_connected:
+        # Salvataggio report fallito: nessun link da mandare, fallback sul testo pieno.
+        logger.info("▶ Step 6/7: Invio report su Telegram (fallback, nessun share_token)")
+        telegram = TelegramClient(chat_id=chat_id)
+        await telegram.send_report(render_plain_text(final_report))
         logger.info("✅ Report inviato con successo su Telegram!")
     else:
         logger.info("▶ Step 6/7: Utente solo-webapp, invio Telegram saltato")
 
     if report_share_token and chat_id:
         notify_webapp_report(_save_store, chat_id, "monthly", report.current_month.label, report_share_token)
-        _save_store.record_report_event(chat_id, report_share_token, "monthly", "generated", "job")
-
-    # Cleanup delle immagini temporanee
-    for path in chart_paths:
-        try:
-            if os.path.exists(path):
-                os.remove(path)
-        except Exception as e:
-            logger.warning(f"Impossibile eliminare file temporaneo {path}: {e}")
+        _save_store.record_report_event(chat_id, report_share_token, "monthly", "generated", source)
 
     return report_share_token or None
 
@@ -588,8 +587,8 @@ def main():
     if not args.dry_run:
         try:
             Config.validate()
-        except EnvironmentError as e:
-            logger.error(str(e))
+        except EnvironmentError as exc:
+            log_exception(logger, level="error", domain="startup", event="configuration_invalid", exception=exc)
             logger.error("Copia .env.example in .env e inserisci le tue credenziali.")
             sys.exit(1)
 

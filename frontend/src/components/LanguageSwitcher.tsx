@@ -16,7 +16,7 @@ export default function LanguageSwitcher() {
   const router = useRouter();
 
   return (
-    <div style={{ display: "flex", gap: 4 }} aria-label={t("label")}>
+    <div style={{ display: "flex", gap: 4 }} role="group" aria-label={t("label")}>
       {routing.locales.map((loc) => (
         <button
           key={loc}

@@ -1,0 +1,11 @@
+# Tool di sviluppo e test: il runtime è importato dal lock principale.
+-r requirements.in
+bandit
+pip-audit
+pip-tools==7.6.1
+ruff
+vulture
+pytest
+pytest-cov
+pytest-flask
+pytest-mock

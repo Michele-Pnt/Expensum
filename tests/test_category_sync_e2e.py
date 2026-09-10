@@ -393,8 +393,16 @@ class TestRefreshCategoryAverages:
         user = Mock(storage_backend="notion")
         store.get_user = Mock(return_value=user)
 
-        with caplog.at_level(logging.WARNING, logger="financial_agent.category_sync"):
-            refresh_category_averages("user_nt", store, notion_client=None)
+        category_logger = logging.getLogger("financial_agent.category_sync")
+        was_disabled = category_logger.disabled
+        category_logger.disabled = False
+        category_logger.addHandler(caplog.handler)
+        try:
+            with caplog.at_level(logging.WARNING, logger="financial_agent.category_sync"):
+                refresh_category_averages("user_nt", store, notion_client=None)
+        finally:
+            category_logger.removeHandler(caplog.handler)
+            category_logger.disabled = was_disabled
 
         assert any("notion_client" in r.message for r in caplog.records)
 
@@ -403,8 +411,16 @@ class TestRefreshCategoryAverages:
         user = Mock(storage_backend="postgres")
         store.get_user = Mock(return_value=user)
 
-        with caplog.at_level(logging.WARNING, logger="financial_agent.category_sync"):
-            refresh_category_averages("user_pg", store, session=None)
+        category_logger = logging.getLogger("financial_agent.category_sync")
+        was_disabled = category_logger.disabled
+        category_logger.disabled = False
+        category_logger.addHandler(caplog.handler)
+        try:
+            with caplog.at_level(logging.WARNING, logger="financial_agent.category_sync"):
+                refresh_category_averages("user_pg", store, session=None)
+        finally:
+            category_logger.removeHandler(caplog.handler)
+            category_logger.disabled = was_disabled
 
         assert any("session" in r.message for r in caplog.records)
 
@@ -412,8 +428,16 @@ class TestRefreshCategoryAverages:
         import logging
         store.get_user = Mock(return_value=None)
 
-        with caplog.at_level(logging.WARNING, logger="financial_agent.category_sync"):
-            refresh_category_averages("ghost_user", store)
+        category_logger = logging.getLogger("financial_agent.category_sync")
+        was_disabled = category_logger.disabled
+        category_logger.disabled = False
+        category_logger.addHandler(caplog.handler)
+        try:
+            with caplog.at_level(logging.WARNING, logger="financial_agent.category_sync"):
+                refresh_category_averages("ghost_user", store)
+        finally:
+            category_logger.removeHandler(caplog.handler)
+            category_logger.disabled = was_disabled
 
         assert any("ghost_user" in r.message for r in caplog.records)
 

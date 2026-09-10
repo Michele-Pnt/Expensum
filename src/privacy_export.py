@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 
 from src.user_store import User, ChatMessage, LlmUsageEvent
 from src.storage import rls
+from src.storage.models import Notification
 from src.storage.postgres_storage import PostgresStorage
 
 PRIVACY_RIGHTS_NOTICE_IT = (
@@ -67,6 +68,7 @@ def build_export_json(session: Session, user: User) -> dict:
             "accounts": storage.fetch_accounts(),
             # Export GDPR: deve contenere tutto, archiviate comprese.
             "categories": storage.get_categories(include_archived=True),
+            "income_categories": storage.get_income_categories(include_archived=True),
             "subscriptions": storage.fetch_subscriptions(),
             "monthly_balances": storage.fetch_monthly_balances(start, today),
         }
@@ -90,6 +92,17 @@ def build_export_json(session: Session, user: User) -> dict:
         "total_completion_tokens": sum(e.completion_tokens for e in usage_events),
     }
 
+    notifications = [
+        {
+            "type": n.type,
+            "title": n.title,
+            "body": n.body,
+            "read": n.read_at is not None,
+            "created_at": n.created_at.isoformat() if n.created_at else None,
+        }
+        for n in session.query(Notification).filter(Notification.user_id == chat_id).all()
+    ]
+
     return {
         "export_metadata": {
             "generated_at": datetime.utcnow().isoformat(),
@@ -100,6 +113,7 @@ def build_export_json(session: Session, user: User) -> dict:
         "financial_data": financial_data,
         "chat_history": chat_history,
         "usage_data": usage_data,
+        "notifications": notifications,
         "your_rights": PRIVACY_RIGHTS_NOTICE_IT,
     }
 
@@ -128,7 +142,8 @@ def build_csv_rows(session: Session, user: User) -> Optional[list[tuple]]:
         rows.append(("expense", e["date"], e["amount"], e["name"], e["category"],
                      accounts_by_id.get(e["account_id"], "")))
     for i in storage.fetch_income(start, today):
-        rows.append(("income", i["date"], i["amount"], i["name"], i.get("income_type") or "",
+        rows.append(("income", i["date"], i["amount"], i["name"],
+                     i.get("income_category") or i.get("income_type") or "",
                      accounts_by_id.get(i["account_id"], "")))
     for t in storage.fetch_transfers(start, today):
         rows.append(("transfer", t["date"], t["amount"], t["name"], "",

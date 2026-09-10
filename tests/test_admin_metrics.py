@@ -285,7 +285,7 @@ def test_funnel_revenue_excludes_beta_grants_from_mrr(mock_db_session, monkeypat
 def test_engagement_acquisition(mock_db_session):
     _seed(mock_db_session)
     with mock_db_session.Session() as s:
-        e = m.get_engagement_acquisition(s)
+        e = m.get_engagement_acquisition(s, now=NOW)
     assert e["mau"] == 2          # u1 e u2 attivi negli ultimi 30gg
     assert e["storage_backend"] == {"postgres": 1, "notion": 1}
     assert e["waitlist"]["beta_granted"] == 1
@@ -394,7 +394,7 @@ def test_tx_success_by_type_method(mock_db_session):
                       outcome="cancelled", source="telegram", reason="user_cancelled", occurred_at=NOW))
         s.commit()
     with mock_db_session.Session() as s:
-        res = m.get_tx_success_by_type_method(s)
+        res = m.get_tx_success_by_type_method(s, now=NOW)
 
     by_key = {(r["tx_type"], r["input_method"]): r for r in res["rows"]}
     text_row = by_key[("expense", "text")]
@@ -414,6 +414,81 @@ def test_tx_success_by_type_method(mock_db_session):
     assert res["overall_success_rate_pct"] == pytest.approx(60.0, abs=0.1)
 
 
+def test_tx_success_error_cancel_and_category_corrected_rates(mock_db_session):
+    """Copertura dedicata alle 3 nuove chiavi (overall_error_rate_pct,
+    overall_cancel_rate_pct, overall_category_corrected_pct) — non ricavabili solo
+    da test_tx_success_by_type_method, che verifica altre chiavi."""
+    with mock_db_session.Session() as s:
+        s.add(User(chat_id="u1", username="Alice", created_at=NOW))
+        # 4 confirmed, di cui 1 con categoria corretta dall'utente
+        s.add(TxEvent(chat_id="u1", tx_type="expense", input_method="text",
+                      outcome="confirmed", source="telegram", occurred_at=NOW))
+        s.add(TxEvent(chat_id="u1", tx_type="expense", input_method="text",
+                      outcome="confirmed", source="telegram", occurred_at=NOW))
+        s.add(TxEvent(chat_id="u1", tx_type="expense", input_method="text",
+                      outcome="confirmed", source="telegram", occurred_at=NOW))
+        s.add(TxEvent(chat_id="u1", tx_type="expense", input_method="text",
+                      outcome="confirmed", source="telegram", reason="category_corrected",
+                      occurred_at=NOW))
+        # 2 failed, 2 cancelled
+        s.add(TxEvent(chat_id="u1", tx_type="expense", input_method="text",
+                      outcome="failed", source="telegram", reason="ai_unavailable_503",
+                      occurred_at=NOW))
+        s.add(TxEvent(chat_id="u1", tx_type="expense", input_method="text",
+                      outcome="failed", source="telegram", reason="no_account",
+                      occurred_at=NOW))
+        s.add(TxEvent(chat_id="u1", tx_type="expense", input_method="text",
+                      outcome="cancelled", source="telegram", reason="user_cancelled",
+                      occurred_at=NOW))
+        s.add(TxEvent(chat_id="u1", tx_type="expense", input_method="text",
+                      outcome="cancelled", source="telegram", reason="user_cancelled",
+                      occurred_at=NOW))
+        s.commit()
+    with mock_db_session.Session() as s:
+        res = m.get_tx_success_by_type_method(s, now=NOW)
+
+    # 8 eventi totali: 4 confirmed, 2 failed, 2 cancelled
+    assert res["overall_total"] == 8
+    assert res["overall_error_rate_pct"] == pytest.approx(25.0, abs=0.1)
+    assert res["overall_cancel_rate_pct"] == pytest.approx(25.0, abs=0.1)
+    # category_corrected è una % sui SOLI confirmed (1/4), non sul totale
+    assert res["overall_category_corrected_pct"] == pytest.approx(25.0, abs=0.1)
+
+
+def test_tx_success_category_corrected_pct_zero_when_no_confirmed(mock_db_session):
+    """Nessuna divisione per zero quando non ci sono conferme nella finestra."""
+    with mock_db_session.Session() as s:
+        s.add(User(chat_id="u1", created_at=NOW))
+        s.add(TxEvent(chat_id="u1", tx_type="expense", input_method="text",
+                      outcome="failed", source="telegram", occurred_at=NOW))
+        s.commit()
+    with mock_db_session.Session() as s:
+        res = m.get_tx_success_by_type_method(s, now=NOW)
+
+    assert res["overall_category_corrected_pct"] == 0.0
+    assert res["overall_error_rate_pct"] == 100.0
+    assert res["overall_cancel_rate_pct"] == 0.0
+
+
+def test_tx_success_category_corrected_ignores_other_outcomes_with_same_reason(mock_db_session):
+    """reason='category_corrected' su un evento non-'confirmed' non deve mai
+    entrare nel conteggio — quel reason ha senso solo su outcome confirmed."""
+    with mock_db_session.Session() as s:
+        s.add(User(chat_id="u1", created_at=NOW))
+        s.add(TxEvent(chat_id="u1", tx_type="expense", input_method="text",
+                      outcome="confirmed", source="telegram", occurred_at=NOW))
+        # Difensivo: anche se qualcosa scrivesse questo reason su un cancelled,
+        # non deve contaminare la percentuale (denominatore = confirmed = 1).
+        s.add(TxEvent(chat_id="u1", tx_type="expense", input_method="text",
+                      outcome="cancelled", source="telegram", reason="category_corrected",
+                      occurred_at=NOW))
+        s.commit()
+    with mock_db_session.Session() as s:
+        res = m.get_tx_success_by_type_method(s, now=NOW)
+
+    assert res["overall_category_corrected_pct"] == 0.0
+
+
 def test_tx_success_respects_days_window(mock_db_session):
     with mock_db_session.Session() as s:
         s.add(User(chat_id="u1", created_at=NOW))
@@ -421,7 +496,7 @@ def test_tx_success_respects_days_window(mock_db_session):
                       outcome="confirmed", source="telegram", occurred_at=NOW - timedelta(days=40)))
         s.commit()
     with mock_db_session.Session() as s:
-        res = m.get_tx_success_by_type_method(s, days=30)
+        res = m.get_tx_success_by_type_method(s, days=30, now=NOW)
     assert res["overall_total"] == 0  # fuori dalla finestra di 30gg
 
 
@@ -437,6 +512,33 @@ def test_record_tx_event(mock_db_session):
     assert events[0].input_method == "voice"
     assert events[0].outcome == "confirmed"
     assert events[0].source == "telegram"
+
+
+def test_record_tx_event_explicit_none_reason_matches_default_behavior(mock_db_session):
+    """`reason=None` esplicito (bot.py quando category_was_corrected non è settato)
+    deve comportarsi esattamente come non passare reason affatto — nessun side
+    effect diverso, nessuna riga con reason='None' stringa."""
+    with mock_db_session.Session() as s:
+        s.add(User(chat_id="u1", created_at=NOW))
+        s.commit()
+    mock_db_session.record_tx_event("u1", "expense", "text", "confirmed", "telegram", reason=None)
+    with mock_db_session.Session() as s:
+        events = s.query(TxEvent).filter(TxEvent.chat_id == "u1").all()
+    assert len(events) == 1
+    assert events[0].reason is None
+
+
+def test_record_tx_event_stores_category_corrected_reason(mock_db_session):
+    with mock_db_session.Session() as s:
+        s.add(User(chat_id="u1", created_at=NOW))
+        s.commit()
+    mock_db_session.record_tx_event(
+        "u1", "expense", "text", "confirmed", "telegram", reason="category_corrected",
+    )
+    with mock_db_session.Session() as s:
+        events = s.query(TxEvent).filter(TxEvent.chat_id == "u1").all()
+    assert len(events) == 1
+    assert events[0].reason == "category_corrected"
 
 
 def test_tour_funnel(mock_db_session):

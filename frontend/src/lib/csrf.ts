@@ -5,10 +5,22 @@
 
 let cachedToken: string | null = null;
 
-export async function getCsrfToken(): Promise<string> {
-  if (cachedToken) return cachedToken;
-  const res = await fetch("/api/csrf-token", { credentials: "same-origin" });
+export async function getCsrfToken(forceRefresh = false): Promise<string> {
+  if (cachedToken && !forceRefresh) return cachedToken;
+  const res = await fetch("/api/csrf-token", { credentials: "include" });
+  const contentType = res.headers.get("content-type") ?? "";
+  if (!res.ok || !contentType.includes("application/json")) {
+    throw new Error("Impossibile ottenere il token di sicurezza della sessione");
+  }
   const data = await res.json();
-  cachedToken = data.csrf_token;
-  return cachedToken as string;
+  if (typeof data.csrf_token !== "string" || !data.csrf_token) {
+    throw new Error("Token di sicurezza della sessione non valido");
+  }
+  const token = data.csrf_token as string;
+  cachedToken = token;
+  return token;
+}
+
+export function invalidateCsrfToken(): void {
+  cachedToken = null;
 }

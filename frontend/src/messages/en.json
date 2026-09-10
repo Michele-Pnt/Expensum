@@ -1,56 +1,101 @@
 {
   "Landing": {
     "meta": {
-      "title": "Expensum — Your savings companion",
-      "description": "Track your expenses via Telegram, understand your money, live better. Powered by Gemini AI."
+      "title": "Expensum: your savings companion",
+      "description": "Log your expenses in chat, the AI analyzes them, you understand your money."
     },
     "nav": {
       "comeFunziona": "How it works",
       "prezzi": "Pricing",
       "menu": "Menu",
-      "accedi": "Log in to beta"
+      "accedi": "Log in"
     },
     "hero": {
       "pill": "Powered by AI",
-      "headlineLine1": "Stop wondering where your money went.",
-      "headlineLine2": "Start telling it where to go.",
-      "subLine1": "Track your expenses via Telegram. AI analyzes them.",
-      "subLine2": "You understand your money.",
+      "headlineLine1": "Your financial",
+      "headlineLine2": "platform.",
+      "subLine1": "Expensum turns every expense into a more informed decision.",
+      "subLine2": "",
       "scrollDown": "Scroll down",
-      "mascotAlt": "Moneo, your financial assistant",
-      "socialProof": "{count, number} expenses tracked with Expensum so far"
+      "socialProof": "{count, number} expenses tracked with Expensum so far",
+      "betaBadge": "Private beta · access by email",
+      "betaEyebrow": "Private beta",
+      "betaPrompt": "Enter your email and receive your credentials.",
+      "betaCta": "Get access"
     },
     "perChi": {
-      "titleLine1": "Who Expensum",
-      "titleLine2": "is built for.",
+      "titleLine1": "It doesn’t matter where you start.",
+      "titleLine2": "It matters where you’re going.",
       "items": [
         {
-          "title": "Students living away from home",
-          "desc": "Rent, groceries, nights out — so many line items, zero clarity. Expensum shows you where the money goes."
+          "title": "When you don’t know where the money goes.",
+          "desc": "Expenses, nights out and small purchases add up. Expensum connects them and shows what is happening."
         },
         {
-          "title": "Young professionals",
-          "desc": "Fixed salary but the end of the month always feels the same? Find out where to optimize without giving anything up."
+          "title": "When you want to organize without giving everything up.",
+          "desc": "Budgets and goals help you distribute what you have, without random cutbacks."
         },
         {
-          "title": "Anyone who wants more control",
-          "desc": "You don't need to be a finance expert. Just talk to Expensum like you would to a friend."
+          "title": "When you finally want control.",
+          "desc": "Your data works together to help you understand, organize and decide better."
         }
       ]
     },
     "features": {
+      "atomEyebrow": "What Expensum does",
+      "atomTitle": "Your financial ecosystem. Finally under control.",
+      "atomIntro": "Expensum connects all your financial data, creating the ideal ecosystem to keep your finances under control with ease.",
+      "atomScrollHint": "Scroll to explore the system",
+      "orbitItems": [
+        {
+          "title": "Track the way you speak",
+          "desc": "Send a message, photograph a receipt or record a voice note. Expensum turns a natural gesture into structured data."
+        },
+        {
+          "title": "Everything in its place",
+          "desc": "Amount, category, account and context are recognized automatically, without forms to fill in."
+        },
+        {
+          "title": "Know your net worth",
+          "desc": "Accounts, income, expenses and transfers build an up-to-date view of what you truly own."
+        },
+        {
+          "title": "See the month ahead",
+          "desc": "Budgets, trends and forecasts show how much room remains before it is too late."
+        },
+        {
+          "title": "No more surprises",
+          "desc": "Expensum recognizes recurring payments and brings past spending and upcoming due dates into one calendar."
+        },
+        {
+          "title": "Turn intentions into progress",
+          "desc": "Set a goal and follow its pace, percentage, monthly status and estimated completion date."
+        },
+        {
+          "title": "Get your next move",
+          "desc": "Analytics, chat and automatic reports turn numbers into clear answers and concrete actions."
+        }
+      ],
       "titlePart1": "What Expensum does.",
       "titlePart2": "Everything you need,",
       "titlePart3": "nothing you don't.",
-      "illustrationAlt": "Moneo categorizes and analyzes your expenses with AI",
+      "illustrationAlt": "Example of an expense logged and categorized automatically in chat",
       "items": [
         {
-          "title": "AI chatbot on Telegram",
-          "desc": "Send expenses via text, receipt photo or voice message. No app to open, no form to fill in."
+          "title": "Expenses in chat",
+          "desc": "Type the message, snap a photo of the receipt, or send a voice note. No app to open, no form to fill in."
+        },
+        {
+          "title": "Savings goals",
+          "desc": "Set a goal (a trip, an emergency fund, a purchase) and Expensum builds a budget tailored to your income to get you there, no random cutbacks."
         },
         {
           "title": "Analytics & Dashboard",
           "desc": "Clear charts on categories, monthly trends and how your net worth is moving. Always up to date."
+        },
+        {
+          "title": "Calendar",
+          "desc": "Past expenses and upcoming subscription charges on a single calendar, always clear on what's coming and when."
         },
         {
           "title": "Automatic subscriptions",
@@ -58,14 +103,14 @@
         },
         {
           "title": "Monthly reports",
-          "desc": "At the end of every month a complete summary lands straight in Telegram. Zero effort on your end."
+          "desc": "At the end of every month you get a complete summary in chat. Nothing to do on your end."
         }
       ]
     },
     "comeFunziona": {
-      "titleLine1": "How it works.",
-      "titleLine2": "Simple and fast.",
-      "useCaseAlt": "Photograph the receipt, Expensum records it automatically",
+      "titleLine1": "Never been this",
+      "titleLine2": "simple and fast.",
+      "scrollHint": "Scroll down for the next step",
       "steps": [
         {
           "title": "Send the expense.",
@@ -73,25 +118,29 @@
         },
         {
           "title": "AI analyzes it.",
-          "desc": "The AI model categorizes and structures the data automatically. Zero errors, zero effort."
+          "desc": "It categorizes and structures the data automatically. Zero errors, zero effort: way less than a line on a spreadsheet."
         },
         {
           "title": "Dashboard updated.",
-          "desc": "View charts, trends and budgets in real time from the web app or directly on Telegram."
+          "desc": "View charts, trends and budgets in real time from the web app or in chat."
         },
         {
-          "title": "Automatic report.",
-          "desc": "Every month you get a complete summary with expense analysis and personalized advice."
+          "title": "Automatic reports.",
+          "desc": "Every week you get a mini-report to stay up to date. Every month, a deeper analysis with spending trends and personalized advice. All automatic."
         }
       ]
     },
     "trust": {
-      "dashboardAlt": "Analytics and portfolio growth",
-      "dashboardTitle": "Dashboard always up to date",
-      "dashboardDesc": "Charts, trends and monthly forecasts. Your financial data at a glance.",
-      "secureAlt": "Your data is safe",
-      "secureTitle": "Your data, secured",
-      "secureDesc": "Protected sync with Notion. No financial data shared with third parties."
+      "eyebrow": "Verifiable trust",
+      "titleLine1": "Your data.",
+      "titleLine2": "On your terms.",
+      "intro": "We do not require direct access to your bank. You decide what to record and remain in control of your data.",
+      "controlLabel": "Control",
+      "portabilityLabel": "Portability",
+      "dashboardTitle": "We never touch your bank.",
+      "dashboardDesc": "No banking credentials and no access to your account or card. You choose what you want to share.",
+      "secureTitle": "European, exportable and deletable data.",
+      "secureDesc": "Your data is hosted in Europe. You can export it or request deletion of your account at any time."
     },
     "pricing": {
       "title": "Choose your plan.",
@@ -121,11 +170,11 @@
         ]
       },
       "lifetime": {
-        "badge": "Fill out the form — only 40 spots left!",
+        "badge": "Private beta · 40 spots",
         "label": "Lifetime Founder",
-        "cta": "Reserve your spot",
+        "cta": "Get access",
         "lifetimeAccess": "Lifetime access, zero subscriptions",
-        "note": "Launching in September. Join the waitlist to lock in the offer."
+        "note": "Enter your email and receive your access credentials."
       },
       "ctaQuestion": "Have questions about the right plan for you?",
       "ctaContact": "Contact us →"
@@ -148,44 +197,44 @@
       "cookiePolicy": "Cookie Policy",
       "terminiServizio": "Terms of Service",
       "seguici": "Follow us",
-      "copy": "© {year} Expensum — Your savings companion."
+      "copy": "© {year} Expensum, your savings companion."
     }
   },
   "ComeFunzionaMoneo": {
     "meta": {
-      "title": "How Moneo works — Expensum",
+      "title": "How the AI works | Expensum",
       "description": "Transparency on the AI models used by Expensum, in line with the AI Act."
     },
-    "title": "How Moneo works",
-    "intro": "Moneo is Expensum's AI assistant 🤖. Here you'll find which models we use, what we use them for, and their limitations, in line with the transparency obligations of the AI Act (EU Regulation 2024/1689, Art. 50).",
+    "title": "How the AI works",
+    "intro": "Expensum’s AI assistant helps you read and organize your financial data. Here you’ll find which models we use, what we use them for, and their limitations, in line with the transparency obligations of the AI Act (EU Regulation 2024/1689, Art. 50).",
     "aiDisclosure": {
       "title": "You are talking to an artificial intelligence",
-      "desc": "Every response from Moneo — on the Telegram bot, in the web chat, and in monthly and weekly reports — is generated automatically by a language model (LLM), not by a person. We always disclose this at the first interaction and in every report."
+      "desc": "Every response from the assistant, whether in the messages you receive, in the web chat, or in monthly and weekly reports, is generated automatically by a language model (LLM), not by a person. We always disclose this at the first interaction and in every report."
     },
     "models": {
       "title": "The AI models we use",
       "items": [
         {
-          "name": "Mistral Small 3.1",
-          "purpose": "Reading and categorizing expenses you write or photograph (receipts).",
+          "name": "Expense reading model",
+          "purpose": "Reads and categorizes expenses you write or photograph (receipts).",
           "scope": "All users"
         },
         {
-          "name": "Mistral Large 3",
-          "purpose": "Conversation with Moneo in chat: answers your questions about your finances.",
+          "name": "Conversation model",
+          "purpose": "Conversation with the assistant in chat: answers your questions about your finances.",
           "scope": "All users"
         },
         {
-          "name": "Gemini 2.0 (Vertex AI)",
-          "purpose": "Transcribing voice messages into text, before expense analysis.",
+          "name": "Voice transcription model",
+          "purpose": "Transcribes voice messages into text, before expense analysis.",
           "scope": "PRO plan only"
         }
       ],
-      "footnote": "All models used for text/photo analysis are provided by Mistral AI, a European company compliant with GDPR. Gemini 2.0 (Vertex AI) is used only for voice transcription, exclusively for PRO users."
+      "footnote": "All models used for text and photo analysis are provided by a European AI provider compliant with GDPR. The voice transcription model is used only to transcribe voice messages, exclusively for PRO users."
     },
     "limits": {
       "title": "Known limitations",
-      "desc": "Moneo can make mistakes: wrong categories, amounts misread from a hard-to-read receipt, or inaccurate voice transcriptions. Always verify important financial data before making decisions based on reports or Moneo's answers. You can correct any expense or income entry at any time."
+      "desc": "The AI assistant can make mistakes: wrong categories, amounts misread from a hard-to-read receipt, or inaccurate voice transcriptions. Always verify important financial data before making decisions based on reports or its answers. You can correct any expense or income entry at any time."
     },
     "privacy": {
       "title": "Personal data and privacy",
@@ -195,10 +244,63 @@
   },
   "Legal": {
     "backToSite": "← Back to the site",
-    "footerCopy": "© {year} Expensum — Michele Pinotti",
+    "footerCopy": "© {year} Expensum, Michele Pinotti",
     "privacyPolicy": "Privacy Policy",
     "cookiePolicy": "Cookie Policy",
     "termsOfService": "Terms of Service"
+  },
+  "MutuoCalculator": {
+    "meta": {
+      "title": "Mortgage and loan calculator | Expensum",
+      "description": "Calculate your mortgage or loan installment and APR. Free, no sign-up needed."
+    },
+    "backToSite": "← Back to the site",
+    "title": "Mortgage/loan calculator",
+    "intro": "Enter your details to estimate the monthly installment and the APR. This is indicative only: your bank will apply its final terms.",
+    "fields": {
+      "principal": "Loan amount (€)",
+      "duration": "Duration: {years} years",
+      "rateType": "Rate type",
+      "rateTypeFixed": "Fixed",
+      "rateTypeVariable": "Variable",
+      "tan": "Nominal rate (%)",
+      "tanHelper": "The nominal annual rate communicated by the bank: drives the installment calculation.",
+      "accessoryCostsToggle": "Additional costs (origination fee, collection fee)",
+      "originationFee": "Origination fee (€, one-off)",
+      "originationFeeHelper": "One-off fee charged when the loan is opened.",
+      "monthlyFee": "Collection fee (€/month)",
+      "monthlyFeeHelper": "Fixed recurring fee charged with every installment."
+    },
+    "results": {
+      "title": "Estimate",
+      "installment": "Monthly installment",
+      "taeg": "Estimated APR",
+      "totalInterest": "Total interest over the duration",
+      "disclaimer": "The APR shown is an estimate calculated by Expensum from the additional costs entered: it does not replace the official one shown by the bank in its disclosure sheet."
+    },
+    "cta": "Continue on Expensum"
+  },
+  "Marketing": {
+    "nav": {
+      "label": "Marketing navigation",
+      "howItWorks": "How it works",
+      "features": "Features",
+      "security": "Security",
+      "faq": "FAQ",
+      "cta": "Get access",
+      "menu": "Open menu"
+    },
+    "footer": {
+      "label": "Useful links",
+      "mission": "More clarity around your finances, one decision at a time.",
+      "cta": "Get access",
+      "pricing": "Pricing",
+      "about": "About us",
+      "contact": "Contact",
+      "ai": "How the AI works",
+      "privacy": "Privacy",
+      "terms": "Terms"
+    }
   },
   "LanguageSwitcher": {
     "label": "Language"

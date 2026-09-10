@@ -7,6 +7,7 @@ import pytest
 from src.input_sanitizer import (
     InjectionDetectedError,
     sanitize_audio_transcription,
+    sanitize_category_metadata,
     sanitize_ocr_text,
 )
 
@@ -48,6 +49,10 @@ class TestLegitimateInputs:
         text = "IVA 22%: 3,50€\nTotale: 18,00€\nPagato con carta"
         result = sanitize_ocr_text(text, CHAT_ID)
         assert "IVA" in result
+
+    @pytest.mark.unit
+    def test_category_metadata_is_normalized_before_prompt_use(self):
+        assert sanitize_category_metadata("  Rimborsi trasferta  ", CHAT_ID, field="name") == "  Rimborsi trasferta  "
 
 
 # ---------------------------------------------------------------------------

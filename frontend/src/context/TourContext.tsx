@@ -34,35 +34,21 @@ const TOUR_DEMO_KEY = "expensum_demo_active";
 
 export const TOUR_STEPS: TourStep[] = [
   {
-    id: "chat-input",
-    page: "/chat",
-    selector: '[data-tour="chat-input"]',
-    title: "Chat con Expensum",
+    id: "home-summary",
+    page: "/home",
+    selector: '[data-tour="home-summary"]',
+    title: "Home",
     description:
-      "Scrivi una spesa in linguaggio naturale, carica la foto di uno scontrino oppure registra un messaggio vocale. Expensum capisce tutto.",
-    position: "top",
+      "Ogni volta che apri Expensum parti da qui: quanto ti resta da spendere questo mese e i tuoi ultimi movimenti.",
+    position: "bottom",
   },
   {
-    id: "chat-messages",
-    page: "/chat",
-    selector: '[data-tour="chat-messages"]',
-    title: "Storico conversazioni",
+    id: "quick-capture",
+    page: "/home",
+    selector: '[data-tour="quick-capture-button"]',
+    title: "Registra",
     description:
-      "Ogni spesa viene confermata prima di essere salvata. Se hai sbagliato importo o categoria, puoi annullare con un click.",
-    position: "top",
-  },
-  {
-    id: "analytics-period",
-    page: "/analytics",
-    selector: '[data-tour="analytics-period"]',
-    title: "Intervallo temporale",
-    description: (
-      <>
-        Scegli quanti mesi di storico analizzare. Con il piano{" "}
-        <span style={{ color: "#C5A059", fontWeight: 700 }}>Pro</span> puoi guardare fino a 24 mesi
-        di dati per scoprire trend di lungo periodo.
-      </>
-    ),
+      "Da qualsiasi pagina, tocca Registra per aggiungere una spesa o un'entrata: scrivila, dettala a voce o fotografa lo scontrino. Expensum la riconosce e te la fa sempre confermare prima di salvarla.",
     position: "bottom",
   },
   {
@@ -70,39 +56,21 @@ export const TOUR_STEPS: TourStep[] = [
     page: "/analytics",
     selector: '[data-tour="analytics-tabs"]',
     title: "Analytics",
-    description:
-      "Cinque tab con grafici interattivi: panoramica del capitale, analisi spese, entrate, lista transazioni e monitoraggio budget.",
-    position: "bottom",
-  },
-  {
-    id: "goals-header",
-    page: "/goals",
-    selector: '[data-tour="goals-header"]',
-    title: "🎯 Obiettivi di risparmio",
     description: (
       <>
-        Fissa un obiettivo — risparmio netto, saldo di un conto, capitale totale o riduzione di
-        una spesa — ed Expensum ne traccia l&apos;avanzamento automaticamente, stimando anche
-        quando lo raggiungerai. Disponibile con il piano{" "}
-        <span style={{ color: "#C5A059", fontWeight: 700 }}>Pro</span>.
+        <strong>Oggi</strong> mostra quanto ti resta e la salute finanziaria, <strong>Esplora</strong>{" "}
+        i grafici per categoria, entrata o conto, <strong>Pianifica</strong> i tuoi budget. Con il
+        piano <span style={{ color: "#5FC4CB", fontWeight: 700 }}>Pro</span> analizzi fino a 24 mesi
+        di storico.
       </>
     ),
     position: "bottom",
   },
   {
-    id: "reports-list",
-    page: "/reports",
-    selector: '[data-tour="reports-list"]',
-    title: "Report automatici",
-    description:
-      "Expensum genera ogni settimana e ogni mese un report completo delle tue finanze. Puoi condividerlo o consultarlo in qualsiasi momento.",
-    position: "center",
-  },
-  {
     id: "spazio-conti",
     page: "/spazio",
     selector: '[data-tour="spazio-conti"]',
-    title: "Il tuo spazio — Conti",
+    title: "Gestisci: Conti",
     description:
       "Qui gestisci tutto. Inizia aggiungendo i tuoi conti correnti, carte e contanti: Expensum terrà traccia del saldo reale per ciascuno.",
     position: "bottom",
@@ -115,9 +83,9 @@ export const TOUR_STEPS: TourStep[] = [
     id: "spazio-categorie",
     page: "/spazio",
     selector: '[data-tour="spazio-categorie"]',
-    title: "Categorie & Budget",
+    title: "Gestisci: Categorie",
     description:
-      "Personalizza le categorie di spesa e imposta un budget mensile per ciascuna. Riceverai un avviso quando stai per sforarlo.",
+      "Personalizza le categorie di spesa e imposta un budget mensile per ciascuna: riceverai un avviso quando stai per sforarlo. Una breve descrizione aiuta l'assistente a riconoscere anche le spese più ambigue.",
     position: "bottom",
     setup: () => {
       // Clicca la tab Categorie (indice 1) per renderizzare il contenuto
@@ -126,55 +94,18 @@ export const TOUR_STEPS: TourStep[] = [
     },
   },
   {
-    id: "spazio-categoria-dettaglio",
+    id: "primary-navigation",
     page: "/spazio",
-    selector: '[data-tour="entity-dialog"]',
-    title: "La scheda di una categoria",
-    description: (
-      <>
-        <strong>Nome</strong> e <strong>budget mensile</strong> li conosci già. La{" "}
-        <strong>descrizione</strong> è facoltativa ma preziosa: spiega con parole tue quando usare
-        questa categoria (es. &quot;spese per uscire fuori a cena o pranzo&quot;) e aiuta
-        l&apos;assistente a categorizzare correttamente anche le spese più ambigue.
-      </>
-    ),
-    position: "right",
-    setup: () => {
-      // Riapre la tab Categorie (per sicurezza se si torna indietro nel tour) e
-      // apre la scheda della prima categoria per mostrare il form con il campo descrizione.
-      const tabs = document.querySelectorAll('[data-tour="spazio-tabs"] [role="tab"]');
-      (tabs[1] as HTMLElement | undefined)?.click();
-      window.setTimeout(() => {
-        const editBtn = document.querySelector('[data-tour="category-edit-button"]') as HTMLElement | null;
-        editBtn?.click();
-      }, 50);
-    },
-  },
-  {
-    id: "sidebar-nav",
-    page: "/spazio",
-    selector: '[data-tour="sidebar-nav"]',
+    selector: '[data-tour="primary-navigation"]',
     title: "Navigazione",
     description:
-      "Puoi tornare in qualsiasi sezione in qualsiasi momento dalla barra laterale.",
+      "Home, Analytics, Registra e Gestisci sono sempre a portata di mano: dalla barra laterale su computer, "
+      + "dalla barra in basso su telefono. Sotto \"Altro\" trovi anche Obiettivi di risparmio, Report automatici e il resto.",
     position: "bottom",
-    setup: () => {
-      // Chiude la scheda categoria aperta dallo step precedente, se ancora aperta.
-      const closeBtn = document.querySelector('[data-tour="entity-dialog-close"]') as HTMLElement | null;
-      closeBtn?.click();
-
-      // Su mobile il drawer è chiuso: lo apriamo prima di cercare il target
-      const nav = document.querySelector('[data-tour="sidebar-nav"]') as HTMLElement | null;
-      const isHidden = !nav || nav.getBoundingClientRect().width === 0;
-      if (isHidden) {
-        const btn = document.querySelector('[data-action="sidebar-open"]') as HTMLElement | null;
-        btn?.click();
-      }
-    },
   },
   {
     id: "connect-telegram",
-    page: "/chat",
+    page: "/home",
     selector: '[data-tour="tour-final"]',
     title: "📲 Collega Telegram",
     description: <TelegramLinkStep />,
@@ -182,12 +113,12 @@ export const TOUR_STEPS: TourStep[] = [
   },
   {
     id: "tour-complete",
-    page: "/chat",
+    page: "/home",
     selector: '[data-tour="tour-final"]',
     title: "🎉 Ora sai come funziona!",
     description: (
       <>
-        Quello che hai visto erano <strong>dati di esempio</strong> — li cancelliamo adesso e il tuo spazio è
+        Quello che hai visto erano <strong>dati di esempio</strong>: li cancelliamo adesso e il tuo spazio è
         pronto per iniziare davvero. Tocca <strong>Fine</strong> e parte!
       </>
     ),
@@ -290,6 +221,7 @@ export function TourProvider({ children }: { children: React.ReactNode }) {
   // in localStorage per riprendere dal punto giusto dopo la navigazione.
   // Supporta anche ?tour=1&demo=1 come query param (percorso Bot Mini App).
   useEffect(() => {
+    let restoreTimer: number | undefined;
     try {
       if (typeof window !== "undefined") {
         const params = new URLSearchParams(window.location.search);
@@ -301,14 +233,28 @@ export function TourProvider({ children }: { children: React.ReactNode }) {
       if (pending === "true" && done !== "true") {
         const savedStep = parseInt(localStorage.getItem(TOUR_STEP_KEY) ?? "0", 10);
         const safeStep = isNaN(savedStep) ? 0 : Math.min(savedStep, TOUR_STEPS.length - 1);
-        setCurrentStep(safeStep);
-        setIsActive(true);
+        // Rimanda il ripristino dopo il mount: evita un aggiornamento sincrono
+        // nell'effetto e mantiene invariato il ripristino del tour al reload.
+        restoreTimer = window.setTimeout(() => {
+          setCurrentStep(safeStep);
+          setIsActive(true);
+          // Il tour riprende da dove era rimasto, ma la pagina di atterraggio
+          // (oggi la Home) può non essere quella dello step: senza questa
+          // navigazione l'overlay cercherebbe all'infinito un selettore che su
+          // questa pagina non esiste, e il tour resterebbe invisibile.
+          const step = TOUR_STEPS[safeStep];
+          if (step && window.location.pathname !== step.page) {
+            router.push(step.page);
+          }
+        }, 0);
       }
     } catch {
       // silently ignore
     }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+    return () => {
+      if (restoreTimer !== undefined) window.clearTimeout(restoreTimer);
+    };
+  }, [router]);
 
   return (
     <TourContext.Provider value={{ isActive, currentStep, steps: TOUR_STEPS, startTour, nextStep, prevStep, skipTour }}>

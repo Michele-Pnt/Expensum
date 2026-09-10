@@ -9,6 +9,9 @@ Copre anche il tracking server-side dei report, che sostituisce l'evento PostHog
 lato frontend (inaffidabile perché subordinato al consenso cookie).
 """
 
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
+
 import pytest
 
 from src.gamification import engine
@@ -156,15 +159,14 @@ class TestNeverBreaksTheCaller:
 
     def test_streak_reward_survives_a_broken_engine(self, store, monkeypatch):
         """Anche col motore rotto la streak deve continuare a concedere il Pro."""
-        from datetime import date, timedelta
-
         from src.user_store import UserStreak
 
         with store.Session() as s:
             s.add(UserStreak(
                 chat_id="u1", current_streak_days=13, streak_target_days=14,
-                last_qualifying_date=date.today() - timedelta(days=1),
-                cycle_state="counting", today_count=1, today_date=date.today(),
+                last_qualifying_date=(datetime.now(ZoneInfo("Europe/Rome")).date() - timedelta(days=1)),
+                cycle_state="counting", today_count=1,
+                today_date=datetime.now(ZoneInfo("Europe/Rome")).date(),
             ))
             s.commit()
 

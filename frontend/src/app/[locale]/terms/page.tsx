@@ -18,7 +18,7 @@ export async function generateMetadata({
   const { locale } = await params;
   const isEn = locale === "en";
   return {
-    title: isEn ? "Terms of Service — Expensum" : "Termini di Servizio — Expensum",
+    title: isEn ? "Terms of Service | Expensum" : "Termini di Servizio | Expensum",
     description: isEn
       ? "General terms of use of the Expensum service."
       : "Condizioni generali d'uso del servizio Expensum.",

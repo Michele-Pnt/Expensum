@@ -5,7 +5,8 @@ discover_databases() ritorna una tupla (discovered_map: dict, all_candidates: li
 """
 
 import pytest
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, call, patch
+from notion_client.errors import APIResponseError
 from src.notion_client import NotionFinanceClient
 
 pytestmark = pytest.mark.unit
@@ -82,6 +83,81 @@ def test_discover_databases_strategy_0(mock_notion_client):
     assert discovered["subscriptions_db_id"] == "sub_id"
     assert discovered["monthly_balance_db_id"] == "mb_id"
     assert discovered["pay_transfer_db_id"] == "pay_id"
+
+
+@patch("src.notion_client.Client")
+def test_replace_income_type_updates_only_matching_legacy_pages(mock_client_class):
+    """Rinominare/eliminare una categoria non deve toccare altre entrate Notion."""
+    client = NotionFinanceClient(api_key="test", income_db_id="income-db")
+    client._get_data_source_id = MagicMock(return_value="income-source")
+    client._get_property_name = MagicMock(return_value="Income Type")
+    client._query_with_retry = MagicMock(return_value={
+        "results": [
+            {"id": "match", "properties": {"Income Type": {"select": {"name": "Freelance"}}}},
+            {"id": "other", "properties": {"Income Type": {"select": {"name": "Stipendio"}}}},
+        ],
+        "has_more": False,
+    })
+    client._client.pages.retrieve.return_value = {
+        "properties": {"Income Type": {"select": {"name": "Freelance"}}},
+    }
+
+    updated = client.replace_income_type("Freelance", "Altra entrata")
+
+    assert updated == 1
+    client._client.pages.update.assert_called_once_with(
+        page_id="match",
+        properties={"Income Type": {"select": {"name": "Altra entrata"}}},
+    )
+
+
+@patch("src.notion_client.Client")
+def test_replace_income_type_page_ids_updates_only_the_snapshot(mock_client_class):
+    """A durable outbox must not touch rows added after its snapshot was taken."""
+    client = NotionFinanceClient(api_key="test", income_db_id="income-db")
+    client._get_property_name = MagicMock(return_value="Income Type")
+    client._client.pages.retrieve.side_effect = [
+        {"properties": {"Income Type": {"select": {"name": "Freelance"}}}},
+        {"properties": {"Income Type": {"select": {"name": "Freelance"}}}},
+    ]
+
+    updated = client.replace_income_type_page_ids(
+        ["original-one", "original-two"], "Freelance", "Altra entrata",
+    )
+
+    assert updated == 2
+    assert client._client.pages.update.call_args_list == [
+        call(
+            page_id="original-one",
+            properties={"Income Type": {"select": {"name": "Altra entrata"}}},
+        ),
+        call(
+            page_id="original-two",
+            properties={"Income Type": {"select": {"name": "Altra entrata"}}},
+        ),
+    ]
+
+
+@patch("src.notion_client.Client")
+def test_replace_income_type_page_ids_preserves_concurrent_edits_and_missing_pages(mock_client_class):
+    """Retry changes only still-matching pages and treats a deleted page as reconciled."""
+    client = NotionFinanceClient(api_key="test", income_db_id="income-db")
+    client._get_property_name = MagicMock(return_value="Income Type")
+    client._client.pages.retrieve.side_effect = [
+        {"properties": {"Income Type": {"select": {"name": "Freelance"}}}},
+        {"properties": {"Income Type": {"select": {"name": "Stipendio"}}}},
+        APIResponseError("object_not_found", 404, "gone", {}, ""),
+    ]
+
+    updated = client.replace_income_type_page_ids(
+        ["still-old", "edited-elsewhere", "deleted"], "Freelance", "Altra entrata",
+    )
+
+    assert updated == 1
+    client._client.pages.update.assert_called_once_with(
+        page_id="still-old",
+        properties={"Income Type": {"select": {"name": "Altra entrata"}}},
+    )
 
 
 def test_discover_databases_strategy_0_skips_linked_views(mock_notion_client):

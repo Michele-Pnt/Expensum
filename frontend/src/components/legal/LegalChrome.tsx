@@ -1,3 +1,4 @@
+import Image from "next/image";
 import { getTranslations } from "next-intl/server";
 import { Link } from "@/i18n/navigation";
 import styles from "@/app/[locale]/legal.module.css";
@@ -17,8 +18,14 @@ export default async function LegalChrome({
     <div className={styles.page}>
       <nav className={styles.nav}>
         <Link href="/" className={styles.navLogo}>
-          <img src="/logo-expensum-icon.png" alt="Expensum" className={styles.navLogoIcon} />
-          <img src="/scritta_expensum.png" alt="Expensum" className={styles.navLogoText} />
+          <Image
+            src="/logo-expensum-icon.png"
+            alt="Expensum"
+            width={28}
+            height={28}
+            className={styles.navLogoIcon}
+          />
+          <span className={styles.navLogoText}>Expensum</span>
         </Link>
         <Link href="/" className={styles.backLink}>{t("backToSite")}</Link>
       </nav>

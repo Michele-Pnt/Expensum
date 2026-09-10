@@ -1,0 +1,36 @@
+.page { padding-bottom: 40px; }
+.section { padding: 60px 0 120px; }
+.sectionGrid { display: grid; grid-template-columns: minmax(0, 0.78fr) minmax(360px, 1fr); gap: clamp(44px, 9vw, 130px); align-items: start; }
+.sectionTitle { margin: 0; color: #edf7f5; font-size: clamp(2rem, 4.5vw, 4.7rem); font-weight: 350; letter-spacing: -0.07em; line-height: 0.98; }
+.sectionIntro { margin: 22px 0 0; color: rgba(224, 237, 235, 0.6); font-size: 1rem; line-height: 1.6; }
+.steps { display: grid; gap: 0; }
+.step { display: grid; grid-template-columns: minmax(230px, 0.72fr) minmax(440px, 1.28fr); gap: clamp(38px, 7vw, 96px); align-items: center; padding: clamp(52px, 7vw, 92px) 0; border-top: 1px solid rgba(211, 232, 229, 0.15); }
+.step:nth-child(even) { grid-template-columns: minmax(440px, 1.28fr) minmax(230px, 0.72fr); }
+.step:nth-child(even) .stepCopy { order: 2; }
+.step:nth-child(even) .screen { order: 1; }
+.stepCopy { min-width: 0; }
+.stepNumber { color: #63cfd2; font-size: 0.72rem; font-weight: 700; letter-spacing: 0.16em; }
+.step h2 { margin: 18px 0 0; color: #eff8f6; font-size: clamp(1.65rem, 3vw, 3rem); font-weight: 430; letter-spacing: -0.055em; line-height: 1.03; }
+.step p { max-width: 430px; margin: 18px 0 0; color: rgba(224, 237, 235, 0.58); line-height: 1.65; }
+.screen { min-width: 0; }
+.featureShowcases { display: grid; margin-top: 18px; }
+.featureShowcase { display: grid; grid-template-columns: minmax(230px, 0.72fr) minmax(440px, 1.28fr); gap: clamp(38px, 7vw, 96px); align-items: center; padding: clamp(56px, 8vw, 104px) 0; border-top: 1px solid rgba(211, 232, 229, 0.15); }
+.featureShowcase:nth-child(even) { grid-template-columns: minmax(440px, 1.28fr) minmax(230px, 0.72fr); }
+.featureShowcase:nth-child(even) .featureCopy { order: 2; }
+.featureShowcase:nth-child(even) .featureScreen { order: 1; }
+.featureCopy > span { color: #63cfd2; font-size: 0.72rem; font-weight: 700; letter-spacing: 0.16em; }
+.featureCopy h2 { margin: 18px 0 0; color: #edf7f5; font-size: clamp(1.8rem, 3.2vw, 3.35rem); font-weight: 430; letter-spacing: -0.055em; line-height: 1.03; }
+.featureCopy p { max-width: 430px; margin: 18px 0 0; color: rgba(224, 237, 235, 0.58); line-height: 1.65; }
+.featureScreen { min-width: 0; }
+.securityList { display: grid; gap: 14px; margin: 38px 0 0; padding: 0; list-style: none; }.securityList li { display: flex; gap: 12px; padding: 18px; border: 1px solid rgba(211, 232, 229, 0.14); border-radius: 12px; color: rgba(224, 237, 235, 0.72); }.securityList li::before { content: "✓"; color: #63cfd2; }
+.cards { display: grid; grid-template-columns: repeat(2, 1fr); gap: 18px; margin-top: 54px; }.priceCard { min-height: 230px; display: flex; flex-direction: column; padding: 28px; border: 1px solid rgba(211, 232, 229, 0.16); border-radius: 16px; background: rgba(9, 18, 19, 0.55); }.priceCard:first-child { border-color: rgba(99, 207, 210, 0.45); background: linear-gradient(145deg, rgba(39, 92, 95, 0.32), rgba(9, 18, 19, 0.62)); }.priceCard h2 { margin: 0; color: #f0f8f6; font-size: 1.4rem; font-weight: 500; }.priceCard p { color: rgba(224, 237, 235, 0.6); line-height: 1.55; }.priceCard a, .priceCard button { width: fit-content; margin-top: auto; padding: 11px 15px; border: 1px solid rgba(99, 207, 210, 0.42); border-radius: 999px; background: transparent; color: #eaf4f2; cursor: pointer; font: inherit; text-decoration: none; }.priceCard a:focus-visible, .priceCard button:focus-visible { outline: 2px solid #f6c65b; outline-offset: 4px; }
+.people { display: flex; flex-wrap: wrap; gap: 14px; margin-top: 44px; }.person { padding: 16px 20px; border-left: 2px solid #63cfd2; background: rgba(9, 18, 19, 0.55); color: #eef8f6; }
+@media (max-width: 760px) {
+  .sectionGrid, .step, .featureShowcase { grid-template-columns: 1fr; }
+  .step:nth-child(even), .featureShowcase:nth-child(even) { grid-template-columns: 1fr; }
+  .cards { grid-template-columns: 1fr; }
+  .section { padding-top: 28px; padding-bottom: 80px; }
+  .step, .featureShowcase { gap: 30px; padding: 54px 0; }
+  .step:nth-child(even) .stepCopy, .featureShowcase:nth-child(even) .featureCopy { order: 1; }
+  .step:nth-child(even) .screen, .featureShowcase:nth-child(even) .featureScreen { order: 2; }
+}
