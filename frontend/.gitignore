@@ -32,6 +32,11 @@ yarn-error.log*
 
 # env files (can opt-in for committing if needed)
 .env*
+# .env.production è un'eccezione voluta: contiene solo INTERNAL_BACKEND_ORIGIN,
+# l'indirizzo interno (non un segreto) su cui gunicorn ascolta in produzione —
+# va versionato perché expensum-webapp.service non ha un EnvironmentFile e
+# Next.js lo legge da qui in autonomo all'avvio (`npm start`).
+!.env.production
 
 # vercel
 .vercel
