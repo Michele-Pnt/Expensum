@@ -2,7 +2,6 @@
 
 import React, { useEffect, useState } from "react";
 import Image from "next/image";
-import NextLink from "next/link";
 import { useTranslations } from "next-intl";
 import {
   Check,
@@ -131,9 +130,9 @@ export default function LandingPage() {
                 "Registrati" è nascosto finché il prodotto è in beta privata a lista d'attesa:
                 l'unico ingresso pubblico è il form waitlist nell'hero, per non contraddire
                 il posizionamento "accesso esclusivo". */}
-            <NextLink href="/login" className={styles.btnPrimary}>
+            <a href="/login" className={styles.btnPrimary}>
               {t("nav.accedi")}
-            </NextLink>
+            </a>
             <LanguageSwitcher />
             {/* Hamburger — solo mobile */}
           <button
