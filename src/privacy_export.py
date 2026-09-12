@@ -49,6 +49,12 @@ def build_export_json(session: Session, user: User) -> dict:
         "currency": user.currency,
         "timezone": user.timezone,
         "created_at": user.created_at.isoformat() if user.created_at else None,
+        "privacy_policy_version_accepted": user.privacy_policy_version_accepted,
+        "privacy_accepted_at": (
+            user.privacy_accepted_at.isoformat() if user.privacy_accepted_at else None
+        ),
+        "tos_version_accepted": user.tos_version_accepted,
+        "tos_accepted_at": user.tos_accepted_at.isoformat() if user.tos_accepted_at else None,
     }
 
     if user.storage_backend == "postgres":

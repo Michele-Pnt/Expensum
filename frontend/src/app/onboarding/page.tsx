@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useCallback } from "react";
 import { useRouter } from "next/navigation";
-import { apiFetch } from "@/lib/api";
+import { apiFetch, ApiError } from "@/lib/api";
 import { trackOnboardingStepCompleted, trackOnboardingCompleted, trackReferralLinkGenerated } from "@/lib/analytics";
 import {
   Box,
@@ -491,6 +491,28 @@ export default function OnboardingPage() {
     setState((prev) => ({ ...prev, ...partial }));
   }, []);
 
+  // Gate: un utente con setup incompleto o consenso privacy/ToS non aggiornato non deve
+  // poter completare l'onboarding scavalcando quei passaggi arrivando qui direttamente.
+  useEffect(() => {
+    let cancelled = false;
+    apiFetch<{ redirect_to?: string | null }>("/api/auth/session")
+      .then((session) => {
+        if (cancelled) return;
+        if (session.redirect_to && session.redirect_to !== "/onboarding") {
+          window.location.assign(session.redirect_to);
+        }
+      })
+      .catch((err) => {
+        if (cancelled) return;
+        if (err instanceof ApiError && err.message === "auth_401") {
+          router.replace("/login");
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [router]);
+
   const saveStep = useCallback(async (stepName: string, data: Record<string, unknown>) => {
     try {
       await apiFetch("/api/onboarding/step", { method: "POST", body: { step: stepName, data } });
@@ -567,22 +589,23 @@ export default function OnboardingPage() {
     window.location.assign("/home");
   }, []);
 
-  // Controlla se l'onboarding è già completato
+  // Precompila i campi da preferenze già salvate. Il redirect per onboarding già
+  // completato è gestito dal gate di sessione sopra (copre anche setup/consenso,
+  // di cui questo endpoint non sa nulla) — non duplicarlo qui per evitare due
+  // navigazioni concorrenti sullo stesso mount.
   useEffect(() => {
     apiFetch<{
-      onboarding_completed_at?: string | null;
       preferred_language?: string;
       currency?: string;
       timezone?: string;
     }>("/api/onboarding/status")
       .then((data) => {
-        if (data.onboarding_completed_at) router.replace("/home");
         if (data.preferred_language) update({ language: data.preferred_language });
         if (data.currency) update({ currency: data.currency });
         if (data.timezone) update({ timezone: data.timezone });
       })
       .catch(() => {});
-  }, [router, update]);
+  }, [update]);
 
   const progressValue = step === 0 ? 0 : (step / TOTAL_VISIBLE) * 100;
 

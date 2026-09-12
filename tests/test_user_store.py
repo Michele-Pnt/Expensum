@@ -29,6 +29,58 @@ def test_add_and_get_user(mock_db_session):
     assert user.expense_db_id == "exp_123"
     assert user.is_active is True
 
+
+def test_accept_terms_of_service_sets_version_and_timestamp(mock_db_session):
+    store = mock_db_session
+    chat_id = "tos_chat_1"
+    store.add_user(chat_id=chat_id, username="tos-user")
+
+    result = store.accept_terms_of_service(chat_id, "2026-09-11")
+
+    assert result is True
+    user = store.get_user(chat_id)
+    assert user.tos_version_accepted == "2026-09-11"
+    assert user.tos_accepted_at is not None
+
+
+def test_accept_terms_of_service_returns_false_if_user_missing(mock_db_session):
+    store = mock_db_session
+
+    result = store.accept_terms_of_service("nonexistent_chat", "2026-09-11")
+
+    assert result is False
+
+
+def test_create_beta_account_leaves_consent_unaccepted(mock_db_session):
+    """create_beta_account non deve piu' auto-accettare privacy/ToS.
+
+    Il consenso resta NULL finche' l'utente non lo da attivamente al primo
+    login (gate bloccante in _resolve_authenticated_redirect): niente
+    accept_privacy_policy/accept_terms_of_service ne' AuditLog di consenso
+    creati in fase di creazione dell'account beta.
+    """
+    store = mock_db_session
+
+    result = store.create_beta_account("beta-tester@example.com", "Beta Tester")
+
+    assert result is not None
+    chat_id, password = result
+    assert password
+
+    user = store.get_user(chat_id)
+    assert user is not None
+    assert user.privacy_policy_version_accepted is None
+    assert user.tos_version_accepted is None
+    assert user.tos_accepted_at is None
+
+    with store.Session() as s:
+        consent_logs = (
+            s.query(AuditLog)
+            .filter(AuditLog.user_id == chat_id, AuditLog.action == "consent_change")
+            .count()
+        )
+    assert consent_logs == 0
+
 def test_update_existing_user(mock_db_session):
     store = mock_db_session
     chat_id = "12345"

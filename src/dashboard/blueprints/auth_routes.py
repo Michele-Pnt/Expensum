@@ -78,6 +78,9 @@ def _resolve_authenticated_redirect(chat_id: str) -> str:
         return url_for("auth.web_login")
     if user.setup_completed_at is None:
         return _build_setup_redirect(chat_id)
+    if (user.privacy_policy_version_accepted != Config.CURRENT_PRIVACY_POLICY_VERSION
+            or user.tos_version_accepted != Config.CURRENT_TOS_VERSION):
+        return "/consent"
     if user.onboarding_completed_at is None:
         return "/onboarding"
     return "/home"
@@ -111,6 +114,19 @@ def _safe_next_url(raw_next: str | None) -> str | None:
     return None
 
 
+def _authenticated_redirect_or_next(chat_id: str, next_url: str | None) -> str:
+    """Risolve la destinazione post-login, onorando `next_url` solo a gate superati.
+
+    Un `next_url` (es. dai link "Vai ai report" nelle email di lifecycle) non deve
+    scavalcare setup/consenso/onboarding: si applica solo se l'utente ha già superato
+    tutti i gate (`_resolve_authenticated_redirect` risolverebbe comunque su `/home`).
+    """
+    resolved = _resolve_authenticated_redirect(chat_id)
+    if resolved == "/home" and next_url:
+        return next_url
+    return resolved
+
+
 @auth_bp.route("/login", methods=["GET", "POST"])
 @limiter.limit("5 per minute")
 def web_login():
@@ -124,7 +140,7 @@ def web_login():
 
     chat_id = _get_session_chat_id()
     if chat_id:
-        return redirect(next_url or _resolve_authenticated_redirect(chat_id))
+        return redirect(_authenticated_redirect_or_next(chat_id, next_url))
 
     error = None
     if request.method == "POST":
@@ -183,7 +199,7 @@ def web_login():
                     "Errore applicazione reward referral pendenti al login",
                     extra={"domain": "dashboard", "event": "referral_reward_apply_failed"},
                 )
-            return redirect(next_url or _resolve_authenticated_redirect(user.chat_id))
+            return redirect(_authenticated_redirect_or_next(user.chat_id, next_url))
 
         error = "Email o password errati."
         failed_count = track_failed_login(email)
@@ -271,6 +287,8 @@ def web_register():
     email = (request.form.get("email") or "").strip().lower()
     password = request.form.get("password") or ""
     password_confirm = request.form.get("password_confirm") or ""
+    privacy_accepted = request.form.get("privacy_accepted") == "on"
+    tos_accepted = request.form.get("tos_accepted") == "on"
 
     def _err(msg: str):
         return render_template("register.html", error=msg)
@@ -283,6 +301,8 @@ def web_register():
         return _err("La password deve essere di almeno 8 caratteri.")
     if password != password_confirm:
         return _err("Le password non coincidono.")
+    if not privacy_accepted or not tos_accepted:
+        return _err("Devi accettare privacy policy e termini di servizio per registrarti.")
     if store.get_user_by_email(email):
         return _err("Email già registrata.")
 
@@ -301,6 +321,12 @@ def web_register():
         store.write_audit_log(
             web_chat_id, actor="user", action="consent_change",
             metadata={"consent_type": "privacy_policy", "version": Config.CURRENT_PRIVACY_POLICY_VERSION},
+            ip_address=request.remote_addr, user_agent=request.headers.get("User-Agent"),
+        )
+        store.accept_terms_of_service(web_chat_id, Config.CURRENT_TOS_VERSION)
+        store.write_audit_log(
+            web_chat_id, actor="user", action="consent_change",
+            metadata={"consent_type": "terms_of_service", "version": Config.CURRENT_TOS_VERSION},
             ip_address=request.remote_addr, user_agent=request.headers.get("User-Agent"),
         )
     except Exception:
@@ -341,6 +367,12 @@ def privacy_policy():
     un solo documento, aggiornato in un solo posto.
     """
     return redirect(f"{Config.WEBAPP_BASE_URL}/it/privacy")
+
+
+@auth_bp.route("/terms")
+def terms_of_service():
+    """Redirect ai Termini di Servizio ufficiali (sito Next.js), stesso pattern di /privacy."""
+    return redirect(f"{Config.WEBAPP_BASE_URL}/it/terms")
 
 
 @auth_bp.route("/logout")
@@ -761,6 +793,8 @@ def auth_postgres_start():
     email = (request.form.get("email") or "").strip().lower()
     password = request.form.get("password") or ""
     password2 = request.form.get("password2") or ""
+    privacy_accepted = request.form.get("privacy_accepted") == "on"
+    tos_accepted = request.form.get("tos_accepted") == "on"
 
     if not re.match(r"^[^@\s]+@[^@\s]+\.[^@\s]+$", email):
         return render_template("register_postgres.html", reg_token=reg_token, error="Email non valida.")
@@ -768,6 +802,11 @@ def auth_postgres_start():
         return render_template("register_postgres.html", reg_token=reg_token, error="La password deve essere di almeno 8 caratteri.")
     if password != password2:
         return render_template("register_postgres.html", reg_token=reg_token, error="Le password non coincidono.")
+    if not privacy_accepted or not tos_accepted:
+        return render_template(
+            "register_postgres.html", reg_token=reg_token,
+            error="Devi accettare privacy policy e termini di servizio per registrarti.",
+        )
     if store.get_user_by_email(email):
         return render_template("register_postgres.html", reg_token=reg_token, error="Email già registrata.")
 
@@ -783,6 +822,12 @@ def auth_postgres_start():
         store.write_audit_log(
             chat_id, actor="user", action="consent_change",
             metadata={"consent_type": "privacy_policy", "version": Config.CURRENT_PRIVACY_POLICY_VERSION},
+            ip_address=request.remote_addr, user_agent=request.headers.get("User-Agent"),
+        )
+        store.accept_terms_of_service(chat_id, Config.CURRENT_TOS_VERSION)
+        store.write_audit_log(
+            chat_id, actor="user", action="consent_change",
+            metadata={"consent_type": "terms_of_service", "version": Config.CURRENT_TOS_VERSION},
             ip_address=request.remote_addr, user_agent=request.headers.get("User-Agent"),
         )
     except Exception as e:

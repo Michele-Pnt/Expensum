@@ -27,6 +27,8 @@ type SettingsResponse = {
     last_name?: string | null;
     privacy_policy_version_accepted?: string | null;
     privacy_policy_current_version?: string;
+    tos_version_accepted?: string | null;
+    tos_current_version?: string;
   };
 };
 
@@ -50,7 +52,16 @@ async function downloadFile(url: string, filename: string): Promise<void> {
 export default function PrivacyPage() {
   const router = useRouter();
   const [busy, setBusy] = useState<
-    "json" | "csv" | "delete" | "notifications" | "name" | "email" | "password" | "consent" | null
+    | "json"
+    | "csv"
+    | "delete"
+    | "notifications"
+    | "name"
+    | "email"
+    | "password"
+    | "consent"
+    | "tos_consent"
+    | null
   >(null);
   const [notificationsEnabled, setNotificationsEnabled] = useState(true);
   const [deleteConfirm, setDeleteConfirm] = useState("");
@@ -59,6 +70,8 @@ export default function PrivacyPage() {
 
   const [policyAccepted, setPolicyAccepted] = useState<string | null>(null);
   const [policyCurrent, setPolicyCurrent] = useState<string | null>(null);
+  const [tosAccepted, setTosAccepted] = useState<string | null>(null);
+  const [tosCurrent, setTosCurrent] = useState<string | null>(null);
 
   const [firstName, setFirstName] = useState("");
   const [lastName, setLastName] = useState("");
@@ -88,6 +101,8 @@ export default function PrivacyPage() {
       const json: SettingsResponse = await res.json();
       setPolicyAccepted(json.account?.privacy_policy_version_accepted ?? null);
       setPolicyCurrent(json.account?.privacy_policy_current_version ?? null);
+      setTosAccepted(json.account?.tos_version_accepted ?? null);
+      setTosCurrent(json.account?.tos_current_version ?? null);
       setFirstName(json.account?.first_name ?? "");
       setLastName(json.account?.last_name ?? "");
     } catch {
@@ -115,6 +130,28 @@ export default function PrivacyPage() {
       if (!res.ok || !json.ok) throw new Error();
       setPolicyAccepted(json.privacy_policy_version_accepted);
       setInfo("Privacy policy accettata.");
+    } catch {
+      setError("Non sono riuscito a registrare l'accettazione. Riprova.");
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function handleAcceptTos() {
+    setBusy("tos_consent");
+    setError(null);
+    setInfo(null);
+    try {
+      const csrfToken = await getCsrfToken();
+      const res = await fetch("/api/privacy/accept-tos", {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { "Content-Type": "application/json", "X-CSRFToken": csrfToken },
+      });
+      const json = await res.json();
+      if (!res.ok || !json.ok) throw new Error();
+      setTosAccepted(json.tos_version_accepted);
+      setInfo("Termini di servizio accettati.");
     } catch {
       setError("Non sono riuscito a registrare l'accettazione. Riprova.");
     } finally {
@@ -314,6 +351,24 @@ export default function PrivacyPage() {
             informativa sulla privacy
           </a>
           . Accettala per continuare a usare Expensum senza interruzioni.
+        </Alert>
+      )}
+
+      {tosCurrent !== null && tosAccepted !== tosCurrent && (
+        <Alert
+          severity="warning"
+          sx={{ mb: 3 }}
+          action={
+            <Button color="inherit" size="small" onClick={handleAcceptTos} disabled={busy !== null}>
+              {busy === "tos_consent" ? "..." : "Accetta"}
+            </Button>
+          }
+        >
+          Abbiamo aggiornato i nostri{" "}
+          <a href="/terms" target="_blank" rel="noreferrer">
+            termini di servizio
+          </a>
+          . Accettali per continuare a usare Expensum senza interruzioni.
         </Alert>
       )}
 

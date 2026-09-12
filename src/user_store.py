@@ -264,6 +264,10 @@ class User(Base):
     privacy_policy_version_accepted = Column(String, nullable=True)
     privacy_accepted_at = Column(DateTime, nullable=True)
 
+    # Consenso termini di servizio (stessa logica della privacy policy)
+    tos_version_accepted = Column(String, nullable=True)
+    tos_accepted_at = Column(DateTime, nullable=True)
+
     # Attestazione età 18+ (D.Lgs. 101/2018 + capacità contrattuale Pro)
     age_attestation_at = Column(DateTime, nullable=True)
 
@@ -783,7 +787,11 @@ class UserStore(LedgerRepository, RetentionRepository):
         if run_runtime_ddl:
             # Questa riga crea fisicamente le tabelle se non esistono ancora
             Base.metadata.create_all(self.engine)
-            self._ensure_sqlite_schema()
+            # Trigger/indici di compatibilità solo SQLite (sintassi non valida su
+            # Postgres): su Postgres l'equivalente (FK fisica + RLS) lo gestisce
+            # Alembic, anche nel percorso "quick & dirty" con RUN_RUNTIME_MIGRATIONS=true.
+            if is_sqlite:
+                self._ensure_sqlite_schema()
         else:
             logger.info("DDL a runtime disattivato (RUN_RUNTIME_MIGRATIONS=false): schema gestito da Alembic.")
         self._seed_default_pricing()
@@ -950,6 +958,8 @@ class UserStore(LedgerRepository, RetentionRepository):
             "onboarding_completed_at": "DATETIME",
             "privacy_policy_version_accepted": "TEXT",
             "privacy_accepted_at": "DATETIME",
+            "tos_version_accepted": "TEXT",
+            "tos_accepted_at": "DATETIME",
             "age_attestation_at": "DATETIME",
             "has_demo_data": "BOOLEAN DEFAULT 0",
             "tour_step": "TEXT",
@@ -2497,6 +2507,21 @@ class UserStore(LedgerRepository, RetentionRepository):
             session.commit()
             return True
 
+    def accept_terms_of_service(self, chat_id: str, version: str) -> bool:
+        """Registra l'accettazione di una versione dei termini di servizio.
+
+        Ritorna False se l'utente non esiste.
+        """
+        chat_id = str(chat_id)
+        with self.Session() as session:
+            user = session.query(User).filter(User.chat_id == chat_id).first()
+            if not user:
+                return False
+            user.tos_version_accepted = version
+            user.tos_accepted_at = datetime.utcnow()
+            session.commit()
+            return True
+
     def write_audit_log(
         self,
         user_id: str,
@@ -3019,9 +3044,11 @@ class UserStore(LedgerRepository, RetentionRepository):
         quell'email (a qualunque stato). Stessa logica usata sia dal comando
         manuale (administrative provisioning) sia dalla creazione automatica
         al submit del form Tally (src/dashboard/app.py).
-        """
-        from config import Config
 
+        Il consenso privacy/ToS NON viene auto-popolato qui: resta `NULL` finché
+        l'utente non lo accetta attivamente al primo login (gate bloccante in
+        `_resolve_authenticated_redirect`, src/dashboard/blueprints/auth_routes.py).
+        """
         email = email.strip().lower()
         if self.get_user_by_email_any_status(email):
             return None
@@ -3038,12 +3065,6 @@ class UserStore(LedgerRepository, RetentionRepository):
             is_active=True,
         )
         self.set_credentials(chat_id, email, password)
-        self.accept_privacy_policy(chat_id, Config.CURRENT_PRIVACY_POLICY_VERSION)
-        self.write_audit_log(
-            chat_id, actor="admin", action="consent_change",
-            metadata={"consent_type": "privacy_policy", "version": Config.CURRENT_PRIVACY_POLICY_VERSION},
-            ip_address=None, user_agent="create_beta_account",
-        )
         # Pro di default per tutta la fase beta (reason="beta_default" per poterlo
         # revocare in blocco al lancio pubblico senza toccare i Pro pagati veri).
         self.set_user_plan(chat_id, "pro", payment_reference="beta_default")

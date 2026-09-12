@@ -39,6 +39,11 @@ class Config:
     # forza un nuovo consenso esplicito (consent_change in audit_log).
     CURRENT_PRIVACY_POLICY_VERSION: str = "2026-06-30"
 
+    # --- TERMINI DI SERVIZIO ---
+    # Stesso meccanismo della privacy policy: incrementare quando il testo dei ToS
+    # cambia in modo sostanziale, forza un nuovo consenso esplicito.
+    CURRENT_TOS_VERSION: str = "2026-09-11"
+
     # --- NOTION ---
     # Nessuna credenziale/DB ID di default globale: ogni utente usa solo le proprie
     # (src/notion_client.py non ha più fallback su credenziali condivise).

@@ -73,6 +73,8 @@ def api_settings_get():
             "is_active": user.is_active,
             "privacy_policy_version_accepted": user.privacy_policy_version_accepted,
             "privacy_policy_current_version": Config.CURRENT_PRIVACY_POLICY_VERSION,
+            "tos_version_accepted": user.tos_version_accepted,
+            "tos_current_version": Config.CURRENT_TOS_VERSION,
         },
         "plan": {
             "plan_type": plan.get("plan_type", "free"),
@@ -301,6 +303,24 @@ def api_privacy_accept_policy():
         ip_address=request.remote_addr, user_agent=request.headers.get("User-Agent"),
     )
     return jsonify({"ok": True, "privacy_policy_version_accepted": version})
+
+
+@privacy_bp.route("/api/privacy/accept-tos", methods=["POST"])
+def api_privacy_accept_tos():
+    """GDPR Art. 7 — registra l'accettazione esplicita della versione corrente dei ToS."""
+    store = _store()
+    chat_id, _ = _resolve_request_chat_id()
+    if not chat_id:
+        return jsonify({"error": "Unauthorized"}), 401
+
+    version = Config.CURRENT_TOS_VERSION
+    store.accept_terms_of_service(chat_id, version)
+    store.write_audit_log(
+        chat_id, actor="user", action="consent_change",
+        metadata={"consent_type": "terms_of_service", "version": version},
+        ip_address=request.remote_addr, user_agent=request.headers.get("User-Agent"),
+    )
+    return jsonify({"ok": True, "tos_version_accepted": version})
 
 
 @privacy_bp.route("/api/privacy/export-json", methods=["GET"])

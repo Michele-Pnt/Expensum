@@ -41,14 +41,16 @@ from src.privacy_export import build_export_json, build_csv_rows, CSV_HEADER
 from telegram import BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, InputFile, Update
 from telegram.constants import ParseMode
 from telegram.request import HTTPXRequest
-from telegram.error import NetworkError
+from telegram.error import BadRequest, NetworkError
 from google.genai import types
 from telegram.ext import (
     Application,
+    ApplicationHandlerStop,
     CallbackQueryHandler,
     CommandHandler,
     MessageHandler,
     ContextTypes,
+    TypeHandler,
     filters,
     ConversationHandler,
 )
@@ -102,6 +104,8 @@ WAITING_INVITE_CODE, WAITING_API_KEY, WAITING_EXPENSE_DB, WAITING_INCOME_DB, WAI
 LOGOUT_CONFIRM_CB = "logout_confirm"
 LOGOUT_CANCEL_CB = "logout_cancel"
 REACTIVATE_CB = "reactivate_account"
+DELETE_ACCOUNT_CONFIRM_CB = "delete_account_confirm"
+DELETE_ACCOUNT_CANCEL_CB = "delete_account_cancel"
 
 # Menu /impostazioni — Privacy e dati / Preferenze
 IMP_MENU_PRIVACY_CB = "imp_menu_privacy"
@@ -111,7 +115,7 @@ PRIVACY_EXPORT_CB = "privacy_export"
 PRIVACY_DELETE_START_CB = "privacy_delete_start"
 PRIVACY_NOTIF_TOGGLE_CB = "privacy_notif_toggle"
 PRIVACY_POLICY_CB = "privacy_policy_link"
-PRIVACY_TERMS_CB = "privacy_terms_placeholder"
+PRIVACY_TERMS_CB = "privacy_terms_link"
 PREFS_EDIT_START_CB = "prefs_edit_start"
 
 # ---------------------------------------------------------------------------
@@ -320,6 +324,158 @@ async def _reply_not_authorized(update: Update) -> None:
             "oppure /accedi se ne hai già uno.",
             parse_mode=ParseMode.MARKDOWN,
         )
+
+
+# Comandi sempre raggiungibili anche con consenso privacy/ToS non aggiornato: gestione
+# account (avvio, login, logout, cancellazione), link diretto alla privacy policy ed
+# export dati (Art. 15/20 GDPR) — il consenso ai nuovi ToS non può essere condizione
+# per esercitare gli altri diritti dell'interessato, per non intrappolare l'utente
+# senza via d'uscita mentre il gate è attivo.
+_CONSENT_GATE_ALLOWED_COMMANDS = {
+    "start", "registrati", "accedi", "logout", "elimina_account", "privacy", "export",
+}
+
+# Callback del bottone "Ho letto e accetto" nel messaggio del gate: via di accettazione
+# diretta dal bot, indispensabile per gli account storage_backend="notion" (nessuna
+# email/password quindi impossibilitati a loggarsi nella webapp per accettare da lì).
+CONSENT_GATE_ACCEPT_CB = "consent_gate_accept"
+
+# Callback sempre raggiungibili anche a gate attivo: conferma/annulla di logout ed
+# eliminazione account, oltre all'accettazione stessa. Senza questa allowlist un utente
+# gateato che clicca "Sì, elimina tutto" o "Conferma logout" verrebbe bloccato dal gate
+# invece di completare l'azione (l'allowlist sui comandi copre solo il comando che APRE
+# la keyboard di conferma, non i bottoni che la compongono).
+_CONSENT_GATE_ALLOWED_CALLBACKS = {
+    CONSENT_GATE_ACCEPT_CB,
+    DELETE_ACCOUNT_CONFIRM_CB, DELETE_ACCOUNT_CANCEL_CB,
+    LOGOUT_CONFIRM_CB, LOGOUT_CANCEL_CB,
+}
+
+
+async def _consent_gate(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Blocca l'uso del bot per utenti già registrati con consenso privacy/ToS non aggiornato.
+
+    Handler cross-cutting in group=-1 (gira prima di ogni altro handler, vedi `main()`):
+    stesso criterio del gate bloccante già attivo lato webapp
+    (`_resolve_authenticated_redirect` in `src/dashboard/blueprints/auth_routes.py`), qui
+    applicato al bot perché un utente Telegram può usare i comandi senza mai passare dalla
+    webapp. Offre due vie di accettazione: aprire la webapp, oppure il bottone inline
+    gestito da `handle_consent_gate_accept_callback` (unica via percorribile per gli
+    account Notion, che non hanno credenziali email/password per la webapp).
+
+    Applica il rate limiting (`is_rate_limited`) prima di rispondere: gira per OGNI update
+    di un utente gateato, quindi senza questo controllo bypasserebbe la sliding window
+    applicata altrove (`handle_text`/`handle_voice`/`handle_photos`).
+    """
+    chat = update.effective_chat
+    if not chat:
+        return
+    chat_id = str(chat.id)
+
+    if update.callback_query and update.callback_query.data in _CONSENT_GATE_ALLOWED_CALLBACKS:
+        return  # es. accetta, conferma/annulla logout o cancellazione account
+
+    user = _user_store.get_user(chat_id)
+    if user is None:
+        return
+    if (user.privacy_policy_version_accepted == Config.CURRENT_PRIVACY_POLICY_VERSION
+            and user.tos_version_accepted == Config.CURRENT_TOS_VERSION):
+        return
+
+    message_text = update.message.text if update.message and update.message.text else ""
+    command = (
+        message_text.split()[0][1:].split("@")[0].lower()
+        if message_text.startswith("/") else None
+    )
+    if command in _CONSENT_GATE_ALLOWED_COMMANDS:
+        return
+
+    if is_rate_limited(chat_id, max_messages=Config.MAX_MESSAGES_PER_MINUTE):
+        raise ApplicationHandlerStop
+
+    text = (
+        "🔒 Abbiamo aggiornato la "
+        f'<a href="{Config.WEBAPP_BASE_URL}/privacy">Privacy Policy</a> e/o i '
+        f'<a href="{Config.WEBAPP_BASE_URL}/terms">Termini di Servizio</a>.\n\n'
+        "Leggili, poi accettali col bottone qui sotto oppure dalla webapp: "
+        f"{Config.WEBAPP_BASE_URL}/login\n\n"
+        "Nel frattempo restano disponibili /export (scarica i tuoi dati), "
+        "/privacy e /elimina_account."
+    )
+    keyboard = InlineKeyboardMarkup(
+        [[InlineKeyboardButton("✅ Ho letto e accetto", callback_data=CONSENT_GATE_ACCEPT_CB)]]
+    )
+    if update.callback_query:
+        await update.callback_query.answer()
+        await context.bot.send_message(
+            chat_id=int(chat_id), text=text, parse_mode=ParseMode.HTML,
+            disable_web_page_preview=True, reply_markup=keyboard,
+        )
+        _log_consent_gate_blocked(chat_id, "callback")
+    elif update.message:
+        await update.message.reply_text(
+            text, parse_mode=ParseMode.HTML,
+            disable_web_page_preview=True, reply_markup=keyboard,
+        )
+        _log_consent_gate_blocked(chat_id, "command" if command else "message")
+    raise ApplicationHandlerStop
+
+
+def _log_consent_gate_blocked(chat_id: str, kind: str) -> None:
+    """Log di sicurezza per un blocco effettivo del gate consenso (nessun contenuto utente)."""
+    logger.info(
+        "consent_gate_blocked",
+        extra={
+            "domain": "security", "event": "consent_gate_blocked", "chat_id": chat_id,
+            "meta": {"kind": kind},
+        },
+    )
+
+
+async def handle_consent_gate_accept_callback(
+    update: Update, context: ContextTypes.DEFAULT_TYPE,
+) -> None:
+    """Registra l'accettazione esplicita di privacy+ToS dal bottone del gate (bot.py).
+
+    Via di accettazione equivalente a quella webapp (`POST /api/privacy/accept-policy`,
+    `/accept-tos`): stesso effetto sui campi `User`, stesso audit log `consent_change`.
+    """
+    query = update.callback_query
+    await query.answer()
+    chat_id = str(update.effective_chat.id)
+    user = _user_store.get_user(chat_id)
+    if user is None:
+        return
+
+    # Bottone di un messaggio di gate precedente già evaso (l'utente ha già accettato
+    # nel frattempo, da qui o dalla webapp): evita di sovrascrivere `*_accepted_at` con
+    # `utcnow()` e di scrivere audit log duplicati.
+    if (user.privacy_policy_version_accepted == Config.CURRENT_PRIVACY_POLICY_VERSION
+            and user.tos_version_accepted == Config.CURRENT_TOS_VERSION):
+        try:
+            await query.edit_message_text(
+                "✅ Hai già accettato. Puoi continuare a usare Expensum."
+            )
+        except BadRequest:
+            pass  # doppio tap sullo stesso messaggio già evaso, o messaggio non più modificabile
+        return
+
+    _user_store.accept_privacy_policy(chat_id, Config.CURRENT_PRIVACY_POLICY_VERSION)
+    _user_store.write_audit_log(
+        chat_id, actor="user", action="consent_change",
+        metadata={
+            "consent_type": "privacy_policy", "version": Config.CURRENT_PRIVACY_POLICY_VERSION,
+        },
+        ip_address=None, user_agent="telegram_bot",
+    )
+    _user_store.accept_terms_of_service(chat_id, Config.CURRENT_TOS_VERSION)
+    _user_store.write_audit_log(
+        chat_id, actor="user", action="consent_change",
+        metadata={"consent_type": "terms_of_service", "version": Config.CURRENT_TOS_VERSION},
+        ip_address=None, user_agent="telegram_bot",
+    )
+    await query.edit_message_text("✅ Grazie! Ora puoi continuare a usare Expensum.")
+
 
 async def _check_and_consume_tokens(update: Update, chat_id: str, action_type: str) -> bool:
     """Verifica e consuma token per un'azione. Ritorna False se bloccato, True se OK."""
@@ -1252,8 +1408,8 @@ def _delete_account_confirmation_text_and_keyboard() -> tuple[str, InlineKeyboar
         "I dati sul tuo workspace Notion *non* vengono toccati."
     )
     keyboard = InlineKeyboardMarkup([
-        [InlineKeyboardButton("💀 Sì, elimina tutto", callback_data="delete_account_confirm")],
-        [InlineKeyboardButton("❌ Annulla", callback_data="delete_account_cancel")],
+        [InlineKeyboardButton("💀 Sì, elimina tutto", callback_data=DELETE_ACCOUNT_CONFIRM_CB)],
+        [InlineKeyboardButton("❌ Annulla", callback_data=DELETE_ACCOUNT_CANCEL_CB)],
     ])
     return text, keyboard
 
@@ -2424,7 +2580,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         await query.edit_message_text("❌ Logout annullato. Sei ancora connesso.")
         return
 
-    if query.data == "delete_account_confirm":
+    if query.data == DELETE_ACCOUNT_CONFIRM_CB:
         # Audit log PRIMA della cancellazione (Art. 17 GDPR, accountability Art. 30)
         _user_store.write_audit_log(
             chat_id, actor="user", action="delete_account",
@@ -2463,7 +2619,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         )
         return
 
-    if query.data == "delete_account_cancel":
+    if query.data == DELETE_ACCOUNT_CANCEL_CB:
         await query.edit_message_text("❌ Eliminazione annullata. Il tuo account è al sicuro.")
         return
 
@@ -4516,6 +4672,14 @@ async def _send_privacy_policy_link(context: ContextTypes.DEFAULT_TYPE, chat_id:
     )
 
 
+async def _send_terms_of_service_link(context: ContextTypes.DEFAULT_TYPE, chat_id: str) -> None:
+    """Invia il link ai termini di servizio, condiviso col bottone /impostazioni."""
+    await context.bot.send_message(
+        chat_id=int(chat_id),
+        text=f"📄 Termini di Servizio: {Config.WEBAPP_BASE_URL}/terms",
+    )
+
+
 async def cmd_privacy(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handler per /privacy — invia direttamente il link alla privacy policy."""
     if not _is_authorized(update):
@@ -4586,10 +4750,7 @@ async def handle_impostazioni_menu_callback(update: Update, context: ContextType
         return
 
     if query.data == PRIVACY_TERMS_CB:
-        await context.bot.send_message(
-            chat_id=int(chat_id),
-            text="📄 Termini e Condizioni: pubblicazione in arrivo a breve.",
-        )
+        await _send_terms_of_service_link(context, chat_id)
         return
 
 
@@ -4652,6 +4813,9 @@ def main():
 
     # --- Handlers ---
 
+    # Gate consenso privacy/ToS — group=-1: gira prima di ogni altro handler.
+    app.add_handler(TypeHandler(Update, _consent_gate), group=-1)
+
     # ConversationHandler onboarding — va registrato PRIMA degli handler generici
     app.add_handler(_build_onboarding_conversation_handler())
 
@@ -4671,6 +4835,11 @@ def main():
     app.add_handler(CommandHandler("scova_abbonamenti", cmd_scova_abbonamenti))
     app.add_handler(CommandHandler("piano_settimanale", cmd_piano_settimanale))
     app.add_handler(CommandHandler("piano_mensile", cmd_piano_mensile))
+    app.add_handler(
+        CallbackQueryHandler(
+            handle_consent_gate_accept_callback, pattern=f"^{CONSENT_GATE_ACCEPT_CB}$",
+        )
+    )
     app.add_handler(CallbackQueryHandler(handle_impostazioni_menu_callback, pattern="^(imp_menu_|privacy_)"))
     app.add_handler(CallbackQueryHandler(handle_callback))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))

@@ -159,6 +159,26 @@
             text-decoration: none;
         }
         .hint a:hover { text-decoration: underline; }
+
+        .consent {
+            display: flex;
+            align-items: flex-start;
+            gap: 8px;
+            margin-bottom: 12px;
+        }
+        .consent input {
+            width: auto;
+            margin-top: 3px;
+        }
+        .consent label {
+            text-transform: none;
+            font-size: 13px;
+            font-weight: 400;
+            color: #B0B5B9;
+            letter-spacing: normal;
+            margin-bottom: 0;
+        }
+        .consent label a { color: #5FC4CB; }
     </style>
 </head>
 <body>
@@ -200,10 +220,18 @@
                     <label>Conferma password</label>
                     <input type="password" name="password_confirm" placeholder="Ripeti la password" required>
                 </div>
+                <div class="consent">
+                    <input type="checkbox" id="privacy_accepted" name="privacy_accepted" required>
+                    <label for="privacy_accepted">Ho letto e accetto la <a href="/privacy" target="_blank">Privacy Policy</a>.</label>
+                </div>
+                <div class="consent">
+                    <input type="checkbox" id="tos_accepted" name="tos_accepted" required>
+                    <label for="tos_accepted">Ho letto e accetto i <a href="/terms" target="_blank">Termini di Servizio</a>.</label>
+                </div>
+
                 <button type="submit">Registrati →</button>
             </form>
             <p style="font-size:12px;color:#B0B5B9;margin-top:16px;text-align:center;">
-                Registrandoti accetti la nostra <a href="/privacy" target="_blank" style="color:#5FC4CB;">informativa sulla privacy</a>.
                 I messaggi vengono conservati per 90 giorni, poi cancellati automaticamente.
             </p>
         </div>

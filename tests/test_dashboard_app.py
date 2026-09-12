@@ -503,6 +503,18 @@ def _create_dashboard_user(store, chat_id="chat_123", email="test@example.com", 
     return chat_id, email, password
 
 
+def _accept_privacy_and_tos(store, chat_id):
+    """Fa accettare all'utente privacy policy e ToS nella versione corrente.
+
+    Serve nei test che vogliono superare il gate `/consent` introdotto in
+    `_resolve_authenticated_redirect` e verificare il comportamento "post-consenso".
+    """
+    from config import Config
+
+    store.accept_privacy_policy(chat_id, Config.CURRENT_PRIVACY_POLICY_VERSION)
+    store.accept_terms_of_service(chat_id, Config.CURRENT_TOS_VERSION)
+
+
 def _csrf_token(client):
     """Recupera un token CSRF valido per la sessione corrente del test client.
 
@@ -534,6 +546,7 @@ def test_web_login_completed_user_redirects_to_home(client):
     )
     store.mark_setup_completed(chat_id)
     store.complete_onboarding(chat_id)
+    _accept_privacy_and_tos(store, chat_id)
 
     response = client.post("/login", data={"email": email, "password": password}, follow_redirects=False)
 
@@ -736,6 +749,7 @@ def test_web_login_session_guard_redirects_completed_user_to_home(client):
     )
     store.mark_setup_completed(chat_id)
     store.complete_onboarding(chat_id)
+    _accept_privacy_and_tos(store, chat_id)
 
     login_response = client.post("/login", data={"email": email, "password": password}, follow_redirects=False)
     assert login_response.status_code == 302
@@ -777,6 +791,7 @@ def test_web_app_entry_redirects_completed_users_to_home(client):
     )
     store.mark_setup_completed(chat_id)
     store.complete_onboarding(chat_id)
+    _accept_privacy_and_tos(store, chat_id)
 
     login_response = client.post("/login", data={"email": email, "password": password}, follow_redirects=False)
     assert login_response.status_code == 302
@@ -832,6 +847,7 @@ def test_api_auth_session_returns_home_for_completed_browser_session(client):
     )
     store.mark_setup_completed(chat_id)
     store.complete_onboarding(chat_id)
+    _accept_privacy_and_tos(store, chat_id)
 
     login_response = client.post("/login", data={"email": email, "password": password}, follow_redirects=False)
     assert login_response.status_code == 302
@@ -842,6 +858,126 @@ def test_api_auth_session_returns_home_for_completed_browser_session(client):
     assert response.json["authorized"] is True
     assert response.json["auth_mode"] == "browser"
     assert response.json["redirect_to"] is None
+
+
+def test_api_auth_session_returns_consent_redirect_for_unaccepted_policy_version(client):
+    """Setup e onboarding completati ma privacy/tos mai accettati -> gate /consent."""
+    from src.dashboard.app import store
+
+    chat_id, email, password = _create_dashboard_user(
+        store,
+        chat_id="chat_auth_no_consent",
+        email="auth-no-consent@example.com",
+    )
+    store.mark_setup_completed(chat_id)
+    store.complete_onboarding(chat_id)
+    # privacy_policy_version_accepted e tos_version_accepted restano None: nessuna
+    # accept_privacy_policy/accept_terms_of_service e' mai stata chiamata.
+
+    login_response = client.post("/login", data={"email": email, "password": password}, follow_redirects=False)
+    assert login_response.status_code == 302
+
+    response = client.get("/api/auth/session")
+
+    assert response.status_code == 200
+    assert response.json["authorized"] is True
+    assert response.json["redirect_to"] == "/consent"
+
+
+def test_api_auth_session_unblocks_after_accepting_privacy_and_tos(client):
+    """Dopo accept-policy + accept-tos il gate /consent si sblocca (no loop)."""
+    from src.dashboard.app import store
+
+    chat_id, email, password = _create_dashboard_user(
+        store,
+        chat_id="chat_auth_consent_given",
+        email="auth-consent-given@example.com",
+    )
+    store.mark_setup_completed(chat_id)
+    store.complete_onboarding(chat_id)
+
+    login_response = client.post("/login", data={"email": email, "password": password}, follow_redirects=False)
+    assert login_response.status_code == 302
+
+    # Prima di accettare, il gate deve bloccare su /consent.
+    pre_response = client.get("/api/auth/session")
+    assert pre_response.json["redirect_to"] == "/consent"
+
+    csrf_token = client.get("/api/csrf-token").json["csrf_token"]
+    accept_policy_response = client.post(
+        "/api/privacy/accept-policy",
+        headers={"X-CSRFToken": csrf_token},
+    )
+    assert accept_policy_response.status_code == 200
+
+    accept_tos_response = client.post(
+        "/api/privacy/accept-tos",
+        headers={"X-CSRFToken": csrf_token},
+    )
+    assert accept_tos_response.status_code == 200
+
+    response = client.get("/api/auth/session")
+
+    assert response.status_code == 200
+    assert response.json["authorized"] is True
+    assert response.json["redirect_to"] is None
+
+
+def test_web_login_next_url_ignored_when_consent_not_accepted(client):
+    """`?next=` non deve scavalcare il gate /consent per un utente senza consenso valido."""
+    from src.dashboard.app import store
+
+    chat_id, email, password = _create_dashboard_user(
+        store,
+        chat_id="chat_next_no_consent",
+        email="next-no-consent@example.com",
+    )
+    store.mark_setup_completed(chat_id)
+    store.complete_onboarding(chat_id)
+    # privacy_policy_version_accepted e tos_version_accepted restano None.
+
+    response = client.post(
+        "/login?next=/reports",
+        data={"email": email, "password": password},
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 302
+    assert response.headers["Location"].endswith("/consent")
+    assert response.headers["Location"] != "/reports"
+
+    # Anche rivisitando /login (già loggato) il gate resta prioritario su next.
+    revisit_response = client.get("/login?next=/reports", follow_redirects=False)
+    assert revisit_response.status_code == 302
+    assert revisit_response.headers["Location"].endswith("/consent")
+
+
+def test_web_login_next_url_honored_when_all_gates_passed(client):
+    """`?next=` viene onorato solo quando l'utente ha gia' superato tutti i gate."""
+    from src.dashboard.app import store
+
+    chat_id, email, password = _create_dashboard_user(
+        store,
+        chat_id="chat_next_all_gates",
+        email="next-all-gates@example.com",
+    )
+    store.mark_setup_completed(chat_id)
+    store.complete_onboarding(chat_id)
+    _accept_privacy_and_tos(store, chat_id)
+
+    response = client.post(
+        "/login?next=/reports",
+        data={"email": email, "password": password},
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 302
+    assert response.headers["Location"] == "/reports"
+
+    # Rivisitando /login (già loggato) con next, il comportamento è invariato.
+    revisit_response = client.get("/login?next=/reports", follow_redirects=False)
+    assert revisit_response.status_code == 302
+    assert revisit_response.headers["Location"] == "/reports"
 
 
 def test_browser_session_can_access_reports_api_without_telegram_header(client):
@@ -1123,6 +1259,31 @@ def test_privacy_export_json_notion_backend_denied_web_access(client):
     assert response.status_code == 401
 
 
+def test_privacy_export_json_includes_consent_versions_and_timestamps(client):
+    """L'export Art. 15 GDPR include il consenso privacy/ToS accettato dall'utente.
+
+    Aggiunto dopo una review che aveva trovato l'export incompleto rispetto ai
+    dati di consenso già tracciati su `User` (`privacy_policy_version_accepted`,
+    `tos_version_accepted` e relativi timestamp).
+    """
+    from config import Config
+    from src.dashboard.app import store
+
+    chat_id, email = "chat_privacy_json_consent", "privacy-json-consent@example.com"
+    _login_completed(client, store, chat_id, email)
+    store.accept_privacy_policy(chat_id, Config.CURRENT_PRIVACY_POLICY_VERSION)
+    store.accept_terms_of_service(chat_id, Config.CURRENT_TOS_VERSION)
+
+    response = client.get("/api/privacy/export-json")
+
+    assert response.status_code == 200
+    account = response.json["account"]
+    assert account["privacy_policy_version_accepted"] == Config.CURRENT_PRIVACY_POLICY_VERSION
+    assert account["tos_version_accepted"] == Config.CURRENT_TOS_VERSION
+    assert account["privacy_accepted_at"] is not None
+    assert account["tos_accepted_at"] is not None
+
+
 def test_privacy_export_csv_requires_auth(client):
     response = client.get("/api/privacy/export-csv")
     assert response.status_code == 401
@@ -1313,6 +1474,162 @@ def test_accept_privacy_policy_writes_audit_log(client):
     with store.Session() as s:
         log = s.query(AuditLog).filter_by(user_id=chat_id, action="consent_change").first()
         assert log is not None
+
+
+def test_accept_tos_writes_audit_log(client):
+    from src.dashboard.app import store
+    from src.user_store import AuditLog
+    from config import Config
+
+    chat_id, email = "chat_accept_tos", "accept-tos@example.com"
+    _login_completed(client, store, chat_id, email)
+
+    csrf_token = client.get("/api/csrf-token").json["csrf_token"]
+    response = client.post(
+        "/api/privacy/accept-tos",
+        headers={"X-CSRFToken": csrf_token},
+    )
+
+    assert response.status_code == 200
+    assert response.json["tos_version_accepted"] == Config.CURRENT_TOS_VERSION
+
+    with store.Session() as s:
+        log = (
+            s.query(AuditLog)
+            .filter_by(user_id=chat_id, action="consent_change")
+            .order_by(AuditLog.id.desc())
+            .first()
+        )
+        assert log is not None
+
+
+def test_terms_of_service_route_redirects_to_frontend(client):
+    from config import Config
+
+    response = client.get("/terms", follow_redirects=False)
+
+    assert response.status_code == 302
+    assert response.headers["Location"] == f"{Config.WEBAPP_BASE_URL}/it/terms"
+
+
+def test_web_register_requires_both_consent_checkboxes(client, monkeypatch):
+    """Senza privacy_accepted E tos_accepted, /register non crea l'utente."""
+    from src.dashboard.app import store
+    from config import Config
+
+    monkeypatch.setattr(Config, "PUBLIC_REGISTRATION_ENABLED", True)
+    email = "missing-consent@example.com"
+
+    response = client.post(
+        "/register",
+        data={
+            "first_name": "Mario",
+            "last_name": "Rossi",
+            "email": email,
+            "password": "Password123",
+            "password_confirm": "Password123",
+            "privacy_accepted": "on",
+            # tos_accepted mancante
+        },
+    )
+
+    assert response.status_code == 200
+    assert b"privacy policy e termini di servizio" in response.data
+    assert store.get_user_by_email(email) is None
+
+
+def test_web_register_with_both_checkboxes_creates_user_with_consents(client, monkeypatch):
+    """Con entrambe le checkbox, l'utente viene creato con privacy e ToS accettati."""
+    from src.dashboard.app import store
+    from config import Config
+
+    monkeypatch.setattr(Config, "PUBLIC_REGISTRATION_ENABLED", True)
+    email = "full-consent@example.com"
+
+    response = client.post(
+        "/register",
+        data={
+            "first_name": "Mario",
+            "last_name": "Rossi",
+            "email": email,
+            "password": "Password123",
+            "password_confirm": "Password123",
+            "privacy_accepted": "on",
+            "tos_accepted": "on",
+        },
+    )
+
+    assert response.status_code in (302, 200)
+    user = store.get_user_by_email(email)
+    assert user is not None
+    assert user.privacy_policy_version_accepted == Config.CURRENT_PRIVACY_POLICY_VERSION
+    assert user.tos_version_accepted == Config.CURRENT_TOS_VERSION
+
+    # Non-regressione: consenso dato in fase di registrazione -> nessun redirect /consent
+    # per un utente appena creato (setup completato, onboarding no).
+    session_response = client.get("/api/auth/session")
+    assert session_response.json["redirect_to"] != "/consent"
+
+
+def test_auth_postgres_start_requires_both_consent_checkboxes(client):
+    """Senza le due checkbox di consenso, /auth/postgres non consuma il reg_token né crea l'utente."""
+    from src.dashboard.app import store
+
+    chat_id = "tg_postgres_missing_consent"
+    reg_token = store.create_oauth_session(chat_id)
+
+    response = client.post(
+        "/auth/postgres",
+        data={
+            "reg_token": reg_token,
+            "email": "postgres-missing-consent@example.com",
+            "password": "Password123",
+            "password2": "Password123",
+            "tos_accepted": "on",
+            # privacy_accepted mancante
+        },
+    )
+
+    assert response.status_code == 200
+    assert b"privacy policy e termini di servizio" in response.data
+    assert store.get_user_by_email("postgres-missing-consent@example.com") is None
+    # Il reg_token non è stato consumato: resta valido.
+    assert store.get_and_delete_oauth_session(reg_token) == chat_id
+
+
+@patch("src.dashboard.blueprints.auth_routes.threading.Thread")
+@patch("src.dashboard.blueprints.auth_routes.requests.post")
+def test_auth_postgres_start_with_both_checkboxes_creates_user_with_consents(
+    mock_post, mock_thread, client
+):
+    """Con entrambe le checkbox, /auth/postgres crea l'utente con privacy e ToS accettati."""
+    from src.dashboard.app import store
+    from config import Config
+
+    mock_thread.return_value = MagicMock()
+
+    chat_id = "tg_postgres_full_consent"
+    reg_token = store.create_oauth_session(chat_id)
+    email = "postgres-full-consent@example.com"
+
+    response = client.post(
+        "/auth/postgres",
+        data={
+            "reg_token": reg_token,
+            "email": email,
+            "password": "Password123",
+            "password2": "Password123",
+            "privacy_accepted": "on",
+            "tos_accepted": "on",
+        },
+    )
+
+    assert response.status_code == 302
+    user = store.get_user_by_email(email)
+    assert user is not None
+    assert user.chat_id == chat_id
+    assert user.privacy_policy_version_accepted == Config.CURRENT_PRIVACY_POLICY_VERSION
+    assert user.tos_version_accepted == Config.CURRENT_TOS_VERSION
 
 
 def test_login_breach_detection_after_repeated_failures(client):

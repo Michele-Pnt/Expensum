@@ -12,6 +12,20 @@ const nextConfig: NextConfig = {
   allowedDevOrigins: developmentHost
     ? [developmentHost, "*.ngrok-free.app"]
     : ["*.ngrok-free.app"],
+  async redirects() {
+    return [
+      {
+        source: "/privacy",
+        destination: "/it/privacy",
+        permanent: false,
+      },
+      {
+        source: "/terms",
+        destination: "/it/terms",
+        permanent: false,
+      },
+    ];
+  },
   async rewrites() {
     return [
       {
