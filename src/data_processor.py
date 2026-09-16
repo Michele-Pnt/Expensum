@@ -699,11 +699,16 @@ class IncomeForecaster:
 
     MONTHS_LOOKBACK = 6
 
-    def compute(self, incomes_history: list[dict]) -> float:
+    def compute(
+        self,
+        incomes_history: list[dict],
+        reference_date: date | None = None,
+    ) -> float:
         """
         Args:
             incomes_history: lista di dict {date, amount, name, ...}
                              coprono gli ultimi 6 mesi completati
+            reference_date: data che definisce il mese corrente; se omessa usa oggi.
 
         Returns:
             Media mensile delle entrate (float)
@@ -711,7 +716,7 @@ class IncomeForecaster:
         if not incomes_history:
             return 0.0
 
-        today = date.today()
+        today = reference_date or date.today()
 
         # Costruisce i 6 mesi completati
         month_sequence: list[tuple[int, int]] = []
