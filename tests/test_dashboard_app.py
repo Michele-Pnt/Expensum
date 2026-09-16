@@ -28,6 +28,125 @@ def test_analytics_bucket_quarterly_has_stable_key_and_label():
     )
 
 
+def test_analytics_overview_exposes_month_end_forecast_with_future_subscriptions(
+    client, monkeypatch
+):
+    """Only confirmed subscription occurrences after today affect the estimate."""
+    from datetime import date as real_date
+
+    from src.dashboard.app import store
+    from src.dashboard.blueprints import analytics_routes
+    from src.storage.postgres_storage import PostgresStorage
+
+    class FixedDate(real_date):
+        """Keep the calendar interval deterministic for the forecast contract."""
+
+        @classmethod
+        def today(cls):
+            return cls(2026, 9, 16)
+
+    _login_analytics_user(client, store, "analytics_month_end_forecast")
+    monkeypatch.setattr(analytics_routes, "date", FixedDate)
+
+    transactions = [{"date": real_date(2026, 9, 10), "amount": 100.0, "account_id": 1}]
+    incomes = [
+        {"date": real_date(2026, month, 1), "amount": 1000.0, "name": "Stipendio"}
+        for month in range(3, 9)
+    ]
+    monkeypatch.setattr(
+        PostgresStorage,
+        "fetch_all_transactions",
+        lambda self, start, end: [
+            item for item in transactions if start <= item["date"] <= end
+        ],
+    )
+    monkeypatch.setattr(
+        PostgresStorage,
+        "fetch_income",
+        lambda self, start, end: [item for item in incomes if start <= item["date"] <= end],
+    )
+    monkeypatch.setattr(
+        PostgresStorage,
+        "fetch_accounts",
+        lambda self: [{"id": 1, "name": "Conto"}],
+    )
+    monkeypatch.setattr(
+        PostgresStorage,
+        "fetch_subscriptions",
+        lambda self: [
+            {
+                "name": "Gia addebitato",
+                "amount": 30.0,
+                "last_billed": "2026-09-05",
+                "sub_type": "monthly",
+            },
+            {
+                "name": "In scadenza",
+                "amount": 20.0,
+                "last_billed": "2026-08-20",
+                "sub_type": "monthly",
+            },
+        ],
+    )
+
+    response = client.get("/api/analytics/overview?months=1")
+
+    assert response.status_code == 200
+    assert response.json["month_end_forecast"] == {
+        "variable_expense_projection": 87.5,
+        "scheduled_expenses": 20.0,
+        "remaining_expected_income": 100.0,
+        "projected_end_amount": -107.5,
+    }
+
+
+def test_analytics_overview_recognizes_quarterly_and_semiannual_income_sources(
+    client, monkeypatch
+):
+    """The overview asks for enough history to recognize long income cadences."""
+    from datetime import date as real_date
+
+    from src.dashboard.app import store
+    from src.dashboard.blueprints import analytics_routes
+    from src.storage.postgres_storage import PostgresStorage
+
+    class FixedDate(real_date):
+        """Keep long income cadence inputs deterministic."""
+
+        @classmethod
+        def today(cls):
+            return cls(2026, 2, 16)
+
+    _login_analytics_user(client, store, "analytics_long_income_cadences")
+    monkeypatch.setattr(analytics_routes, "date", FixedDate)
+    incomes = [
+        {"date": real_date(2025, 5, 1), "amount": 600.0, "name": "Bonus trimestrale"},
+        {"date": real_date(2025, 8, 1), "amount": 600.0, "name": "Bonus trimestrale"},
+        {"date": real_date(2025, 11, 1), "amount": 600.0, "name": "Bonus trimestrale"},
+        {"date": real_date(2024, 8, 1), "amount": 1200.0, "name": "Premio semestrale"},
+        {"date": real_date(2025, 2, 1), "amount": 1200.0, "name": "Premio semestrale"},
+        {"date": real_date(2025, 8, 1), "amount": 1200.0, "name": "Premio semestrale"},
+    ]
+    monkeypatch.setattr(PostgresStorage, "fetch_all_transactions", lambda self, start, end: [])
+    monkeypatch.setattr(
+        PostgresStorage,
+        "fetch_income",
+        lambda self, start, end: [item for item in incomes if start <= item["date"] <= end],
+    )
+    monkeypatch.setattr(PostgresStorage, "fetch_accounts", lambda self: [])
+    monkeypatch.setattr(PostgresStorage, "fetch_subscriptions", lambda self: [])
+
+    response = client.get("/api/analytics/overview?months=1")
+
+    assert response.status_code == 200
+    assert response.json["month_end_forecast"] == {
+        "variable_expense_projection": 0.0,
+        "scheduled_expenses": 0.0,
+        "remaining_expected_income": 120.0,
+        "projected_end_amount": 120.0,
+    }
+
+
 def _login_analytics_user(client, store, chat_id: str) -> None:
     store.add_user(chat_id=chat_id, username="analytics-user", storage_backend="postgres")
     store.set_user_plan(chat_id, "pro")

@@ -426,6 +426,47 @@ class TestMonthlyPlanBuilder:
         # 6 mesi x 2000 → media = 2000
         assert abs(data.income_forecast - 2000.0) < 0.01
 
+    def test_income_forecast_uses_full_next_month_and_exposes_sources(self):
+        storage = self._make_storage()
+        reference = date(2026, 9, 16)
+        data = MonthlyPlanBuilder().build(storage, reference_date=reference)
+
+        assert data.target_month == date(2026, 10, 1)
+        assert data.income_forecast == 2000.0
+        assert data.income_forecast_sources == [
+            {
+                "source_key": "stipendio|altre entrate",
+                "full_month_amount": 2000.0,
+                "recorded_month_amount": 0.0,
+                "remaining_amount": 2000.0,
+                "scheduled_dates": ["2026-10-01"],
+                "periodicity_confidence": 0.9,
+            }
+        ]
+
+    def test_income_forecast_recognizes_quarterly_and_semiannual_sources(self):
+        storage = self._make_storage()
+        reference = date(2026, 1, 16)
+        income_records = [
+            {"date": date(2025, 5, 1), "amount": 600.0, "name": "Bonus trimestrale"},
+            {"date": date(2025, 8, 1), "amount": 600.0, "name": "Bonus trimestrale"},
+            {"date": date(2025, 11, 1), "amount": 600.0, "name": "Bonus trimestrale"},
+            {"date": date(2024, 8, 1), "amount": 1200.0, "name": "Premio semestrale"},
+            {"date": date(2025, 2, 1), "amount": 1200.0, "name": "Premio semestrale"},
+            {"date": date(2025, 8, 1), "amount": 1200.0, "name": "Premio semestrale"},
+        ]
+        storage.fetch_income.side_effect = lambda start, end: [
+            item for item in income_records if start <= item["date"] <= end
+        ]
+
+        data = MonthlyPlanBuilder().build(storage, reference_date=reference)
+
+        assert data.target_month == date(2026, 2, 1)
+        sources = {source["source_key"]: source for source in data.income_forecast_sources}
+        assert sources["bonus trimestrale|altre entrate"]["scheduled_dates"] == ["2026-02-01"]
+        assert sources["premio semestrale|altre entrate"]["scheduled_dates"] == ["2026-02-01"]
+        assert storage.fetch_income.call_args_list[-1].args == (date(2024, 7, 1), reference)
+
     def test_total_accounts_correct(self):
         storage = self._make_storage()
         data = MonthlyPlanBuilder().build(storage)

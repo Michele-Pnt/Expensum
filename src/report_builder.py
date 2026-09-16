@@ -22,11 +22,11 @@ from src.data_processor import (
     MonthlySummary,
     MonthlyPatternAnalyzer,
     MonthlyCategoryStats,
-    IncomeForecaster,
     MonthlyBudgetTargetCalc,
     WeeklyBudgetCalc,
     CategoryBudgetResult,
 )
+from src.income_forecast import IncomeForecastEngine
 from src.forecaster import ForecastResult
 from src.report_schema import (
     ListSection,
@@ -722,7 +722,8 @@ class MonthlyPlanData:
         self.suggested_targets: dict[str, float] = {}    # output MonthlyBudgetTargetCalc
         self.subscriptions_month: list[dict] = []        # abbonamenti in scadenza nel mese target
         self.subs_total_month: float = 0.0
-        self.income_forecast: float = 0.0                # media entrate 6 mesi
+        self.income_forecast: float = 0.0                # previsione entrate del mese target
+        self.income_forecast_sources: list[dict[str, object]] = []
         self.savings_goal: float = 0.0                   # entrate - targets - abbonamenti
         self.category_overrides: dict[str, float] = {}
         self.total_spent_last_month: float = 0.0
@@ -828,9 +829,15 @@ class MonthlyPlanBuilder:
                 y -= 1
         history_start = date(y, m, 1)
 
-        # 1. Storico 6 mesi completi (spese e entrate)
+        # 1. Storico 6 mesi completi (spese e entrate per il piano)
         transactions_history = storage.fetch_all_transactions(history_start, history_end)
         incomes_history = storage.fetch_income(history_start, history_end)
+
+        # Il forecast conserva la sua media sui sei mesi completi, ma richiede
+        # almeno 19 mesi fino a oggi per riconoscere cadenze trimestrali e
+        # semestrali. Non usare questo intervallo esteso per lo storico del report.
+        income_forecast_history_start = _add_months(current_month_start, -18, 1)
+        income_forecast_history = storage.fetch_income(income_forecast_history_start, ref)
 
         # 2. Mese scorso (per contesto total_spent_last_month)
         last_month_end = current_month_start - timedelta(days=1)
@@ -844,7 +851,18 @@ class MonthlyPlanBuilder:
 
         # --- Analisi ---
         pattern_stats = MonthlyPatternAnalyzer().compute(transactions_history)
-        income_forecast = IncomeForecaster().compute(incomes_history)
+        target_month_end = date(
+            target_month_start.year,
+            target_month_start.month,
+            _calendar.monthrange(target_month_start.year, target_month_start.month)[1],
+        )
+        income_result = IncomeForecastEngine().forecast(
+            income_forecast_history,
+            month_start=target_month_start,
+            month_end=target_month_end,
+            as_of=ref,
+        )
+        income_forecast = income_result.full_month_total
         due_subs = SubscriptionScheduler().due_this_month(subscriptions, target_month_start)
         subs_total = sum(float(s.get("amount") or 0.0) for s in due_subs)
         suggested_targets = MonthlyBudgetTargetCalc().compute(
@@ -927,6 +945,17 @@ class MonthlyPlanBuilder:
         data.subscriptions_month = due_subs
         data.subs_total_month = subs_total
         data.income_forecast = income_forecast
+        data.income_forecast_sources = [
+            {
+                "source_key": source.source_key,
+                "full_month_amount": round(source.full_month_amount, 2),
+                "recorded_month_amount": round(source.recorded_month_amount, 2),
+                "remaining_amount": round(source.remaining_amount, 2),
+                "scheduled_dates": [day.isoformat() for day in source.scheduled_dates],
+                "periodicity_confidence": round(source.periodicity_confidence, 2),
+            }
+            for source in income_result.sources
+        ]
         data.savings_goal = savings_goal
         data.category_overrides = category_overrides or {}
         data.total_spent_last_month = total_spent_last_month
