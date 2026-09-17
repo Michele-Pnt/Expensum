@@ -29,18 +29,26 @@ type AnalyticsExplorerProps = {
   totalSpent: number;
   transactions: ExplorerTransaction[];
   transactionsLoading: boolean;
+  hasMoreItems: boolean;
+  hasMoreTransactions: boolean;
   onDimensionChange: (dimension: ExplorerDimension) => void;
   onSelect: (selection: AnalyticsSelection) => void;
+  onLoadMoreItems: () => void;
+  onLoadMoreTransactions: () => void;
   grouped: boolean;
   onGroupedChange: (grouped: boolean) => void;
   onFixLabel: (mode: LabelFixMode, target: LabelFixTarget) => void;
 };
 
 /** Elenco progressivo: espande i movimenti nel punto esatto in cui l'utente li cerca. */
-export default function AnalyticsExplorer({ dimension, expandedItem, items, totalSpent, transactions, transactionsLoading, onDimensionChange, onSelect, grouped, onGroupedChange, onFixLabel }: AnalyticsExplorerProps) {
+export default function AnalyticsExplorer({ dimension, expandedItem, items, totalSpent, transactions, transactionsLoading, hasMoreItems, hasMoreTransactions, onDimensionChange, onSelect, onLoadMoreItems, onLoadMoreTransactions, grouped, onGroupedChange, onFixLabel }: AnalyticsExplorerProps) {
   const explanation = dimension === "merchants"
-    ? `Raggruppiamo le uscite registrate nel periodo selezionato per voce di spesa. Sotto ogni voce trovi il numero di operazioni. ${GROUPING_DISCLAIMER}`
-    : "Raggruppiamo le uscite registrate nel periodo selezionato per categoria, voce di spesa o conto. La percentuale indica l’incidenza sul totale della lente scelta.";
+    ? (grouped
+        ? `Raggruppiamo le uscite registrate nel periodo selezionato per etichetta: voci diverse ma equivalenti (es. "coca cola" e "coca-cola") vengono unite sotto lo stesso nome. Sotto ogni etichetta trovi il numero di operazioni. Se il raggruppamento sbaglia, puoi correggerlo con Rinomina/Unisci/Dividi. ${GROUPING_DISCLAIMER}`
+        : "Mostriamo le uscite registrate nel periodo selezionato per nome esatto, senza alcun raggruppamento automatico: ogni voce distinta compare separata, anche se si riferisce alla stessa spesa scritta in modo diverso.")
+    : dimension === "categories"
+      ? "Raggruppiamo le uscite registrate nel periodo selezionato per categoria. La percentuale indica l’incidenza sul totale della lente scelta."
+      : "Raggruppiamo le uscite registrate nel periodo selezionato per conto di provenienza. La percentuale indica l’incidenza sul totale della lente scelta.";
   const select = (item: ExplorerItem) => {
     if (dimension === "categories") onSelect({ category: item.label });
     if (dimension === "merchants") onSelect({ merchant: item.label });
@@ -164,15 +172,27 @@ export default function AnalyticsExplorer({ dimension, expandedItem, items, tota
                     <Box key={transaction.id} py={0.75}>
                       {transactionIndex > 0 && <Divider sx={{ mb: 0.75 }} />}
                       <Box display="flex" justifyContent="space-between" gap={1}>
-                        <Box component="span" sx={{ minWidth: 0, overflowWrap: "anywhere" }}>{transaction.name}<br /><Typography component="span" variant="caption" color="text.secondary" sx={{ minWidth: 0, overflowWrap: "anywhere" }}>{dimension === "merchants" ? formatDateIt(transaction.date) : `${formatDateIt(transaction.date)} · ${transaction.category}`}</Typography></Box>
+                        <Box component="span" sx={{ minWidth: 0, overflowWrap: "anywhere" }}>{transaction.name}<br /><Typography component="span" variant="caption" color="text.secondary" sx={{ minWidth: 0, overflowWrap: "anywhere" }}>{`${formatDateIt(transaction.date)} · ${transaction.category}`}</Typography></Box>
                         <Typography component="strong" whiteSpace="nowrap">−{transaction.amount.toLocaleString("it-IT", { style: "currency", currency: "EUR" })}</Typography>
                       </Box>
                     </Box>
                   ))}
-                  {dimension === "merchants" && item.clusterId != null && (
+                  {hasMoreTransactions && (
+                    <Button fullWidth sx={{ minHeight: 44, mt: 0.5 }} onClick={onLoadMoreTransactions}>
+                      Carica altro
+                    </Button>
+                  )}
+                  {dimension === "merchants" && grouped && item.clusterId != null && (
                     <>
                       <Divider sx={{ my: 0.75 }} />
                       <Box display="flex" gap={1} py={0.5}>
+                        <Button
+                          size="small"
+                          sx={{ minHeight: 44 }}
+                          onClick={() => onFixLabel("rename", { id: item.clusterId as number, anchorText: item.label, categoryId: item.categoryId ?? null })}
+                        >
+                          Rinomina
+                        </Button>
                         <Button
                           size="small"
                           sx={{ minHeight: 44 }}
@@ -196,6 +216,11 @@ export default function AnalyticsExplorer({ dimension, expandedItem, items, tota
             </Box>
           );
         })}
+        {hasMoreItems && (
+          <Button fullWidth sx={{ minHeight: 44, mt: 1 }} onClick={onLoadMoreItems}>
+            Carica altro
+          </Button>
+        )}
       </CardContent></Card>
     </Box>
   );
