@@ -1,16 +1,17 @@
 "use client";
 
+import { useState } from "react";
 import { Box, Button, Card, CardContent, Typography } from "@mui/material";
 import { ArrowDownRight, ArrowUpRight, Minus } from "lucide-react";
 import InfoButton from "../../../components/InfoButton";
 import type { AnalyticsSelection } from "../types";
-import type { MonthlySpendingTrend, MonthEndProjection, SpendingChange, TodaySummary } from "../viewModels";
+import type { MonthlySavingsComparison, MonthEndProjection, SpendingChange, TodaySummary } from "../viewModels";
 
 type AnalyticsTodayProps = {
   summary: TodaySummary;
   projection?: MonthEndProjection | null;
   changes?: SpendingChange[];
-  spendingTrend?: MonthlySpendingTrend | null;
+  savingsComparison?: MonthlySavingsComparison | null;
   showAttentions?: boolean;
   onSelect: (selection: AnalyticsSelection) => void;
 };
@@ -105,7 +106,7 @@ export default function AnalyticsToday({
   summary,
   projection = null,
   changes = [],
-  spendingTrend = null,
+  savingsComparison = null,
   showAttentions = true,
   onSelect,
 }: AnalyticsTodayProps) {
@@ -122,40 +123,77 @@ export default function AnalyticsToday({
     .filter((change) => change.increase < 0)
     .sort((left, right) => left.increase - right.increase)
     .slice(0, 2);
-  const spendingTrendLabel = spendingTrend
-    ? `${spendingTrend.direction === "up" ? "Aumento delle spese" : spendingTrend.direction === "down" ? "Diminuzione delle spese" : "Spese stabili"} del ${spendingTrend.percentage}% rispetto al mese scorso`
-    : "";
+  const [showSavingsComparison, setShowSavingsComparison] = useState(false);
+  const savingsDirection = savingsComparison?.direction ?? "flat";
+  const SavingsIcon = savingsDirection === "up"
+    ? ArrowUpRight
+    : savingsDirection === "down" ? ArrowDownRight : Minus;
+  const savingsColor = savingsDirection === "up"
+    ? "success.main"
+    : savingsDirection === "down" ? "error.main" : "text.secondary";
+  const savingsComparisonLabel = savingsComparison
+    ? savingsDirection === "up"
+      ? "Risparmio migliore rispetto al mese scorso"
+      : savingsDirection === "down"
+        ? "Risparmio peggiore rispetto al mese scorso"
+        : "Risparmio uguale al mese scorso"
+    : "Confronto con il mese scorso non disponibile";
 
   return (
     <Box display="grid" gap={2}>
       <Card sx={budgetToneSx[summary.budgetTone]}>
         <CardContent>
-          <Box sx={{ display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))", gap: 2 }}>
+          <Box sx={{ display: "grid", gridTemplateColumns: "repeat(3, minmax(0, 1fr))", gap: 1 }}>
             <Box sx={{ minWidth: 0 }}>
               <Box display="flex" alignItems="center">
-                <Typography variant="overline" color="text.secondary">Budget disponibile questo mese</Typography>
+                <Typography variant="caption" color="text.secondary">Budget disponibile</Typography>
                 <Box sx={{ ml: -1.25 }}>
                   <InfoButton label="Cos'è il budget disponibile" explanation="Il budget rimasto per questo mese." />
                 </Box>
               </Box>
-              <Typography variant="h4" fontWeight={400}>{amount}</Typography>
+              <Typography variant="h5" fontWeight={400}>{amount}</Typography>
             </Box>
             <Box sx={{ borderLeft: "1px solid", borderColor: "divider", minWidth: 0, pl: 2 }}>
               <Box display="flex" alignItems="center">
-                <Typography variant="overline" color="text.secondary">Totale speso questo mese</Typography>
+                <Typography variant="caption" color="text.secondary">Uscite totali</Typography>
                 <Box sx={{ ml: -1.25 }}>
-                  <InfoButton label="Cos'è il totale speso" explanation="Il totale speso e il confronto con il mese scorso." />
+                  <InfoButton label="Cosa sono le uscite totali" explanation="Il totale delle uscite registrate nel mese in corso." />
                 </Box>
               </Box>
-              <Typography variant="h4" fontWeight={400}>{formatCurrency(summary.totalSpent)}</Typography>
-              {spendingTrend && (
-                <Box aria-label={spendingTrendLabel} alignItems="center" color={spendingTrend.direction === "up" ? "error.main" : spendingTrend.direction === "down" ? "success.main" : "text.secondary"} display="flex" gap={0.5} mt={0.5} role="status">
-                  {spendingTrend.direction === "up" ? <ArrowUpRight size={16} aria-hidden="true" /> : spendingTrend.direction === "down" ? <ArrowDownRight size={16} aria-hidden="true" /> : <Minus size={16} aria-hidden="true" />}
-                  <Typography variant="body2" fontWeight={600}>{spendingTrend.percentage}%</Typography>
+              <Typography variant="h5" fontWeight={400}>{formatCurrency(summary.totalSpent)}</Typography>
+            </Box>
+            <Box sx={{ borderLeft: "1px solid", borderColor: "divider", minWidth: 0, pl: 2 }}>
+              <Box display="flex" alignItems="center">
+                <Typography variant="caption" color="text.secondary">Entrate totali</Typography>
+                <Box sx={{ ml: -1.25 }}>
+                  <InfoButton label="Cosa sono le entrate totali" explanation="Le entrate registrate nel mese in corso." />
                 </Box>
-              )}
+              </Box>
+              <Typography variant="h5" fontWeight={400}>{formatCurrency(summary.totalIncome)}</Typography>
             </Box>
           </Box>
+          <Box sx={{ alignItems: "center", borderTop: "1px solid", borderColor: "divider", display: "flex", gap: 1, justifyContent: "space-between", mt: 2, pt: 1.5 }}>
+            <Box sx={{ minWidth: 0 }}>
+              <Typography variant="caption" color="text.secondary">Risparmio mensile</Typography>
+              <Typography variant="h6" fontWeight={500}>{formatCurrency(summary.monthlySavings)}</Typography>
+            </Box>
+            <Button
+              aria-expanded={showSavingsComparison}
+              aria-label={savingsComparisonLabel}
+              onClick={() => setShowSavingsComparison((visible) => !visible)}
+              sx={{ color: savingsColor, minHeight: 44, minWidth: 44, p: 0.5 }}
+              variant="text"
+            >
+              <SavingsIcon size={16} aria-hidden="true" />
+            </Button>
+          </Box>
+          {showSavingsComparison && (
+            <Typography color="text.secondary" role="status" sx={{ mt: 1 }} variant="caption">
+              {savingsComparison
+                ? `${savingsComparisonLabel}. La freccia verde verso l'alto indica un risparmio migliore rispetto al mese scorso; quella rossa verso il basso uno peggiore.`
+                : "Servono i dati del mese scorso per confrontare il risparmio mensile."}
+            </Typography>
+          )}
         </CardContent>
       </Card>
 
@@ -164,9 +202,14 @@ export default function AnalyticsToday({
           <CardContent>
             <Box display="flex" alignItems="center" mb={1}>
               <Typography variant="subtitle2" fontWeight={600}>Stima di fine mese</Typography>
-              <InfoButton label="Come calcoliamo Stima di fine mese" explanation="Calcoliamo la media giornaliera delle uscite dalle spese registrate fino a oggi e la applichiamo ai giorni rimanenti del mese. Non includiamo entrate future, spese non registrate o movimenti non ancora inseriti." />
+              <InfoButton label="Come calcoliamo Stima di fine mese" explanation="Combiniamo l'andamento giornaliero delle spese, gli abbonamenti futuri confermati e la previsione unificata delle entrate residue." />
             </Box>
-            <Typography>Il tuo bilancio mensile attuale è di {formatCurrency(projection.currentAmount)}</Typography>
+            <Typography>Bilancio di oggi: {formatCurrency(projection.currentAmount)}</Typography>
+            {projection.remainingExpectedIncome > 0 && (
+              <Typography color="success.main" variant="body2">
+                Entrate previste residue: +{formatCurrency(projection.remainingExpectedIncome)}
+              </Typography>
+            )}
             <Typography variant="body2" color="text.secondary">
               Stima al {lastDay} {monthName}: {formatCurrency(projection.projectedEndAmount)}
             </Typography>

@@ -41,6 +41,19 @@ test("uses natural-language cards in Today instead of a pacing chart", () => {
   assert.match(source, /Due cose da seguire/);
 });
 
+test("renders the approved monthly summary and an accessible savings comparison", () => {
+  const source = readFileSync(new URL("./AnalyticsToday.tsx", import.meta.url), "utf8");
+
+  assert.match(source, /Budget disponibile/);
+  assert.match(source, /Uscite totali/);
+  assert.match(source, /Entrate totali/);
+  assert.match(source, /Risparmio mensile/);
+  assert.match(source, /aria-expanded=\{showSavingsComparison\}/);
+  assert.match(source, /minHeight: 44/);
+  assert.match(source, /ArrowUpRight/);
+  assert.match(source, /ArrowDownRight/);
+});
+
 test("omits insight cards when their data is unavailable", () => {
   const source = readFileSync(new URL("./AnalyticsToday.tsx", import.meta.url), "utf8");
 
@@ -53,16 +66,16 @@ test("keeps the budget summary card free from explanatory captions", () => {
 
   assert.doesNotMatch(source, /summary\.statusLabel/);
   assert.match(source, /Il budget rimasto per questo mese\./);
-  assert.match(source, /Il totale speso e il confronto con il mese scorso\./);
+  assert.match(source, /Il totale delle uscite registrate nel mese in corso\./);
 });
 
-test("provides an accessible label for the compact spending trend", () => {
+test("provides an accessible label for the compact savings comparison", () => {
   const source = readFileSync(new URL("./AnalyticsToday.tsx", import.meta.url), "utf8");
 
-  assert.match(source, /const spendingTrendLabel/);
-  assert.match(source, /aria-label=\{spendingTrendLabel\}/);
-  assert.match(source, /Aumento delle spese/);
-  assert.match(source, /Diminuzione delle spese/);
+  assert.match(source, /const savingsComparisonLabel/);
+  assert.match(source, /aria-label=\{savingsComparisonLabel\}/);
+  assert.match(source, /Risparmio migliore rispetto al mese scorso/);
+  assert.match(source, /Risparmio peggiore rispetto al mese scorso/);
 });
 
 test("places explanatory info buttons next to every Analytics card title", () => {
@@ -72,7 +85,7 @@ test("places explanatory info buttons next to every Analytics card title", () =>
   const experience = readFileSync(new URL("./AnalyticsExperience.tsx", import.meta.url), "utf8");
 
   assert.match(today, /import InfoButton/);
-  assert.match(today, /explanation="Calcoliamo la media giornaliera delle uscite/);
+  assert.match(today, /explanation="Combiniamo l'andamento giornaliero delle spese/);
   assert.match(explorer, /import InfoButton/);
   assert.match(planner, /import InfoButton/);
   assert.match(planner, /Budget del mese/);
@@ -198,7 +211,9 @@ test("keeps Analytics API mapping and current-only projection explicit", () => {
   assert.match(source, /setState\(\{[\s\S]*categories: categories\.by_category,[\s\S]*comparisons: comparisons\.by_category,/);
   assert.match(source, /state\.categories\.map/);
   assert.match(source, /state\?\.comparisons \?\?/);
-  assert.match(source, /period === "current" && summary\.availableAmount !== null \? buildMonthEndProjection\(\{/);
+  assert.match(source, /destination === "today" \? 2 : months/);
+  assert.match(source, /monthEndForecast: overview\.month_end_forecast/);
+  assert.match(source, /buildMonthEndProjection\(\{ currentNet: summary\.monthlySavings, forecast: state\?\.monthEndForecast/);
   assert.doesNotMatch(source, /<AnalyticsToday[^>]*\bsavings=/);
   assert.doesNotMatch(source, /<AnalyticsToday[^>]*\bperiod=/);
 });
@@ -213,11 +228,11 @@ test("calculates the projection end date from the current calendar month", () =>
 test("explains the projection formula, period and exclusions", () => {
   const today = readFileSync(new URL("./AnalyticsToday.tsx", import.meta.url), "utf8");
 
-  assert.match(today, /media giornaliera delle uscite/);
-  assert.match(today, /spese.*registrate.*oggi/i);
-  assert.match(today, /giorni rimanenti/i);
-  assert.match(today, /Non includiamo entrate future/);
-  assert.match(today, /spese non registrate/i);
+  assert.match(today, /andamento giornaliero delle spese/);
+  assert.match(today, /abbonamenti futuri confermati/);
+  assert.match(today, /previsione unificata delle entrate residue/);
+  assert.match(today, /Entrate previste residue/);
+  assert.match(today, /Bilancio di oggi/);
 });
 
 test("a deep link can open Esplora on the Voci lens with names ungrouped", () => {

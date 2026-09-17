@@ -1,4 +1,10 @@
-import type { AnalyticsPeriod, BudgetStatusEntry, ExpenseLabelCluster, SavingsEntry } from "./types";
+import type {
+  AnalyticsPeriod,
+  BudgetStatusEntry,
+  ExpenseLabelCluster,
+  MonthEndForecast,
+  SavingsEntry,
+} from "./types";
 
 export type AttentionTone = "critical" | "warning" | "neutral";
 
@@ -13,11 +19,14 @@ export type TodaySummaryInput = {
   budgetStatus: BudgetStatusEntry[];
   monthlyBudget?: number | string | null;
   totalSpent?: number;
+  currentPeriodKey?: string;
 };
 
 export type TodaySummary = {
   availableAmount: number | null;
   totalSpent: number;
+  totalIncome: number;
+  monthlySavings: number;
   budgetTone: AttentionTone;
   statusLabel: string;
   attentions: AttentionRow[];
@@ -37,6 +46,11 @@ export type ExplorerRowsInput = {
   categories: Array<{ name: string; amount: number; count: number }>;
 };
 
+export type ExplorerPage<T> = {
+  items: T[];
+  hasMore: boolean;
+};
+
 export type CategoryDetail = {
   category: string;
   budgetPrompt: { suggestedAmount: number } | null;
@@ -45,7 +59,14 @@ export type CategoryDetail = {
 export type MonthEndProjection = {
   currentAmount: number;
   projectedEndAmount: number;
-  projectedAdditionalExpenses: number;
+  remainingExpectedIncome: number;
+};
+
+export type MonthlySavingsComparison = {
+  direction: "up" | "down" | "flat";
+  currentAmount: number;
+  previousAmount: number;
+  delta: number;
 };
 
 export type SpendingChangeEntry = {
@@ -127,7 +148,26 @@ export function buildTodaySummary(input: TodaySummaryInput): TodaySummary {
       tone: entry.percentage >= 100 ? "critical" : entry.percentage >= 85 ? "warning" : "neutral",
     }));
 
-  return { availableAmount, totalSpent, budgetTone, statusLabel, attentions };
+  const currentSavings = input.savings.find(
+    (entry) => entry.period_key === (input.currentPeriodKey ?? currentCalendarPeriodKey()),
+  );
+  const totalIncome = currentSavings?.income ?? 0;
+  const monthlySavings = currentSavings?.net ?? totalIncome - totalSpent;
+
+  return {
+    availableAmount,
+    totalSpent,
+    totalIncome,
+    monthlySavings,
+    budgetTone,
+    statusLabel,
+    attentions,
+  };
+}
+
+/** Restituisce la chiave del mese calendario locale, senza dipendere dall'ordine delle righe API. */
+export function currentCalendarPeriodKey(now = new Date()): string {
+  return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
 }
 
 function formatEuro(value: number): string {
@@ -152,6 +192,16 @@ export function buildExplorerRows(input: ExplorerRowsInput): ExplorerRow[] {
     });
 }
 
+/** Restituisce una porzione dell'elenco Esplora, senza nascondere le righe successive. */
+export function getExplorerPage<T>(items: T[], limit: number, offset = 0): ExplorerPage<T> {
+  const safeLimit = Math.max(1, limit);
+  const safeOffset = Math.max(0, offset);
+  return {
+    items: items.slice(safeOffset, safeOffset + safeLimit),
+    hasMore: safeOffset + safeLimit < items.length,
+  };
+}
+
 /** Suggerisce un budget iniziale solo quando non ne esiste già uno. */
 export function buildCategoryDetail(input: { category: string; average: number; budget?: number }): CategoryDetail {
   return {
@@ -160,22 +210,38 @@ export function buildCategoryDetail(input: { category: string; average: number; 
   };
 }
 
-/** Proietta il saldo di fine mese riproporzionando le spese già registrate. */
+/** Traduce la previsione già calcolata dal server nel modello di visualizzazione. */
 export function buildMonthEndProjection(input: {
-  savings: SavingsEntry[];
-  now: Date;
+  currentNet: number;
+  forecast?: MonthEndForecast | null;
 }): MonthEndProjection | null {
-  const latest = input.savings.at(-1);
-  if (!latest) return null;
-
-  const elapsedDays = input.now.getDate();
-  const daysInMonth = new Date(input.now.getFullYear(), input.now.getMonth() + 1, 0).getDate();
-  const projectedAdditionalExpenses = latest.expenses / elapsedDays
-    * (daysInMonth - elapsedDays);
+  if (!input.forecast) return null;
   return {
-    currentAmount: latest.net,
-    projectedAdditionalExpenses,
-    projectedEndAmount: latest.net - projectedAdditionalExpenses,
+    currentAmount: input.currentNet,
+    projectedEndAmount: input.forecast.projected_end_amount,
+    remainingExpectedIncome: input.forecast.remaining_expected_income,
+  };
+}
+
+/** Confronta il risparmio del mese in corso con il mese precedente. */
+export function buildMonthlySavingsComparison(
+  entries: SavingsEntry[],
+  currentPeriodKey = currentCalendarPeriodKey(),
+): MonthlySavingsComparison | null {
+  const [year, month] = currentPeriodKey.split("-").map(Number);
+  if (!Number.isInteger(year) || !Number.isInteger(month) || month < 1 || month > 12) return null;
+  const previousDate = new Date(year, month - 2, 1);
+  const previousPeriodKey = `${previousDate.getFullYear()}-${String(previousDate.getMonth() + 1).padStart(2, "0")}`;
+  const previous = entries.find((entry) => entry.period_key === previousPeriodKey);
+  const current = entries.find((entry) => entry.period_key === currentPeriodKey);
+  if (!previous || !current) return null;
+
+  const delta = Number((current.net - previous.net).toFixed(2));
+  return {
+    direction: delta > 0 ? "up" : delta < 0 ? "down" : "flat",
+    currentAmount: current.net,
+    previousAmount: previous.net,
+    delta,
   };
 }
 

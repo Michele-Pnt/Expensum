@@ -16,6 +16,12 @@ const chartSource = () => readFileSync(new URL("./components/AdvancedCharts.tsx"
 const cardSource = () => readFileSync(new URL("./components/AdvancedChartCard.tsx", import.meta.url), "utf8");
 const backendSource = () => readFileSync(new URL("../../../../src/dashboard/blueprints/analytics_routes.py", import.meta.url), "utf8");
 
+test("calls one advanced month the current month without changing its range", () => {
+  const source = pageSource();
+  assert.match(source, /Mese in corso/);
+  assert.match(source, /new Date\(today\.getFullYear\(\), today\.getMonth\(\) - m \+ 1, 1\)/);
+});
+
 test("removes the advanced Lista tab and links to Gestisci", () => {
   const source = pageSource();
   assert.doesNotMatch(source, /> Lista/);

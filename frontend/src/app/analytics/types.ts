@@ -52,9 +52,19 @@ export type ExpenseLabelCluster = {
 
 export type SavingsEntry = {
   month: string;
+  /** Chiave calendario `YYYY-MM` restituita dall'overview mensile. */
+  period_key?: string;
   income: number;
   expenses: number;
   net: number;
+};
+
+/** Previsione lato server per la parte residua del mese in corso. */
+export type MonthEndForecast = {
+  variable_expense_projection: number;
+  scheduled_expenses: number;
+  remaining_expected_income: number;
+  projected_end_amount: number;
 };
 
 export type BudgetStatusEntry = {

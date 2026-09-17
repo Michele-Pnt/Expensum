@@ -157,10 +157,11 @@ function PeriodSlider({ value, onChange, maxMonths, actualMonths }: {
     return { value: val, label: showLabel ? `${val}` : "" };
   });
   const showActual = actualMonths !== undefined && actualMonths < value;
+  const periodLabel = value === 1 ? "Mese in corso" : `ultimi ${value} mesi`;
   return (
     <Box sx={{ px: 2, mb: 3 }} data-tour="analytics-period">
       <Typography variant="body2" color="text.secondary" mb={1}>
-        Storico: <strong>ultimi {value} {value === 1 ? "mese" : "mesi"}</strong>
+        Storico: <strong>{periodLabel}</strong>
         {showActual && (
           <Typography component="span" variant="body2" color="text.disabled" sx={{ ml: 1 }}>
             ({actualMonths} {actualMonths === 1 ? "mese trovato" : "mesi trovati"})
@@ -948,7 +949,9 @@ export function LegacyAnalyticsPage() {
     setError(null);
     try {
       const monthStr = String(m);
-      // Richiedi sempre il limite Pro (10) — il backend lo capperà per utenti Free
+      // Limite fisso a 10 per il grafico avanzato: il backend lo capperà comunque a
+      // 5 per gli utenti Free, mentre per i Pro onora questo valore esplicito (a
+      // differenza della vista Esplora, che omette `limit` per ottenere tutte le voci)
       const today = new Date();
       const startDate = new Date(today.getFullYear(), today.getMonth() - m + 1, 1).toISOString().slice(0, 10);
       const endDate = today.toISOString().slice(0, 10);

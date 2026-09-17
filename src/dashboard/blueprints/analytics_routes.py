@@ -17,6 +17,8 @@ from sqlalchemy import func
 
 from src.dashboard.auth import _tg_webapp_auth
 from src.dashboard.storage import _get_user_plan_type, _pg_or_401
+from src.billing_utils import get_occurrences_in_range
+from src.income_forecast import IncomeForecastEngine
 from src.storage.postgres_storage import PostgresStorage
 
 logger = logging.getLogger(__name__)
@@ -75,10 +77,14 @@ def _start_date_for_months(months: int):
 def analytics_overview():
     """Ritorna risparmio mensile e spesa mensile per account negli ultimi N mesi."""
     plan_type = _get_user_plan_type(g.chat_id)
-    max_months = 24 if plan_type == "pro" else 6
-    months = min(int(request.args.get("months", 6)), max_months)
+    months = min(int(request.args.get("months", 6)), 24)
     start = _start_date_for_months(months)
     end = date.today()
+    current_month_start = date(end.year, end.month, 1)
+    current_month_end = date(end.year, end.month, monthrange(end.year, end.month)[1])
+    # Sei mesi completati alimentano la media; 19 mesi fino a oggi consentono di
+    # riconoscere anche tre ricorrenze semestrali senza ampliare il grafico.
+    income_history_start = _start_date_for_months(19)
     granularity = _analytics_granularity(request.args.get("granularity"))
 
     with _store().Session() as s:
@@ -87,6 +93,9 @@ def analytics_overview():
         transactions = storage.fetch_all_transactions(start, end)
         incomes = storage.fetch_income(start, end)
         accounts = storage.fetch_accounts()
+        current_transactions = storage.fetch_all_transactions(current_month_start, end)
+        income_history = storage.fetch_income(income_history_start, end)
+        subscriptions = storage.fetch_subscriptions()
 
     account_map = {a["id"]: a["name"] for a in accounts}
 
@@ -146,8 +155,50 @@ def analytics_overview():
                 "count": by_account_count[key][acc_name],
             })
 
+    current_expenses = sum(abs(float(item.get("amount") or 0.0)) for item in current_transactions)
+    current_income = sum(
+        abs(float(item.get("amount") or 0.0))
+        for item in income_history
+        if current_month_start <= item.get("date") <= end
+    )
+    remaining_days = (current_month_end - end).days
+    variable_expense_projection = (
+        current_expenses / end.day * remaining_days if remaining_days > 0 else 0.0
+    )
+    scheduled_expenses = 0.0
+    future_start = end + timedelta(days=1)
+    for subscription in subscriptions:
+        occurrences = get_occurrences_in_range(
+            subscription.get("last_billed"),
+            subscription.get("sub_type") or subscription.get("cadence"),
+            future_start,
+            current_month_end,
+        )
+        scheduled_expenses += abs(float(subscription.get("amount") or 0.0)) * len(occurrences)
+
+    income_result = IncomeForecastEngine().forecast(
+        income_history,
+        month_start=current_month_start,
+        month_end=current_month_end,
+        as_of=end,
+    )
+    current_net = current_income - current_expenses
+    month_end_forecast = {
+        "variable_expense_projection": round(variable_expense_projection, 2),
+        "scheduled_expenses": round(scheduled_expenses, 2),
+        "remaining_expected_income": round(income_result.remaining_total, 2),
+        "projected_end_amount": round(
+            current_net
+            - variable_expense_projection
+            - scheduled_expenses
+            + income_result.remaining_total,
+            2,
+        ),
+    }
+
     return jsonify({"savings": savings, "totals_by_account": totals_by_account,
-                    "plan_type": plan_type, "granularity": granularity})
+                    "plan_type": plan_type, "granularity": granularity,
+                    "month_end_forecast": month_end_forecast})
 
 
 @analytics_bp.route("/api/analytics/categories-expense")
@@ -156,13 +207,12 @@ def analytics_categories_expense():
     """Ritorna spese per categoria: storico mensile e medie per ultimi N mesi.
 
     Query params:
-        months=N        (default 6, max 24 Pro / 6 Free)
+        months=N        (default 6, max 24)
         category=NAME   (filtra per categoria, solo Pro)
         granularity=    "monthly" (default) | "weekly" (solo Pro)
     """
     plan_type = _get_user_plan_type(g.chat_id)
-    max_months = 24 if plan_type == "pro" else 6
-    months = min(int(request.args.get("months", 6)), max_months)
+    months = min(int(request.args.get("months", 6)), 24)
     start = _start_date_for_months(months)
     end = date.today()
 
@@ -466,16 +516,17 @@ def analytics_transactions():
         end=YYYY-MM-DD     (default: oggi)
         category=NAME      (filtro categoria, opzionale)
         account=NAME       (filtro conto, opzionale)
-        limit=N            (default 50, max 50 Free / 500 Pro)
+        merchant=NAME      (filtra per voce, opzionale)
+        group=1|0          (voce normalizzata o nome esatto, usato con merchant)
+        limit=N            (default 50, max 100 per pagina)
         offset=N           (default 0, paginazione)
     """
     plan_type = _get_user_plan_type(g.chat_id)
-    is_pro = plan_type == "pro"
-    max_limit = 500 if is_pro else 50
-    limit = min(int(request.args.get("limit", 50)), max_limit)
+    limit = min(int(request.args.get("limit", 50)), 100)
     offset = max(int(request.args.get("offset", 0)), 0)
 
-    # Periodo: Free solo ultimi 30 giorni
+    # Il default è l'ultimo mese, ma Esplora può richiedere qualsiasi intervallo
+    # incluso nei suoi aggregati anche per Free.
     today = date.today()
     end_str = request.args.get("end", today.isoformat())
     try:
@@ -483,18 +534,17 @@ def analytics_transactions():
     except (ValueError, TypeError):
         end_date = today
 
-    if is_pro:
-        thirty_days_ago = today - timedelta(days=30)
-        start_str = request.args.get("start", thirty_days_ago.isoformat())
-        try:
-            start_date = date.fromisoformat(start_str)
-        except (ValueError, TypeError):
-            start_date = thirty_days_ago
-    else:
+    thirty_days_ago = today - timedelta(days=30)
+    start_str = request.args.get("start", thirty_days_ago.isoformat())
+    try:
+        start_date = date.fromisoformat(start_str)
+    except (ValueError, TypeError):
         start_date = today - timedelta(days=30)
 
     category_filter = request.args.get("category", "").strip()
     account_filter = request.args.get("account", "").strip()
+    merchant_filter = request.args.get("merchant", "").strip()
+    grouped = request.args.get("group", "1") not in ("0", "false")
 
     with _store().Session() as s:
         storage = PostgresStorage(session=s, user_id=g.chat_id)
@@ -512,6 +562,11 @@ def analytics_transactions():
         if category_filter and cat.lower() != category_filter.lower():
             continue
         if account_filter and acc_name.lower() != account_filter.lower():
+            continue
+        merchant_name = (
+            t.get("normalized_name") if grouped else t.get("name")
+        ) or t.get("name") or "Sconosciuto"
+        if merchant_filter and merchant_name.strip().casefold() != merchant_filter.casefold():
             continue
 
         d = t["date"]
@@ -558,25 +613,27 @@ def analytics_top_merchants():
     dimensione è "voce di spesa" (vedi rinomina frontend Esercenti -> Voci).
 
     Con `group=0` aggrega invece per `name` grezzo: è lo switch "per nome" della UI,
-    la via di fuga quando il raggruppamento automatico sbaglia. Il troncamento a
-    `limit` avviene DOPO l'aggregazione, quindi la scelta non è delegabile al client:
-    dalla top-N raggruppata non è ricostruibile quella per nome grezzo.
+    che mostra ogni variante di scrittura separata senza applicare il raggruppamento
+    automatico. Il troncamento a `limit` avviene DOPO l'aggregazione, quindi la
+    scelta non è delegabile al client: dalla top-N raggruppata non è ricostruibile
+    quella per nome grezzo.
 
-    `cluster_id` è valorizzato solo quando tutte le spese di una riga condividono lo
-    stesso cluster; altrimenti è `None` e la UI non offre la correzione manuale su
-    quella riga (non saprebbe su quale gruppo agire).
+    `cluster_id` viene comunque calcolato e restituito anche con `group=0`, ma la UI
+    non offre lì la correzione manuale (Unisci/Dividi): quei bottoni compaiono solo
+    nella vista raggruppata per etichette (`group=1`), dove operano sul cluster
+    intero. È valorizzato solo quando tutte le spese di una riga condividono lo
+    stesso cluster; altrimenti è `None`.
 
     Query params:
         months=N   (default 3)
-        limit=N    (default 5 Free, 20 Pro)
+        limit=N    (nessun limite se omesso; altrimenti onora il valore richiesto —
+                    es. i grafici che vogliono sempre e solo la top 10)
         group=1|0  (default: preferenza utente `analytics_group_labels`)
     """
     plan_type = _get_user_plan_type(g.chat_id)
-    is_pro = plan_type == "pro"
-    max_months = 24 if is_pro else 3
-    months = min(int(request.args.get("months", 3)), max_months)
-    default_limit = 20 if is_pro else 5
-    limit = min(int(request.args.get("limit", default_limit)), default_limit)
+    months = min(int(request.args.get("months", 3)), 24)
+    raw_limit = request.args.get("limit")
+    limit = int(raw_limit) if raw_limit is not None else None
     raw_group = request.args.get("group")
     if raw_group is not None:
         grouped = raw_group not in ("0", "false")
@@ -606,7 +663,7 @@ def analytics_top_merchants():
         if name not in merchant_cats:
             merchant_cats[name] = t.get("category") or "Altro"
 
-    # Top N
+    # Top N esplicita oppure tutte le voci del periodo.
     top = sorted(merchant_totals.items(), key=lambda x: x[1], reverse=True)[:limit]
 
     def _single(values: set):
@@ -960,6 +1017,35 @@ def expense_labels_merge():
         "merged": len(result.absorbed_cluster_ids),
         "moved_expenses": result.moved_expenses,
     })
+
+
+@analytics_bp.route("/api/expense-labels/rename", methods=["POST"])
+@_tg_webapp_auth
+def expense_labels_rename():
+    """Rinomina un gruppo scegliendo una delle sue grafie esistenti, senza unirlo ad altri."""
+    from src.expense_label_normalizer import LabelClusterError, rename_cluster
+
+    data = request.get_json(silent=True) or {}
+    cluster_id = data.get("cluster_id")
+    if not isinstance(cluster_id, int):
+        return jsonify({"error": "cluster_id è obbligatorio"}), 400
+    anchor_text = data.get("anchor_text")
+    if not isinstance(anchor_text, str) or not anchor_text:
+        return jsonify({"error": "L'etichetta scelta non è valida"}), 400
+
+    with _store().Session() as s:
+        # `_pg_or_401` non serve per lo storage ma per il binding RLS della sessione
+        # (+ gating sul backend): va chiamata prima di qualunque query, non rimuovere.
+        _pg, err = _pg_or_401(s, g.chat_id)
+        if err:
+            return err
+        try:
+            result = rename_cluster(s, g.chat_id, cluster_id, anchor_text)
+        except LabelClusterError as exc:
+            return _label_error_response(exc)
+        s.commit()
+
+    return jsonify({"cluster_id": result.cluster_id, "anchor_text": result.anchor_text})
 
 
 @analytics_bp.route("/api/expense-labels/split", methods=["POST"])

@@ -5,29 +5,73 @@ import {
   buildCategoryDetail,
   buildMergeCandidates,
   buildExplorerRows,
+  getExplorerPage,
   buildMonthEndProjection,
+  buildMonthlySavingsComparison,
   buildMonthlySpendingTrend,
   buildSpendingChanges,
   buildTodaySummary,
   periodToMonths,
 } from "./viewModels";
 
-test("projects month-end balance from the expenses recorded so far", () => {
+test("uses the server month-end forecast without recreating its arithmetic", () => {
   assert.deepEqual(buildMonthEndProjection({
-    savings: [{ month: "ago 26", income: 2_000, expenses: 1_000, net: 1_000 }],
-    now: new Date(2026, 7, 16),
-  }), { currentAmount: 1_000, projectedAdditionalExpenses: 937.5, projectedEndAmount: 62.5 });
+    currentNet: 299.14,
+    forecast: {
+      variable_expense_projection: 226.57,
+      scheduled_expenses: 20,
+      remaining_expected_income: 100,
+      projected_end_amount: 152.57,
+    },
+  }), {
+    currentAmount: 299.14,
+    projectedEndAmount: 152.57,
+    remainingExpectedIncome: 100,
+  });
 });
 
-test("returns null when there are no savings entries for the projection", () => {
-  assert.equal(buildMonthEndProjection({ savings: [], now: new Date(2026, 7, 16) }), null);
+test("compares a higher monthly saving with the prior month", () => {
+  assert.deepEqual(buildMonthlySavingsComparison([
+    { month: "ago 26", period_key: "2026-08", income: 1_000, expenses: 700, net: 300 },
+    { month: "set 26", period_key: "2026-09", income: 1_200, expenses: 700, net: 500 },
+  ], "2026-09"), { direction: "up", currentAmount: 500, previousAmount: 300, delta: 200 });
 });
 
-test("projects no additional expenses on the final day of the month", () => {
-  assert.deepEqual(buildMonthEndProjection({
-    savings: [{ month: "ago 26", income: 2_000, expenses: 1_000, net: 1_000 }],
-    now: new Date(2026, 7, 31),
-  }), { currentAmount: 1_000, projectedAdditionalExpenses: 0, projectedEndAmount: 1_000 });
+test("compares a lower monthly saving with the prior month", () => {
+  assert.deepEqual(buildMonthlySavingsComparison([
+    { month: "ago 26", period_key: "2026-08", income: 1_000, expenses: 500, net: 500 },
+    { month: "set 26", period_key: "2026-09", income: 1_000, expenses: 700, net: 300 },
+  ], "2026-09"), { direction: "down", currentAmount: 300, previousAmount: 500, delta: -200 });
+});
+
+test("does not compare monthly saving without a prior month", () => {
+  assert.equal(buildMonthlySavingsComparison([
+    { month: "set 26", period_key: "2026-09", income: 1_000, expenses: 700, net: 300 },
+  ], "2026-09"), null);
+});
+
+test("does not treat the previous API row as the empty current month", () => {
+  const previousOnly = [{
+    month: "ago 26",
+    period_key: "2026-08",
+    income: 1_500,
+    expenses: 600,
+    net: 900,
+  }];
+
+  assert.deepEqual(buildTodaySummary({
+    savings: previousOnly,
+    budgetStatus: [],
+    totalSpent: 0,
+    currentPeriodKey: "2026-09",
+  }).totalIncome, 0);
+  assert.equal(buildTodaySummary({
+    savings: previousOnly,
+    budgetStatus: [],
+    totalSpent: 0,
+    currentPeriodKey: "2026-09",
+  }).monthlySavings, 0);
+  assert.equal(buildMonthlySavingsComparison(previousOnly, "2026-09"), null);
 });
 
 test("uses the second ordered month as current for month-over-month increases", () => {
@@ -161,6 +205,8 @@ test("returns a data-needed message when there are no savings entries", () => {
   assert.deepEqual(buildTodaySummary({ savings: [], budgetStatus: [] }), {
     availableAmount: null,
     totalSpent: 0,
+    totalIncome: 0,
+    monthlySavings: 0,
     budgetTone: "neutral",
     statusLabel: "Imposta un budget mensile o dei budget per categoria per vedere il margine.",
     attentions: [],
@@ -198,6 +244,12 @@ test("avoids a misleading percentage when the explorer total is zero", () => {
     incidenceLabel: "Nessuna incidenza disponibile",
     percentage: undefined,
   }]);
+});
+
+test("returns one explorer page and says whether more rows remain", () => {
+  const page = getExplorerPage(["Categoria 1", "Categoria 2", "Categoria 3"], 2, 2);
+
+  assert.deepEqual(page, { items: ["Categoria 3"], hasMore: false });
 });
 
 test("suggests the historical average when a category has no budget", () => {
