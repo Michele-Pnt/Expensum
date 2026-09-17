@@ -189,13 +189,6 @@ export default function AnalyticsExplorer({ dimension, expandedItem, items, tota
                         <Button
                           size="small"
                           sx={{ minHeight: 44 }}
-                          onClick={() => onFixLabel("rename", { id: item.clusterId as number, anchorText: item.label, categoryId: item.categoryId ?? null })}
-                        >
-                          Rinomina
-                        </Button>
-                        <Button
-                          size="small"
-                          sx={{ minHeight: 44 }}
                           onClick={() => onFixLabel("merge", { id: item.clusterId as number, anchorText: item.label, categoryId: item.categoryId ?? null })}
                         >
                           Unisci
