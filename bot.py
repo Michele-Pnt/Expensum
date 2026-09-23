@@ -3240,10 +3240,17 @@ def _beta_feature_validation_job(app: Application, loop: asyncio.AbstractEventLo
 
     async def _send_checkins():
         bot = app.bot
-        chat_ids = _user_store.get_beta_default_users()
+        beta_chat_ids = _user_store.get_beta_default_users()
+        telegram_recipients: list[tuple[str, int]] = []
+        for raw_chat_id in beta_chat_ids:
+            try:
+                telegram_chat_id = int(raw_chat_id)
+            except (TypeError, ValueError):
+                continue
+            telegram_recipients.append((str(raw_chat_id), telegram_chat_id))
 
         sent = 0
-        for chat_id in chat_ids:
+        for chat_id, telegram_chat_id in telegram_recipients:
             if _user_store.has_recent_beta_validation_feedback(chat_id):
                 continue
             keyboard = InlineKeyboardMarkup([[
@@ -3253,7 +3260,7 @@ def _beta_feature_validation_job(app: Application, loop: asyncio.AbstractEventLo
             ]])
             try:
                 await bot.send_message(
-                    chat_id=int(chat_id),
+                    chat_id=telegram_chat_id,
                     text=(
                         "🧪 *Check-in beta*\n\n"
                         "Ci stai aiutando a validare Expensum: questa settimana vorremmo un tuo parere su\n"
@@ -3270,7 +3277,14 @@ def _beta_feature_validation_job(app: Application, loop: asyncio.AbstractEventLo
                 log_exception(logger, level="error", domain="jobs", event="beta_validation_user_failed", exception=exc, chat_id=str(chat_id))
             await asyncio.sleep(0.5)
 
-        logger.info("beta_validation_completed", extra={"domain": "jobs", "event": "beta_validation_completed", "meta": {"sent": sent, "eligible": len(chat_ids)}})
+        logger.info(
+            "beta_validation_completed",
+            extra={
+                "domain": "jobs",
+                "event": "beta_validation_completed",
+                "meta": {"sent": sent, "eligible": len(telegram_recipients)},
+            },
+        )
 
     future = asyncio.run_coroutine_threadsafe(_send_checkins(), loop)
     try:

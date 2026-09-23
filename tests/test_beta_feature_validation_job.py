@@ -1,4 +1,5 @@
 import asyncio
+import logging
 import threading
 from unittest.mock import AsyncMock, MagicMock
 
@@ -148,6 +149,35 @@ def test_beta_validation_job_sends_only_to_beta_default_users():
     app.bot.send_message.assert_awaited_once()
     _, kwargs = app.bot.send_message.call_args
     assert kwargs["chat_id"] == 920010
+
+
+def test_beta_validation_job_excludes_non_telegram_beta_identities(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Il check-in ignora le identità beta che non hanno un chat ID Telegram."""
+    import bot
+
+    _make_beta_user(bot._user_store, "system")
+    _make_beta_user(bot._user_store, "web_beta_validation")
+    _make_beta_user(bot._user_store, "920015")
+    app = _make_app()
+    caplog.set_level(logging.INFO, logger="financial_agent.bot")
+
+    _run_job(bot._beta_feature_validation_job, app)
+
+    app.bot.send_message.assert_awaited_once()
+    _, kwargs = app.bot.send_message.call_args
+    assert kwargs["chat_id"] == 920015
+    assert not any(
+        getattr(record, "event", None) == "beta_validation_user_failed"
+        for record in caplog.records
+    )
+    completed = next(
+        record
+        for record in caplog.records
+        if getattr(record, "event", None) == "beta_validation_completed"
+    )
+    assert completed.meta["eligible"] == 1
 
 
 def test_beta_validation_job_skips_users_with_recent_feedback():
