@@ -5,11 +5,11 @@
 <p class="page-desc">Retention, tempi di attivazione, funnel di onboarding ed engagement.</p>
 
 <!-- RETENTION -->
-<h3 style="margin-top: 1rem; margin-bottom: 1rem; color: var(--text-main);">Retention {{ ui.info("Misura quanti utenti continuano a usare Expensum nel tempo. Attività = evento LLM o messaggio in chat. Distinguiamo la stickiness attuale (attivi ora) dalla retention per coorte (trattenuti dopo N giorni dalla registrazione).") }}</h3>
+<h3 style="margin-top: 1rem; margin-bottom: 1rem; color: var(--text-main);">Retention {{ ui.info("Misura quanti utenti continuano a usare Expensum nel tempo. Attività = parsing interattivo o messaggio scritto dall'utente; piani e report automatici sono esclusi. Distinguiamo la stickiness attuale (attivi ora) dalla retention per coorte (trattenuti dopo N giorni dalla registrazione).") }}</h3>
 <div class="stats-grid">
     {% for n in [7, 14, 60] %}
     <div class="stat-card glass-panel" style="border-left: 4px solid var(--accent-info)">
-        <div class="stat-label">Attivi negli ultimi {{ n }}gg {{ ui.info("% di utenti con almeno un'attività (evento LLM o messaggio) negli ultimi " ~ n ~ " giorni, sul totale utenti. Stickiness: 'usano ancora l'app adesso'.") }}</div>
+        <div class="stat-label">Attivi negli ultimi {{ n }}gg {{ ui.info("% di utenti con almeno un'azione esplicita negli ultimi " ~ n ~ " giorni: parsing interattivo o messaggio scritto dall'utente. Le generazioni automatiche di report/piani non vengono conteggiate.") }}</div>
         <div class="stat-value" style="color: var(--accent-info)">{{ retention.rolling_active[n].pct }}%</div>
         <span class="stat-label" style="text-transform:none; margin-top:5px">
             {{ retention.rolling_active[n].count }} / {{ retention.total_users }} utenti
@@ -127,7 +127,7 @@
 <h3 style="margin-top: 2rem; margin-bottom: 1rem; color: var(--text-main);">Engagement & acquisizione {{ ui.info("Quanto l'app viene usata (utenti attivi) e come cresce la base utenti (nuove registrazioni, waitlist, backend scelto). Fonte: llm_usage_events, users e tally_leads.") }}</h3>
 <div class="stats-grid">
     <div class="stat-card glass-panel" style="border-left: 4px solid var(--accent-primary)">
-        <div class="stat-label">DAU / WAU / MAU {{ ui.info("Utenti distinti con almeno un'attività LLM negli ultimi 1 / 7 / 30 giorni (Daily/Weekly/Monthly Active Users). Metriche standard di uso attivo: il rapporto DAU/MAU indica quanto l'uso è quotidiano.") }}</div>
+        <div class="stat-label">DAU / WAU / MAU {{ ui.info("Utenti distinti con almeno un'azione esplicita negli ultimi 1 / 7 / 30 giorni: parsing interattivo o messaggio scritto dall'utente. Le generazioni automatiche di report/piani sono escluse.") }}</div>
         <div class="stat-value">{{ engagement.dau }} · {{ engagement.wau }} · {{ engagement.mau }}</div>
         <span class="stat-label" style="text-transform:none; margin-top:5px">attivi 1g / 7g / 30g</span>
     </div>

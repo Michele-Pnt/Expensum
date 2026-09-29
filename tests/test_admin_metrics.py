@@ -221,6 +221,113 @@ def test_retention(mock_db_session):
     assert r["rolling_active"][7]["count"] == 2
 
 
+def test_retention_counts_explicit_user_activity_not_automated_reports(mock_db_session):
+    """I report automatici non devono rendere attivo un utente nella retention."""
+    with mock_db_session.Session() as s:
+        s.add_all([
+            User(chat_id="interactive", created_at=NOW - timedelta(days=20)),
+            User(chat_id="automated", created_at=NOW - timedelta(days=20)),
+            LlmUsageEvent(
+                chat_id="interactive",
+                occurred_at=NOW,
+                provider="mistral",
+                model="small",
+                operation="chat_parse",
+                total_tokens=100,
+                request_key="interactive-llm",
+            ),
+            LlmUsageEvent(
+                chat_id="automated",
+                occurred_at=NOW,
+                provider="mistral",
+                model="small",
+                operation="weekly_plan",
+                total_tokens=100,
+                request_key="automated-report",
+            ),
+        ])
+        s.commit()
+
+    with mock_db_session.Session() as s:
+        result = m.get_retention(s, now=NOW)
+
+    assert result["rolling_active"][7]["count"] == 1
+
+
+def test_retention_counts_user_chat_message_as_active_activity(mock_db_session):
+    """Un messaggio esplicito dell'utente è attività anche senza chiamata LLM."""
+    with mock_db_session.Session() as s:
+        s.add(User(chat_id="navigator", created_at=NOW - timedelta(days=20)))
+        s.add(ChatMessage(
+            chat_id="navigator",
+            source="webapp",
+            role="user",
+            text="apertura analytics",
+            created_at=NOW,
+        ))
+        s.commit()
+
+    with mock_db_session.Session() as s:
+        result = m.get_retention(s, now=NOW)
+
+    assert result["rolling_active"][7]["count"] == 1
+
+
+def test_retention_counts_transaction_attempt_as_active_activity(mock_db_session):
+    """Un tentativo di transazione esplicito è attività anche senza messaggio/LLM."""
+    with mock_db_session.Session() as s:
+        s.add(User(chat_id="transaction-user", created_at=NOW - timedelta(days=20)))
+        s.add(TxEvent(
+            chat_id="transaction-user",
+            tx_type="expense",
+            input_method="button",
+            outcome="cancelled",
+            source="webapp",
+            occurred_at=NOW,
+        ))
+        s.commit()
+
+    with mock_db_session.Session() as s:
+        result = m.get_retention(s, now=NOW)
+
+    assert result["rolling_active"][7]["count"] == 1
+
+
+def test_engagement_excludes_automated_llm_operations(mock_db_session):
+    """DAU/WAU/MAU usano la stessa definizione attiva della retention."""
+    with mock_db_session.Session() as s:
+        s.add_all([
+            User(chat_id="interactive", created_at=NOW - timedelta(days=20)),
+            User(chat_id="automated", created_at=NOW - timedelta(days=20)),
+            LlmUsageEvent(
+                chat_id="interactive",
+                occurred_at=NOW,
+                provider="mistral",
+                model="small",
+                operation="expense_parse",
+                total_tokens=100,
+                request_key="engagement-interactive",
+            ),
+            LlmUsageEvent(
+                chat_id="automated",
+                occurred_at=NOW,
+                provider="mistral",
+                model="small",
+                operation="monthly_report",
+                total_tokens=100,
+                request_key="engagement-automated",
+            ),
+        ])
+        s.commit()
+
+    with mock_db_session.Session() as s:
+        result = m.get_engagement_acquisition(s, now=NOW)
+
+    assert result["dau"] == 1
+    assert result["wau"] == 1
+    assert result["mau"] == 1
+
+
 def test_expense_timing(mock_db_session):
     _seed(mock_db_session)
     with mock_db_session.Session() as s:

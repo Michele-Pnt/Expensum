@@ -51,6 +51,15 @@ LEDGER_EPOCH = datetime(2026, 5, 1)
 # a DB: va impostato via env `PRO_PRICE_EUR` e aggiornato se cambia il listino.
 PRO_PRICE_EUR = float(os.getenv("PRO_PRICE_EUR", "4.99"))
 
+# Operazioni LLM generate automaticamente dal sistema. La definizione è per
+# opt-out: una nuova operazione interattiva contribuisce alle metriche finché non
+# viene esplicitamente classificata come automatica.
+AUTOMATED_LLM_OPERATIONS = frozenset({
+    "monthly_plan",
+    "monthly_report",
+    "weekly_plan",
+})
+
 
 def _f(value: Any, ndigits: int = 2) -> float:
     """Converte Decimal/None/numerico in float arrotondato (0.0 se None)."""
@@ -425,16 +434,30 @@ def get_monthly_token_usage(
 # 5. Retention: attivi a 7/14/60 giorni
 # ---------------------------------------------------------------------------
 def _last_active_map(s: Session) -> dict[str, datetime]:
-    """chat_id -> timestamp ultima attività (LLM event; fallback chat_messages)."""
+    """chat_id -> ultima attività esplicita dell'utente.
+
+    Sono validi solo gli eventi LLM interattivi e i messaggi scritti dall'utente.
+    In particolare, i messaggi bot e le operazioni schedulate (piani/report) non
+    possono rendere attivo un utente.
+    """
     last: dict[str, datetime] = {}
     for chat_id, ts in s.query(
         LlmUsageEvent.chat_id, func.max(LlmUsageEvent.occurred_at)
+    ).filter(
+        LlmUsageEvent.operation.notin_(AUTOMATED_LLM_OPERATIONS)
     ).group_by(LlmUsageEvent.chat_id).all():
         if ts:
             last[chat_id] = ts
     for chat_id, ts in s.query(
         ChatMessage.chat_id, func.max(ChatMessage.created_at)
+    ).filter(
+        ChatMessage.role == "user"
     ).group_by(ChatMessage.chat_id).all():
+        if ts and (chat_id not in last or ts > last[chat_id]):
+            last[chat_id] = ts
+    for chat_id, ts in s.query(
+        TxEvent.chat_id, func.max(TxEvent.occurred_at)
+    ).group_by(TxEvent.chat_id).all():
         if ts and (chat_id not in last or ts > last[chat_id]):
             last[chat_id] = ts
     return last
@@ -694,7 +717,7 @@ def get_funnel_revenue(s: Session, now: datetime | None = None) -> dict[str, Any
 def get_engagement_acquisition(
     s: Session, signup_days: int = 30, now: datetime | None = None
 ) -> dict[str, Any]:
-    """DAU/WAU/MAU, trend registrazioni, distribuzione backend, waitlist.
+    """DAU/WAU/MAU basati su attività esplicita, trend registrazioni e waitlist.
 
     ``now`` e' iniettabile per rendere deterministiche le finestre rolling nei test.
     """
@@ -702,9 +725,22 @@ def get_engagement_acquisition(
 
     def _active_since(days: int) -> int:
         since = now - timedelta(days=days)
-        return s.query(func.count(func.distinct(LlmUsageEvent.chat_id))).filter(
-            LlmUsageEvent.occurred_at >= since
-        ).scalar() or 0
+        llm_users = s.query(LlmUsageEvent.chat_id).filter(
+            LlmUsageEvent.occurred_at >= since,
+            LlmUsageEvent.operation.notin_(AUTOMATED_LLM_OPERATIONS),
+        ).distinct()
+        chat_users = s.query(ChatMessage.chat_id).filter(
+            ChatMessage.created_at >= since,
+            ChatMessage.role == "user",
+        ).distinct()
+        tx_users = s.query(TxEvent.chat_id).filter(
+            TxEvent.occurred_at >= since,
+        ).distinct()
+        return len(
+            {row[0] for row in llm_users.all()}
+            | {row[0] for row in chat_users.all()}
+            | {row[0] for row in tx_users.all()}
+        )
 
     dau, wau, mau = _active_since(1), _active_since(7), _active_since(30)
 
