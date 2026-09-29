@@ -370,7 +370,7 @@ class MonthlyResidualCalc:
             (spent_by_cat, budget_by_cat, weeks_remaining)
             - spent_by_cat: speso per categoria nel mese
             - budget_by_cat: budget mensile per categoria (None → 0)
-            - weeks_remaining: settimane rimaste nel mese (min 0.5)
+            - weeks_remaining: settimane equivalenti rimaste nel mese (min 1.0)
         """
         ref = reference_date or date.today()
 
@@ -379,7 +379,7 @@ class MonthlyResidualCalc:
         last_day = calendar.monthrange(ref.year, ref.month)[1]
         end_of_month = date(ref.year, ref.month, last_day)
         days_remaining = (end_of_month - ref).days + 1
-        weeks_remaining = max(days_remaining / 7.0, 0.5)
+        weeks_remaining = max(days_remaining / 7.0, 1.0)
 
         # Budget per categoria
         budget_by_cat = {
@@ -497,6 +497,7 @@ class CategoryBudgetResult:
         self.residuo: float = 0.0
         self.overrun: float = 0.0
         self.limite_reale: float = 0.0
+        self.recent_weekly_pace: float = 0.0
         self.soft_cap: float | None = None
         self.reduction_pct: float = 0.0
         self.soft_cap_reason: str = ""
@@ -509,7 +510,7 @@ class WeeklyBudgetCalc:
     - limite_reale = residuo_budget_mensile / settimane_restanti
     - soft_cap = limite_reale * (1 - riduzione), solo se trend in peggioramento recente
     - riduzione proporzionale al delta ultime 4w vs media 8w, capped al 25%
-    - status basato sulla proiezione mensile (non sul trend storico)
+    - status basato sul confronto tra ultima settimana completa e limite reale
     """
 
     MAX_REDUCTION = 0.25
@@ -522,22 +523,22 @@ class WeeklyBudgetCalc:
         weeks_remaining: float,
         pattern_stats: dict[str, "WeeklyCategoryStats"],
         reference_date: "date | None" = None,
+        recent_spent_by_cat: dict[str, float] | None = None,
     ) -> dict[str, CategoryBudgetResult]:
         """
         Args:
             budget_by_cat: budget mensile per categoria (solo categorie con budget)
             spent_by_cat: speso nel mese corrente per categoria
-            weeks_remaining: settimane rimaste nel mese (min 0.5)
+            weeks_remaining: settimane equivalenti rimaste nel mese (min 1.0)
             pattern_stats: output WeeklyPatternAnalyzer — usato per calcolare soft cap
-            reference_date: data di riferimento per proiezione (default: oggi)
+            reference_date: mantenuto per compatibilità dei chiamanti
+            recent_spent_by_cat: spesa dell'ultima settimana completa per categoria
 
         Returns:
             dict categoria → CategoryBudgetResult (solo categorie CON budget)
         """
-        import calendar as _cal
-        ref = reference_date or date.today()
-        days_in_month = _cal.monthrange(ref.year, ref.month)[1]
-        days_elapsed = ref.day  # 1-based, mai 0
+        _ = reference_date
+        recent_spent_by_cat = recent_spent_by_cat or {}
 
         results: dict[str, CategoryBudgetResult] = {}
 
@@ -549,6 +550,7 @@ class WeeklyBudgetCalc:
             residuo = max(budget - spent, 0.0)
             overrun = max(spent - budget, 0.0)
             limite_reale = residuo / weeks_remaining if weeks_remaining > 0 else 0.0
+            recent_weekly_pace = recent_spent_by_cat.get(cat, 0.0)
 
             # Soft cap: calcola delta reale da pattern_stats (usato solo per limite visivo)
             soft_cap: float | None = None
@@ -566,11 +568,9 @@ class WeeklyBudgetCalc:
                         f"ultime 4 sett. +{delta * 100:.0f}% vs media 8 sett."
                     )
 
-            # Status basato sulla proiezione mensile: se continui così, esci dal budget?
-            projected_month = (spent / days_elapsed) * days_in_month if spent > 0 else 0.0
             if overrun > 0:
                 status = "sforato"
-            elif projected_month > budget:
+            elif recent_weekly_pace > limite_reale:
                 status = "attenzione"
             else:
                 status = "ok"
@@ -581,6 +581,7 @@ class WeeklyBudgetCalc:
             r.residuo = round(residuo, 2)
             r.overrun = round(overrun, 2)
             r.limite_reale = round(limite_reale, 2)
+            r.recent_weekly_pace = round(recent_weekly_pace, 2)
             r.soft_cap = soft_cap
             r.reduction_pct = round(reduction_pct * 100, 1)
             r.soft_cap_reason = soft_cap_reason

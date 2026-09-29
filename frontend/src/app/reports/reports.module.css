@@ -1,6 +1,9 @@
 .container {
   padding: 2rem;
+  width: 100%;
+  min-width: 0;
   max-width: 900px;
+  box-sizing: border-box;
   margin: 0 auto;
 }
 
@@ -30,6 +33,7 @@
 
 .generateRow {
   display: flex;
+  flex-wrap: wrap;
   gap: 0.6rem;
   margin-top: 1rem;
 }
@@ -181,6 +185,8 @@
   justify-content: space-between;
   transition: border-color 0.15s, background 0.15s;
   width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
   font: inherit;
   text-align: left;
 }
@@ -194,6 +200,11 @@
   display: flex;
   align-items: center;
   gap: 0.75rem;
+  min-width: 0;
+}
+
+.reportCardLeft > div {
+  min-width: 0;
 }
 
 .reportIcon {
@@ -205,6 +216,7 @@
   font-size: 0.9rem;
   font-weight: 600;
   color: var(--color-text);
+  overflow-wrap: anywhere;
 }
 
 .reportDate {
@@ -231,6 +243,7 @@
   display: flex;
   align-items: center;
   gap: 0.5rem;
+  flex-shrink: 0;
 }
 
 .lockBadge {
@@ -275,6 +288,13 @@
   grid-template-columns: 1fr 1fr;
   gap: 1.25rem;
   margin-bottom: 2rem;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.chartsGrid > * {
+  min-width: 0;
+  max-width: 100%;
 }
 
 @media (max-width: 640px) {
@@ -291,6 +311,9 @@
   border: 1px solid var(--color-border);
   border-radius: 10px;
   padding: 1.25rem;
+  min-width: 0;
+  max-width: 100%;
+  box-sizing: border-box;
 }
 
 .chartTitle {
@@ -309,6 +332,9 @@
   border-radius: 10px;
   padding: 1.75rem 1.75rem 1.5rem;
   margin-bottom: 1.25rem;
+  min-width: 0;
+  max-width: 100%;
+  box-sizing: border-box;
 }
 
 .textCardTitle {
@@ -322,6 +348,8 @@
 
 .reportDoc {
   font-family: Georgia, "Iowan Old Style", "Palatino Linotype", Palatino, serif;
+  min-width: 0;
+  max-width: 100%;
 }
 
 .reportDocHeader {
@@ -448,6 +476,7 @@
   text-align: center;
   gap: 0.35rem;
   padding: 1.25rem 1.5rem;
+  box-sizing: border-box;
   background: linear-gradient(to bottom, transparent, rgba(3, 7, 18, 0.45) 35%, rgba(3, 7, 18, 0.75));
 }
 
@@ -495,6 +524,7 @@
   border: 1px solid var(--color-border);
   border-radius: 10px;
   padding: 0.9rem 1rem;
+  min-width: 0;
 }
 
 .kpiLabel {
@@ -511,6 +541,7 @@
   font-weight: 700;
   color: var(--color-text);
   margin: 0;
+  overflow-wrap: anywhere;
 }
 
 .kpiPositive .kpiValue {
@@ -527,6 +558,8 @@
 
 .sectionBlock {
   margin-bottom: 1.5rem;
+  min-width: 0;
+  max-width: 100%;
 }
 
 .sectionBlock:last-child {
@@ -589,6 +622,8 @@
   overflow-x: auto;
   border: 1px solid var(--color-border);
   border-radius: 8px;
+  min-width: 0;
+  max-width: 100%;
 }
 
 .dataTable {
@@ -662,4 +697,83 @@
   opacity: 0.55;
   pointer-events: none;
   user-select: none;
+}
+
+/* Un report su telefono ha una sola direzione di scorrimento: verticale.
+   Le tabelle diventano schede e ogni valore conserva l'intestazione nel suo
+   data-label, invece di richiedere uno swipe orizzontale. */
+@media (max-width: 640px) {
+  .textCard,
+  .chartCard {
+    padding: 1rem;
+  }
+
+  .dataTable,
+  .dataTable tbody,
+  .dataTable tr,
+  .dataTable td {
+    display: block;
+    width: 100%;
+    box-sizing: border-box;
+  }
+
+  .tableWrap {
+    overflow: hidden;
+  }
+
+  .reportTable,
+  .reportTableHidden {
+    white-space: pre-wrap;
+    overflow: hidden;
+    overflow-wrap: anywhere;
+    word-break: break-word;
+  }
+
+  .dataTable thead {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    border: 0;
+  }
+
+  .dataTable tbody tr {
+    width: calc(100% - 1.3rem);
+    margin: 0.65rem auto;
+    border: 1px solid var(--color-border);
+    border-radius: 8px;
+    overflow: hidden;
+  }
+
+  .dataTable tbody tr:nth-child(even) {
+    background: rgba(95, 196, 203, 0.04);
+  }
+
+  .dataTable td {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 1rem;
+    white-space: normal;
+    overflow-wrap: anywhere;
+    text-align: right;
+  }
+
+  .dataTable td::before {
+    content: attr(data-label);
+    flex: 1 1 45%;
+    color: var(--color-text-2);
+    font-size: 0.72rem;
+    font-weight: 600;
+    text-align: left;
+    text-transform: uppercase;
+  }
+
+  .alignRight {
+    text-align: right;
+  }
 }

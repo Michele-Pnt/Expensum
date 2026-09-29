@@ -131,7 +131,7 @@ class TestMonthlyResidualCalc:
     def test_weeks_remaining_end_of_month(self):
         ref = date(2026, 5, 29)
         _, _, weeks = MonthlyResidualCalc().compute([], [], ref)
-        assert 0.5 <= weeks < 1.0
+        assert weeks == 1.0
 
     def test_spent_by_cat_aggregated_correctly(self):
         txs = [
@@ -239,19 +239,53 @@ class TestWeeklyBudgetCalc:
         # proiezione non supera il budget → status ok (soft_cap non guida più lo status)
         assert r.status == "ok"
 
-    def test_attenzione_when_projection_exceeds_budget(self):
-        # proiezione = 120 * 2 = 240 > 200 → "attenzione"
+    def test_attenzione_when_recent_pace_exceeds_recommended_pace(self):
         budget = {"Ristoranti": 200.0}
         spent = {"Ristoranti": 120.0}
         stats = {"Ristoranti": _make_stats(mean=50.0)}
 
         results = WeeklyBudgetCalc().compute(
-            budget, spent, weeks_remaining=2.0, pattern_stats=stats, reference_date=self.REF
+            budget,
+            spent,
+            weeks_remaining=2.0,
+            pattern_stats=stats,
+            reference_date=self.REF,
+            recent_spent_by_cat={"Ristoranti": 60.0},
         )
 
         r = results["Ristoranti"]
         assert r.status == "attenzione"
+        assert r.recent_weekly_pace == 60.0
+        assert r.limite_reale == 40.0
         assert r.overrun == 0.0  # non ancora sforato
+
+    def test_ok_when_recent_pace_is_within_recommended_pace(self):
+        budget = {"Ristoranti": 200.0}
+        spent = {"Ristoranti": 120.0}
+
+        results = WeeklyBudgetCalc().compute(
+            budget,
+            spent,
+            weeks_remaining=2.0,
+            pattern_stats={},
+            reference_date=self.REF,
+            recent_spent_by_cat={"Ristoranti": 30.0},
+        )
+
+        assert results["Ristoranti"].status == "ok"
+
+    def test_recommended_pace_never_exceeds_monthly_residual(self):
+        results = WeeklyBudgetCalc().compute(
+            {"Alimentari": 300.0},
+            {"Alimentari": 200.0},
+            weeks_remaining=1.0,
+            pattern_stats={},
+            reference_date=date(2026, 5, 29),
+            recent_spent_by_cat={"Alimentari": 50.0},
+        )
+
+        assert results["Alimentari"].residuo == 100.0
+        assert results["Alimentari"].limite_reale == 100.0
 
     def test_soft_cap_capped_at_25_percent(self):
         # delta = +80% → riduzione deve essere capped al 25%
@@ -509,17 +543,17 @@ class TestWeeklyPlanBuilder:
         assert "PIANO SETTIMANALE" in prompt
         assert "BUDGET MENSILE PER CATEGORIA" in prompt
         assert "Alimentari" in prompt
-        assert "limite_reale" in prompt
+        assert "ritmo_recente" in prompt
+        assert "ritmo_consigliato" in prompt
 
     def test_to_prompt_text_contains_ai_instruction(self):
         storage = self._make_storage()
         data = WeeklyPlanBuilder().build(storage)
         prompt = data.to_prompt_text()
-        assert "limite reale" in prompt
-        assert "limite consigliato" in prompt
+        assert "confronta sempre 'ritmo recente' con 'ritmo consigliato'" in prompt
         assert "IMPORTANTE" in prompt
 
-    def test_to_prompt_text_zero_spend_tag(self):
+    def test_to_prompt_text_zero_recent_pace_stays_in_line(self):
         storage = self._make_storage()
         data = WeeklyPlanBuilder().build(storage)
         # Categoria con spesa zero nella settimana scorsa
@@ -533,4 +567,5 @@ class TestWeeklyPlanBuilder:
         data.budget_results["Viaggi"] = r
         data.spent_last_week_by_cat["Viaggi"] = 0.0
         prompt = data.to_prompt_text()
-        assert "spesa=0: non mostrare avvisi negativi" in prompt
+        assert "ritmo_recente €0.00/s" in prompt
+        assert "status: ok" in prompt

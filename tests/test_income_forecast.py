@@ -75,8 +75,9 @@ def test_weekly_source_exposes_two_future_occurrences() -> None:
 
     lessons = result.by_source("lezioni|consulenze")
     assert lessons.scheduled_dates == (date(2026, 9, 17), date(2026, 9, 24))
-    # The residual remains source-level and retains the low-confidence history blend.
-    assert lessons.remaining_amount == pytest.approx(170.0)
+    assert lessons.remaining_amount == pytest.approx(200.0)
+    assert result.recurring_remaining_total == pytest.approx(200.0)
+    assert result.irregular_adjustment == 0.0
 
 
 def test_irregular_source_uses_only_its_six_month_historical_mean() -> None:
@@ -97,6 +98,7 @@ def test_irregular_source_uses_only_its_six_month_historical_mean() -> None:
     assert refunds.periodicity_confidence == 0.0
     assert refunds.scheduled_dates == ()
     assert refunds.full_month_amount == pytest.approx(40.0)
+    assert refunds.remaining_amount == 0.0
 
 
 def test_late_payment_is_not_asserted_as_a_future_income() -> None:
@@ -134,7 +136,7 @@ def test_received_income_reduces_only_its_own_remaining_source() -> None:
     """A salary bonus cannot consume an unrelated rental income forecast."""
     records = [
         *_monthly_history("Stipendio", "Lavoro", 2_000.0),
-        _income(date(2026, 9, 27), 2_500.0, "Stipendio", "Lavoro"),
+        _income(date(2026, 9, 27), 2_000.0, "Stipendio", "Lavoro"),
         *_monthly_history("Affitto", "Locazioni", 800.0, day=30),
     ]
     result = IncomeForecastEngine().forecast(
@@ -178,6 +180,100 @@ def test_occurrence_due_on_as_of_is_retained_for_the_forecast() -> None:
     salary = result.by_source("stipendio|lavoro")
     assert salary.scheduled_dates == (date(2026, 9, 27),)
     assert salary.full_month_amount == pytest.approx(2_000.0)
+
+
+def test_occurrence_recorded_on_as_of_is_not_still_expected() -> None:
+    """A received recurring payment consumes the matching scheduled occurrence."""
+    records = [
+        *_monthly_history("Stipendio", "Lavoro", 2_000.0),
+        _income(date(2026, 9, 27), 2_000.0, "Stipendio", "Lavoro"),
+    ]
+
+    result = IncomeForecastEngine().forecast(
+        records,
+        month_start=date(2026, 9, 1),
+        month_end=date(2026, 9, 30),
+        as_of=date(2026, 9, 27),
+    )
+
+    salary = result.by_source("stipendio|lavoro")
+    assert salary.scheduled_dates == ()
+    assert salary.remaining_amount == 0.0
+    assert result.recurring_remaining_total == 0.0
+
+
+def test_occurrence_with_incompatible_amount_is_still_expected() -> None:
+    """A same-source receipt only consumes a recurrence when its amount is compatible."""
+    records = [
+        *_monthly_history("Stipendio", "Lavoro", 2_000.0),
+        _income(date(2026, 9, 27), 300.0, "Stipendio settembre", "Lavoro"),
+    ]
+
+    result = IncomeForecastEngine().forecast(
+        records,
+        month_start=date(2026, 9, 1),
+        month_end=date(2026, 9, 30),
+        as_of=date(2026, 9, 27),
+    )
+
+    salary = result.by_source("stipendio|lavoro")
+    assert salary.scheduled_dates == (date(2026, 9, 27),)
+    assert salary.remaining_amount == pytest.approx(2_000.0)
+
+
+def test_calendar_tokens_do_not_split_one_monthly_income_source() -> None:
+    """Month and year suffixes in a description cannot hide a stable recurrence."""
+    records = [
+        _income(date(2026, 6, 27), 2_000.0, "Stipendio giugno 2026", "Lavoro"),
+        _income(date(2026, 7, 27), 2_000.0, "Stipendio luglio 2026", "Lavoro"),
+        _income(date(2026, 8, 27), 2_000.0, "Stipendio agosto 2026", "Lavoro"),
+    ]
+
+    result = IncomeForecastEngine().forecast(
+        records,
+        month_start=date(2026, 9, 1),
+        month_end=date(2026, 9, 30),
+        as_of=date(2026, 9, 10),
+    )
+
+    assert result.by_source("stipendio|lavoro").scheduled_dates == (date(2026, 9, 27),)
+    assert result.recurring_remaining_total == pytest.approx(2_000.0)
+
+
+def test_irregular_adjustment_uses_six_month_median_and_remaining_days() -> None:
+    """Frequent irregular income contributes its robust daily share to the widget."""
+    monthly_amounts = [900.0, 1_200.0, 0.0, 1_500.0, 800.0, 1_100.0]
+    records = [
+        _income(date(2026, month, 5), amount, "Collaborazioni", "Consulenze")
+        for month, amount in zip(range(3, 9), monthly_amounts)
+        if amount > 0
+    ]
+
+    result = IncomeForecastEngine().forecast(
+        records,
+        month_start=date(2026, 9, 1),
+        month_end=date(2026, 9, 30),
+        as_of=date(2026, 9, 10),
+    )
+
+    assert result.recurring_remaining_total == 0.0
+    assert result.irregular_adjustment == pytest.approx(1_000.0 / 30 * 20)
+    assert result.remaining_total == pytest.approx(666.666, rel=1e-3)
+
+
+def test_isolated_irregular_peak_does_not_inflate_remaining_income() -> None:
+    """One exceptional receipt is suppressed by zero months in the median."""
+    result = IncomeForecastEngine().forecast(
+        [_income(date(2026, 8, 5), 6_000.0, "Vendita occasionale", "Altro")],
+        month_start=date(2026, 9, 1),
+        month_end=date(2026, 9, 30),
+        as_of=date(2026, 9, 10),
+    )
+
+    assert result.irregular_adjustment == 0.0
+    assert result.remaining_total == 0.0
+    # The next-month planning signal stays backward compatible.
+    assert result.full_month_total == pytest.approx(1_000.0)
 
 
 def test_future_dated_records_do_not_influence_the_forecast() -> None:

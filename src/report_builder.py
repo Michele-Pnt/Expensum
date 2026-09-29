@@ -443,7 +443,12 @@ class WeeklyPlanBuilder:
         momentum = CategoryMomentum().compute(pattern_stats)
 
         budget_results = WeeklyBudgetCalc().compute(
-            budget_by_cat, spent_by_cat, weeks_remaining, pattern_stats, ref
+            budget_by_cat,
+            spent_by_cat,
+            weeks_remaining,
+            pattern_stats,
+            ref,
+            recent_spent_by_cat=spent_last_week_by_cat,
         )
 
         no_budget_cats = {
@@ -512,14 +517,20 @@ class WeeklyPlanBuilder:
 
         budget_rows = []
         for cat, r in sorted(data.budget_results.items(), key=lambda x: x[1].budget_monthly, reverse=True):
-            last_week = data.spent_last_week_by_cat.get(cat, 0.0)
             budget_rows.append(
                 {
                     "cells": {
                         "categoria": cat,
-                        "scorsa": f"€{last_week:.2f}",
-                        "limite": f"€{r.limite_reale:.2f}/sett" if r.status != "sforato" else "—",
-                        "stato": {"ok": "In target", "attenzione": "Attenzione", "sforato": "Sforato"}.get(r.status, r.status),
+                        "recente": f"€{r.recent_weekly_pace:.2f}/sett",
+                        "consigliato": (
+                            f"€{r.limite_reale:.2f}/sett"
+                            if r.status != "sforato" else "—"
+                        ),
+                        "stato": {
+                            "ok": "In linea",
+                            "attenzione": "Sopra ritmo",
+                            "sforato": "Budget superato",
+                        }.get(r.status, r.status),
                     },
                     "tone": {"ok": "positive", "attenzione": "warning", "sforato": "negative"}.get(r.status),
                 }
@@ -529,8 +540,12 @@ class WeeklyPlanBuilder:
                 "Budget per categoria",
                 [
                     {"key": "categoria", "label": "Categoria", "align": "left"},
-                    {"key": "scorsa", "label": "Sett. scorsa", "align": "right"},
-                    {"key": "limite", "label": "Limite reale", "align": "right"},
+                    {"key": "recente", "label": "Ritmo recente", "align": "right"},
+                    {
+                        "key": "consigliato",
+                        "label": "Ritmo consigliato",
+                        "align": "right",
+                    },
                     {"key": "stato", "label": "Stato", "align": "left"},
                 ],
                 budget_rows,
@@ -571,7 +586,10 @@ class WeeklyPlanBuilder:
             if r.status == "sforato":
                 tips.append(f"Hai già superato il budget mensile di {cat} di €{r.overrun:.2f}: rallenta questa settimana.")
             elif r.status == "attenzione" and len(tips) < 3:
-                tips.append(f"Al ritmo attuale supererai il budget di {cat}: limite consigliato €{r.limite_reale:.2f}/sett.")
+                tips.append(
+                    f"In {cat} il ritmo recente è €{r.recent_weekly_pace:.2f}/sett, "
+                    f"sopra i €{r.limite_reale:.2f}/sett consigliati."
+                )
             if len(tips) == 3:
                 break
         if not tips:
@@ -645,32 +663,27 @@ class WeeklyPlanData:
 
         lines.append(
             "BUDGET MENSILE PER CATEGORIA "
-            "(limite_reale = residuo / settimane rimaste; "
-            "soft_cap = limite settimanale ridotto se trend storico in peggioramento, "
-            "non influenza lo status; status = ok/attenzione/sforato basato su proiezione mensile):"
+            "(ritmo_consigliato = residuo / settimane equivalenti rimaste, minimo 1; "
+            "ritmo_recente = spesa dell'ultima settimana completa; "
+            "status = ok/attenzione/sforato dal confronto fra i due ritmi):"
         )
         for cat, r in sorted(
             self.budget_results.items(), key=lambda x: x[1].budget_monthly, reverse=True
         ):
-            last_week = self.spent_last_week_by_cat.get(cat, 0.0)
-            lw_note = " [spesa=0: non mostrare avvisi negativi]" if last_week == 0 else ""
             if r.status == "sforato":
                 budget_line = (
                     f"  {cat}: budget €{r.budget_monthly:.2f} | speso mese €{r.spent_month:.2f} | "
-                    f"SFORATO di €{r.overrun:.2f} | limite_reale €0/s | status: sforato"
+                    f"SFORATO di €{r.overrun:.2f} | ritmo_recente "
+                    f"€{r.recent_weekly_pace:.2f}/s | status: sforato"
                 )
             else:
-                sc_str = (
-                    f"€{r.soft_cap:.2f}/s ({r.soft_cap_reason})"
-                    if r.soft_cap is not None
-                    else "nessuno"
-                )
                 budget_line = (
                     f"  {cat}: budget €{r.budget_monthly:.2f} | speso mese €{r.spent_month:.2f} | "
-                    f"residuo €{r.residuo:.2f} | limite_reale €{r.limite_reale:.2f}/s | "
-                    f"soft_cap: {sc_str} | status: {r.status}"
+                    f"residuo €{r.residuo:.2f} | ritmo_recente "
+                    f"€{r.recent_weekly_pace:.2f}/s | ritmo_consigliato "
+                    f"€{r.limite_reale:.2f}/s | status: {r.status}"
                 )
-            lines.append(budget_line + f" | speso sett. scorsa €{last_week:.2f}{lw_note}")
+            lines.append(budget_line)
 
         if self.no_budget_cats:
             lines.append("")
@@ -693,9 +706,9 @@ class WeeklyPlanData:
 
         lines.append("")
         lines.append(
-            "IMPORTANTE: nel report distingui sempre 'limite reale' (derivato dal budget utente) "
-            "da 'limite consigliato' (riduzione prudenziale per trend in peggioramento). "
-            "Non presentarli mai come equivalenti."
+            "IMPORTANTE: confronta sempre 'ritmo recente' con 'ritmo consigliato'. "
+            "Il primo descrive l'ultima settimana completa; il secondo è il massimo "
+            "settimanale sostenibile per restare nel budget mensile."
         )
 
         return "\n".join(lines)

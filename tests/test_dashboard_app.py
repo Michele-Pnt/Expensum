@@ -50,9 +50,25 @@ def test_analytics_overview_exposes_month_end_forecast_with_future_subscriptions
 
     transactions = [{"date": real_date(2026, 9, 10), "amount": 100.0, "account_id": 1}]
     incomes = [
-        {"date": real_date(2026, month, 1), "amount": 1000.0, "name": "Stipendio"}
+        {
+            "date": real_date(2026, month, 27),
+            "amount": 1000.0,
+            "name": "Stipendio",
+            "income_category": "Lavoro",
+        }
         for month in range(3, 9)
     ]
+    irregular_amounts = [90.0, 120.0, 0.0, 150.0, 80.0, 110.0]
+    incomes.extend(
+        {
+            "date": real_date(2026, month, 5),
+            "amount": amount,
+            "name": "Collaborazioni",
+            "income_category": "Consulenze",
+        }
+        for month, amount in zip(range(3, 9), irregular_amounts)
+        if amount > 0
+    )
     monkeypatch.setattr(
         PostgresStorage,
         "fetch_all_transactions",
@@ -95,8 +111,8 @@ def test_analytics_overview_exposes_month_end_forecast_with_future_subscriptions
     assert response.json["month_end_forecast"] == {
         "variable_expense_projection": 87.5,
         "scheduled_expenses": 20.0,
-        "remaining_expected_income": 100.0,
-        "projected_end_amount": -107.5,
+        "remaining_expected_income": 1046.67,
+        "projected_end_amount": 839.17,
     }
 
 
@@ -142,8 +158,8 @@ def test_analytics_overview_recognizes_quarterly_and_semiannual_income_sources(
     assert response.json["month_end_forecast"] == {
         "variable_expense_projection": 0.0,
         "scheduled_expenses": 0.0,
-        "remaining_expected_income": 120.0,
-        "projected_end_amount": 120.0,
+        "remaining_expected_income": 0.0,
+        "projected_end_amount": 0.0,
     }
 
 

@@ -10,6 +10,17 @@ from src.data_processor import TrendReport, CategoryBudgetResult
 
 logger = logging.getLogger("financial_agent.chart_generator")
 
+# Colori dei grafici dal brand kit (dark rebrand 2026-08-08). Il brand ne
+# prescrive due per i grafici: Platino come neutro, Turchese come accento
+# ("Grafici lineari in #B0B5B9 con evidenziazioni in #5FC4CB"). Prima qui
+# c'erano una palette Nord messa a mano e le palette seaborn "pastel"/"muted",
+# con sfondo #1e1e2e invece del Blu Profondo.
+BRAND_GROUND = "#1C363D"   # Blu Profondo, sfondo
+BRAND_ACCENT = "#5FC4CB"   # Turchese, serie in evidenza
+BRAND_NEUTRAL = "#B0B5B9"  # Platino, serie di confronto, assi, griglia
+BRAND_INK = "#E9F1EA"      # Bianco Menta, testo
+BRAND_GRID = "#3A5A61"     # Platino attenuato sul fondo scuro, griglia recessiva
+
 class ChartGenerator:
     """Generatore di grafici a partire dal TrendReport, salvati come immagini temporanee."""
 
@@ -23,16 +34,21 @@ class ChartGenerator:
         import matplotlib.pyplot as plt
         import seaborn as sns
         if not self._style_ready:
-            sns.set_theme(style="darkgrid", palette="muted")
+            # "darkgrid" disegna una griglia piena che compete coi dati: la
+            # skill dataviz vuole griglia e assi recessivi.
+            sns.set_theme(style="ticks")
             plt.rcParams.update({
-                "text.color": "white",
-                "axes.labelcolor": "white",
-                "xtick.color": "white",
-                "ytick.color": "white",
-                "axes.edgecolor": "white",
-                "figure.facecolor": "#1e1e2e",
-                "axes.facecolor": "#1e1e2e",
-                "font.size": 12
+                "text.color": BRAND_INK,
+                "axes.labelcolor": BRAND_NEUTRAL,
+                "xtick.color": BRAND_NEUTRAL,
+                "ytick.color": BRAND_NEUTRAL,
+                "axes.edgecolor": BRAND_GRID,
+                "grid.color": BRAND_GRID,
+                "grid.linewidth": 0.6,
+                "figure.facecolor": BRAND_GROUND,
+                "axes.facecolor": BRAND_GROUND,
+                "savefig.facecolor": BRAND_GROUND,
+                "font.size": 12,
             })
             self._style_ready = True
         return plt, sns
@@ -84,24 +100,40 @@ class ChartGenerator:
             labels.append("Altro")
             sizes.append(sum(c[1] for c in categories[6:]))
             
-        fig, ax = plt.subplots(figsize=(8, 8))
-        
-        # Scegli una palette Seaborn
-        colors = sns.color_palette("pastel")[0:len(labels)]
-        
-        wedges, texts, autotexts = ax.pie(
-            sizes, 
-            labels=labels, 
-            autopct='%1.1f%%',
-            startangle=140, 
-            colors=colors,
-            textprops=dict(color="w")
-        )
-        for autotext in autotexts:
-            autotext.set_color('#1e1e2e')
-            autotext.set_weight('bold')
+        # Era una torta con la palette seaborn "pastel": con una categoria
+        # dominante le fette piccole diventano schegge illeggibili, e sette
+        # tinte diverse non stanno nel brand. A barre orizzontali le categorie
+        # sono scritte sull'asse, quindi il colore non porta identita' e basta
+        # una serie sola nell'accento.
+        fig, ax = plt.subplots(figsize=(9, max(3.2, 0.62 * len(labels) + 1.2)))
 
-        ax.set_title(f"Suddivisione Spese - {cur.label}", color="white", fontsize=16, pad=20)
+        y_pos = list(range(len(labels)))
+        # Le categorie arrivano ordinate per importo decrescente: invertendo
+        # l'asse y la piu' grande resta in alto.
+        ax.barh(y_pos, sizes, color=BRAND_ACCENT, height=0.58)
+        ax.set_yticks(y_pos)
+        ax.set_yticklabels(labels)
+        ax.invert_yaxis()
+
+        total = sum(sizes) or 1.0
+        for y, value in zip(y_pos, sizes):
+            ax.text(
+                value + total * 0.012, y,
+                f"€{value:,.0f}".replace(",", "."),
+                color=BRAND_NEUTRAL, va="center", fontsize=11,
+            )
+
+        ax.set_xlim(0, max(sizes) * 1.18)
+        ax.set_xlabel("")
+        ax.set_xticks([])
+        for side in ("top", "right", "bottom", "left"):
+            ax.spines[side].set_visible(False)
+        ax.tick_params(axis="y", length=0)
+
+        ax.set_title(
+            f"Dove sono finiti i soldi - {cur.label}",
+            color=BRAND_INK, fontsize=16, pad=20, loc="left",
+        )
         
         filepath = self._get_filepath("pie_chart")
         plt.tight_layout()
@@ -110,7 +142,7 @@ class ChartGenerator:
         return filepath
 
     def generate_bar_chart(self, report: TrendReport) -> str:
-        """Grafico a barre: Confronto Spesa Attuale vs Media Notion per le Top categorie."""
+        """Grafico a barre: Confronto Spesa Attuale vs media storica per le categorie principali."""
         import pandas as pd
         plt, sns = self._load_plotting_libs()
         cur = report.current_month
@@ -123,7 +155,7 @@ class ChartGenerator:
             avg = cur.by_category_average.get(cat, 0.0)
             if amt > 0 or avg > 0:
                 data.append({"Categoria": cat, "Importo": amt, "Tipo": "Consumo Mese"})
-                data.append({"Categoria": cat, "Importo": avg, "Tipo": "Media Notion"})
+                data.append({"Categoria": cat, "Importo": avg, "Tipo": "Media storica"})
                 
         if not data:
             return ""
@@ -140,17 +172,17 @@ class ChartGenerator:
             x="Importo", 
             y="Categoria", 
             hue="Tipo", 
-            palette={"Consumo Mese": "#ff8888", "Media Notion": "#88c0d0"},
+            palette={"Consumo Mese": BRAND_ACCENT, "Media storica": BRAND_NEUTRAL},
             ax=ax
         )
         
-        ax.set_title("Spesa vs Buffer Mensile", color="white", fontsize=16, pad=15)
+        ax.set_title("Spesa del mese vs media storica", color=BRAND_INK, fontsize=16, pad=15, loc="left")
         ax.set_xlabel("Importo (€)")
         ax.set_ylabel("")
         
         # Colori legende
-        legend = ax.legend(frameon=True, facecolor="#2e3440", edgecolor="none")
-        plt.setp(legend.get_texts(), color='w')
+        legend = ax.legend(frameon=True, facecolor=BRAND_GROUND, edgecolor=BRAND_GRID)
+        plt.setp(legend.get_texts(), color=BRAND_INK)
 
         filepath = self._get_filepath("bar_chart")
         plt.tight_layout()
@@ -176,25 +208,25 @@ class ChartGenerator:
         fig, ax = plt.subplots(figsize=(10, 5))
         
         # Linea del trend
-        sns.lineplot(x=x_pos, y=totals, marker="o", linewidth=3, markersize=10, color="#a3be8c", ax=ax)
+        sns.lineplot(x=x_pos, y=totals, marker="o", linewidth=3, markersize=10, color=BRAND_ACCENT, ax=ax)
         ax.set_xticks(x_pos)
         ax.set_xticklabels(labels)
         
         # Linea della media storica
         if report.historical_avg > 0:
-            ax.axhline(y=report.historical_avg, color="#bf616a", linestyle='--', linewidth=2, label=f"Media Storica ({report.historical_avg:.0f}€)")
+            ax.axhline(y=report.historical_avg, color=BRAND_NEUTRAL, linestyle='--', linewidth=2, label=f"Media Storica ({report.historical_avg:.0f}€)")
             
-        ax.set_title("Andamento Storico Spese", color="white", fontsize=16, pad=15)
+        ax.set_title("Andamento delle spese", color=BRAND_INK, fontsize=16, pad=15, loc="left")
         ax.set_ylabel("Totale Speso (€)")
         ax.set_xlabel("")
         plt.xticks(rotation=45, ha='right')
         
-        legend = ax.legend(frameon=True, facecolor="#2e3440", edgecolor="none")
-        plt.setp(legend.get_texts(), color='w')
+        legend = ax.legend(frameon=True, facecolor=BRAND_GROUND, edgecolor=BRAND_GRID)
+        plt.setp(legend.get_texts(), color=BRAND_INK)
 
         # Aggiungi le label numeriche sui punti
         for xi, y in zip(x_pos, totals):
-            ax.text(xi, y + (max(totals)*0.03), f"€{y:.0f}", color="white", ha="center")
+            ax.text(xi, y + (max(totals)*0.03), f"€{y:.0f}", color=BRAND_NEUTRAL, ha="center")
 
         filepath = self._get_filepath("line_chart")
         plt.tight_layout()
@@ -210,7 +242,7 @@ class ChartGenerator:
     ) -> str:
         """
         Genera una tabella PNG del budget settimanale per categoria.
-        Colonne: Categoria | Settimana scorsa | Speso nel mese | Obiettivo per settimana | Stato
+        Colonne: Categoria | Ritmo recente | Speso nel mese | Ritmo consigliato | Stato
         """
         import matplotlib.pyplot as plt
         import matplotlib.patches as patches
@@ -225,19 +257,24 @@ class ChartGenerator:
             return ""
 
         # ── Palette ────────────────────────────────────────────────────────
-        BG       = "#1e1e2e"
-        SURFACE  = "#313244"
-        OVERLAY  = "#45475a"
-        TEXT     = "#cdd6f4"
-        SUBTEXT  = "#a6adc8"
-        ACCENT   = "#89b4fa"
-        GREEN    = "#a6e3a1"
-        YELLOW   = "#f9e2af"
-        RED      = "#f38ba8"
-        GREY     = "#6c7086"
-        SEP      = "#585b70"
+        # Neutri e accento vengono dal brand kit. I tre colori di stato
+        # (verde/giallo/rosso) restano quelli precedenti: il brand kit non
+        # definisce una palette di stato, e la skill dataviz la vuole riservata
+        # e distinta dall'accento, quindi qui non se ne inventa una. Da fissare
+        # nel brand kit prima di toccarli.
+        BG       = BRAND_GROUND
+        SURFACE  = "#22424A"   # Blu Profondo schiarito, riga alternata
+        OVERLAY  = "#2B4F58"   # Blu Profondo schiarito, traccia delle barre
+        TEXT     = BRAND_INK
+        SUBTEXT  = BRAND_NEUTRAL
+        ACCENT   = BRAND_ACCENT
+        GREEN    = "#a6e3a1"   # stato: in linea
+        YELLOW   = "#f9e2af"   # stato: attenzione
+        RED      = "#f38ba8"   # stato: fuori budget
+        GREY     = "#6E8085"
+        SEP      = BRAND_GRID
 
-        SUBTITLE = "Obiettivo sett. = budget residuo ÷ settimane rimaste nel mese"
+        SUBTITLE = "Ritmo consigliato = budget residuo ÷ settimane equivalenti rimaste"
         FOOTER   = "Modifica i tuoi budget con  /modify"
 
         # ── Layout ─────────────────────────────────────────────────────────
@@ -254,9 +291,9 @@ class ChartGenerator:
         # (header_label, width_fraction, h_align)
         COLS = [
             ("Categoria",                0.26, "left"),
-            ("Settimana\nscorsa",        0.16, "right"),
+            ("Ritmo\nrecente",           0.16, "right"),
             ("Speso nel\nmese",          0.17, "right"),
-            ("Obiettivo\nper settimana", 0.24, "right"),
+            ("Ritmo\nconsigliato",       0.24, "right"),
             ("Stato",                    0.17, "center"),
         ]
         PAD_X = 0.014  # padding interno cella
@@ -308,13 +345,17 @@ class ChartGenerator:
 
         # ── Righe dati ─────────────────────────────────────────────────────
         STATUS_COLOR = {"ok": GREEN, "attenzione": YELLOW, "sforato": RED}
-        STATUS_LABEL = {"ok": "OK", "attenzione": "Attenzione", "sforato": "Sforato"}
+        STATUS_LABEL = {
+            "ok": "In linea",
+            "attenzione": "Sopra ritmo",
+            "sforato": "Budget superato",
+        }
         STATUS_ICON  = {"ok": "✓", "attenzione": "!", "sforato": "✗"}
 
         for i, (cat, r) in enumerate(sorted_cats):
             row_bg = SURFACE if i % 2 == 0 else BG
-            last_week = spent_last_week_by_cat.get(cat, 0.0)
-            if last_week == 0.0:
+            recent_pace = spent_last_week_by_cat.get(cat, r.recent_weekly_pace)
+            if recent_pace == 0.0 and r.status != "sforato":
                 s_color, s_label, s_icon = GREY, "Nessuna spesa", "⬜"
             else:
                 s_color = STATUS_COLOR.get(r.status, SUBTEXT)
@@ -323,7 +364,7 @@ class ChartGenerator:
 
             cell_vals = [
                 cat,
-                f"€ {last_week:,.2f}",
+                f"€ {recent_pace:,.2f} / sett.",
                 f"€ {r.spent_month:,.2f}",
                 f"€ {r.limite_reale:,.2f} / sett.",
                 None,  # status: disegnato a parte
@@ -374,9 +415,9 @@ class ChartGenerator:
         ax.plot([0.02, 0.98], [y, y], color=SEP, linewidth=0.6)
         y_leg = y - LEGEND_H / 2
         legend_items = [
-            ("✓  OK", GREEN, 0.25),
-            ("!  Attenzione", YELLOW, 0.50),
-            ("✗  Sforato", RED, 0.75),
+            ("✓  In linea", GREEN, 0.25),
+            ("!  Sopra ritmo", YELLOW, 0.50),
+            ("✗  Budget superato", RED, 0.75),
         ]
         for label, color, xpos in legend_items:
             ax.text(

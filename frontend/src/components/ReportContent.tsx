@@ -4,12 +4,26 @@
 import React from "react";
 import Link from "next/link";
 import {
-  BarChart, Bar, LineChart, Line, PieChart, Pie, Cell,
+  BarChart, Bar, LineChart, Line,
   XAxis, YAxis, Tooltip, ResponsiveContainer, Legend, CartesianGrid,
 } from "recharts";
 import { Lock } from "lucide-react";
 import styles from "@/app/reports/reports.module.css";
 import { canCreateSavingsGoalFromReport } from "@/lib/contextual-navigation";
+import { CHART_ACCENT, CHART_NEUTRAL, TOOLTIP_STYLE, TICK_STYLE } from "@/theme/chartPalette";
+import {
+  buildMonthlyBarData,
+  buildWeeklyBarData,
+  formatBudgetSpendReadout,
+  type BudgetSpendChartRow,
+} from "./reportChartData";
+
+export {
+  buildMonthlyBarData,
+  buildWeeklyBarData,
+  formatBudgetSpendReadout,
+} from "./reportChartData";
+export type { BudgetSpendChartRow } from "./reportChartData";
 
 // ---------------------------------------------------------------------------
 // Tipi
@@ -31,20 +45,67 @@ export interface ReportDetail {
 // Costanti
 // ---------------------------------------------------------------------------
 
-// Stessa palette categoriale validata CVD-safe di analytics/page.tsx (skill
-// dataviz) — ordine fisso, non riordinare. Indicizzata a modulo: una 9a
-// categoria ricicla lo slot 1 invece di generare una tinta non validata.
-const PALETTE = ["#3987e5", "#d95926", "#199e70", "#c98500", "#d55181", "#008300", "#9085e9", "#e66767"];
+// La spesa per categoria era una torta con la palette categoriale CVD-safe di
+// analytics/page.tsx. Ora e' un grafico a barre orizzontali (CategoryBars piu'
+// sotto): con le categorie scritte sull'asse il colore non porta piu' identita',
+// quindi basta una serie sola nell'accento di brand e la palette categoriale
+// qui non serve. Resta in analytics/page.tsx, dove il colore distingue davvero
+// fra piu' serie sullo stesso grafico.
 
-const TOOLTIP_STYLE = {
-  background: "#1C363D",
-  border: "1px solid rgba(176,181,185,0.25)",
-  borderRadius: 8,
-  color: "#E9F1EA",
-  fontSize: 12,
-};
+/**
+ * Spesa per categoria a barre orizzontali, al posto della torta.
+ *
+ * Una torta con una fetta dominante e tre schegge non si legge, e le etichette
+ * finivano in una legenda a 10px troncata a 13 caratteri. Qui le categorie
+ * stanno sull'asse, ordinate per importo decrescente, quindi l'identita' e'
+ * scritta e non affidata al colore: una serie sola nell'accento di brand.
+ */
+function CategoryBars({ data }: { data: { name: string; value: number }[] }) {
+  const rows = [...data].sort((a, b) => (b.value ?? 0) - (a.value ?? 0));
+  // Ogni barra ha bisogno di una fascia fissa, altrimenti con due categorie
+  // diventano due bandoni e con otto si schiacciano.
+  const height = Math.max(160, rows.length * 34 + 24);
 
-const TICK_STYLE = { fontSize: 10, fill: "#B0B5B9" };
+  return (
+    <ResponsiveContainer width="100%" height={height}>
+      <BarChart
+        data={rows}
+        layout="vertical"
+        margin={{ top: 4, right: 56, bottom: 4, left: 4 }}
+        accessibilityLayer={false}
+      >
+        <XAxis type="number" hide />
+        <YAxis
+          type="category"
+          dataKey="name"
+          tick={TICK_STYLE}
+          axisLine={false}
+          tickLine={false}
+          width={92}
+        />
+        <Tooltip
+          cursor={false}
+          contentStyle={TOOLTIP_STYLE}
+          formatter={(v: any) => `€${(v ?? 0).toFixed(2)}`}
+        />
+        <Bar
+          activeBar={false}
+          dataKey="value"
+          name="Speso"
+          fill={CHART_ACCENT}
+          radius={[0, 4, 4, 0]}
+          barSize={14}
+          label={{
+            position: "right",
+            fill: CHART_NEUTRAL,
+            fontSize: 11,
+            formatter: (v: any) => `€${Math.round(v ?? 0)}`,
+          }}
+        />
+      </BarChart>
+    </ResponsiveContainer>
+  );
+}
 
 const PLACEHOLDER_STYLE: React.CSSProperties = {
   display: "flex",
@@ -223,7 +284,11 @@ function TableSectionView({ section }: { section: TableSectionData }) {
               {section.rows.map((row, i) => (
                 <tr key={i} className={toneClass(row.tone)}>
                   {section.columns.map((col) => (
-                    <td key={col.key} className={col.align === "right" ? styles.alignRight : undefined}>
+                    <td
+                      key={col.key}
+                      className={col.align === "right" ? styles.alignRight : undefined}
+                      data-label={col.label}
+                    >
                       {row.cells[col.key] ?? ""}
                     </td>
                   ))}
@@ -414,17 +479,6 @@ function renderReportBody(text: string, hidden = false): React.ReactNode {
 // Chart builders
 // ---------------------------------------------------------------------------
 
-function buildWeeklyBarData(budgetResults: Record<string, any>) {
-  return Object.entries(budgetResults)
-    .map(([cat, r]) => ({
-      name: cat.length > 12 ? cat.slice(0, 11) + "." : cat,
-      Budget: Math.round(r.budget_monthly ?? 0),
-      Speso: Math.round(r.spent_month ?? 0),
-    }))
-    .sort((a, b) => b.Budget - a.Budget)
-    .slice(0, 8);
-}
-
 function buildSpentPieData(budgetResults: Record<string, any>) {
   return Object.entries(budgetResults)
     .map(([cat, r]) => ({ name: cat, value: Math.round(r.spent_month ?? 0) }))
@@ -442,24 +496,28 @@ function buildMonthlyPieData(data: Record<string, any>) {
     .slice(0, 8);
 }
 
-function buildMonthlyBarData(data: Record<string, any>): {
-  rows: { name: string; Speso: number; Budget: number }[];
-  hasSpent: boolean;
-} {
-  const spent = data.spent_by_cat ?? data.by_category ?? {};
-  const budgets = data.budget_by_cat ?? {};
-  const hasSpent = Object.values(spent).some((v) => Number(v) > 0);
-  const cats = new Set([...Object.keys(hasSpent ? spent : {}), ...Object.keys(budgets)]);
-  const rows = Array.from(cats)
-    .map((cat) => ({
-      name: cat.length > 12 ? cat.slice(0, 11) + "." : cat,
-      Speso: Math.round(Number(spent[cat] ?? 0)),
-      Budget: Math.round(Number(budgets[cat] ?? 0)),
-    }))
-    .filter((e) => e.Speso > 0 || e.Budget > 0)
-    .sort((a, b) => b.Budget - a.Budget)
-    .slice(0, 8);
-  return { rows, hasSpent };
+/**
+ * Tooltip esplicito per evitare che l'ordine o le chiavi interne di Recharts
+ * facciano sembrare invertiti budget e spesa dopo il tap su una categoria.
+ */
+export function BudgetSpendTooltip({
+  active,
+  payload,
+}: {
+  active?: boolean;
+  payload?: Array<{ payload?: BudgetSpendChartRow }>;
+}): React.ReactElement | null {
+  const row = payload?.[0]?.payload;
+  if (!active || !row) return null;
+  const [budget, spent] = formatBudgetSpendReadout(row);
+
+  return (
+    <div style={TOOLTIP_STYLE}>
+      <p style={{ margin: "0 0 0.35rem", fontWeight: 700 }}>{row.name}</p>
+      <p style={{ margin: 0 }}>{budget}</p>
+      <p style={{ margin: "0.2rem 0 0" }}>{spent}</p>
+    </div>
+  );
 }
 
 function buildHistoryData(data: Record<string, any>) {
@@ -483,9 +541,9 @@ export function WeeklyCharts({ data }: { data: Record<string, any> }) {
         <div className={styles.chartTitle}>Budget vs Speso (€)</div>
         <ResponsiveContainer width="100%" height={220}>
           <BarChart data={barData} margin={{ top: 4, right: 8, left: 0, bottom: 40 }} accessibilityLayer={false}>
-            <XAxis dataKey="name" tick={TICK_STYLE} angle={-35} textAnchor="end" interval={0} />
+            <XAxis dataKey="axisLabel" tick={TICK_STYLE} angle={-35} textAnchor="end" interval={0} />
             <YAxis tick={TICK_STYLE} width={40} />
-            <Tooltip cursor={false} contentStyle={TOOLTIP_STYLE} formatter={(v: any) => `€${(v ?? 0).toFixed(2)}`} />
+            <Tooltip cursor={false} content={<BudgetSpendTooltip />} />
             <Legend wrapperStyle={{ fontSize: 11, color: "#B0B5B9" }} />
             <Bar activeBar={false} dataKey="Budget" fill="#5FC4CB" radius={[3, 3, 0, 0]} />
             <Bar activeBar={false} dataKey="Speso" fill="#B0B5B9" radius={[3, 3, 0, 0]} />
@@ -496,20 +554,7 @@ export function WeeklyCharts({ data }: { data: Record<string, any> }) {
       <div className={styles.chartCard}>
         <div className={styles.chartTitle}>Distribuzione Spesa</div>
         {pieData.length > 0 ? (
-          <ResponsiveContainer width="100%" height={220}>
-            <PieChart accessibilityLayer={false}>
-              <Pie activeShape={false} data={pieData} dataKey="value" nameKey="name" cx="50%" cy="50%" outerRadius={80} label={false}>
-                {pieData.map((_, i) => (
-                  <Cell key={i} fill={PALETTE[i % PALETTE.length]} />
-                ))}
-              </Pie>
-              <Tooltip cursor={false} contentStyle={TOOLTIP_STYLE} formatter={(v: any) => `€${(v ?? 0).toFixed(2)}`} />
-              <Legend
-                wrapperStyle={{ fontSize: 10, color: "#B0B5B9" }}
-                formatter={(val) => (val.length > 14 ? val.slice(0, 13) + "." : val)}
-              />
-            </PieChart>
-          </ResponsiveContainer>
+          <CategoryBars data={pieData} />
         ) : (
           <div style={PLACEHOLDER_STYLE}>Nessuna spesa registrata questo mese</div>
         )}
@@ -529,20 +574,7 @@ export function MonthlyCharts({ data }: { data: Record<string, any> }) {
         <div className={styles.chartCard}>
           <div className={styles.chartTitle}>Spesa mese precedente per categoria</div>
           {pieData.length > 0 ? (
-            <ResponsiveContainer width="100%" height={220}>
-              <PieChart accessibilityLayer={false}>
-                <Pie activeShape={false} data={pieData} dataKey="value" nameKey="name" cx="50%" cy="50%" outerRadius={80} label={false}>
-                  {pieData.map((_, i) => (
-                    <Cell key={i} fill={PALETTE[i % PALETTE.length]} />
-                  ))}
-                </Pie>
-                <Tooltip cursor={false} contentStyle={TOOLTIP_STYLE} formatter={(v: any) => `€${(v ?? 0).toFixed(2)}`} />
-                <Legend
-                  wrapperStyle={{ fontSize: 10, color: "#B0B5B9" }}
-                  formatter={(val) => (val.length > 14 ? val.slice(0, 13) + "." : val)}
-                />
-              </PieChart>
-            </ResponsiveContainer>
+            <CategoryBars data={pieData} />
           ) : (
             <div style={PLACEHOLDER_STYLE}>
               Dati di spesa non disponibili per questo report.<br />Genera un nuovo piano mensile per vederli.
@@ -557,12 +589,12 @@ export function MonthlyCharts({ data }: { data: Record<string, any> }) {
             </div>
             <ResponsiveContainer width="100%" height={220}>
               <BarChart data={barRows} margin={{ top: 4, right: 8, left: 0, bottom: 40 }} accessibilityLayer={false}>
-                <XAxis dataKey="name" tick={TICK_STYLE} angle={-35} textAnchor="end" interval={0} />
+                <XAxis dataKey="axisLabel" tick={TICK_STYLE} angle={-35} textAnchor="end" interval={0} />
                 <YAxis tick={TICK_STYLE} width={40} />
-                <Tooltip cursor={false} contentStyle={TOOLTIP_STYLE} formatter={(v: any) => `€${(v ?? 0).toFixed(2)}`} />
+                <Tooltip cursor={false} content={<BudgetSpendTooltip />} />
                 <Legend wrapperStyle={{ fontSize: 11, color: "#B0B5B9" }} />
-                {hasSpent && <Bar activeBar={false} dataKey="Speso" fill="#B0B5B9" radius={[3, 3, 0, 0]} />}
                 <Bar activeBar={false} dataKey="Budget" fill="#5FC4CB" radius={[3, 3, 0, 0]} />
+                {hasSpent && <Bar activeBar={false} dataKey="Speso" fill="#B0B5B9" radius={[3, 3, 0, 0]} />}
               </BarChart>
             </ResponsiveContainer>
           </div>

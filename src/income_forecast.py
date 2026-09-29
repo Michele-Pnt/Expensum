@@ -22,6 +22,7 @@ class IncomeSourceForecast:
     remaining_amount: float
     scheduled_dates: tuple[date, ...]
     periodicity_confidence: float
+    cadence: str | None
 
 
 @dataclass(frozen=True)
@@ -29,6 +30,8 @@ class IncomeForecastResult:
     """Source forecasts and their aggregate amounts for one calendar month."""
 
     sources: tuple[IncomeSourceForecast, ...]
+    recurring_remaining_total: float = 0.0
+    irregular_adjustment: float = 0.0
 
     @property
     def full_month_total(self) -> float:
@@ -37,8 +40,8 @@ class IncomeForecastResult:
 
     @property
     def remaining_total(self) -> float:
-        """Return the sum of source-level residual income forecasts."""
-        return sum(source.remaining_amount for source in self.sources)
+        """Return pending recurrences plus the robust irregular adjustment."""
+        return self.recurring_remaining_total + self.irregular_adjustment
 
     def by_source(self, source_key: str) -> IncomeSourceForecast:
         """Return one source forecast, raising ``KeyError`` when it is absent."""
@@ -100,7 +103,21 @@ class IncomeForecastEngine:
             )
             for source_key, records in records_by_source.items()
         ]
-        return IncomeForecastResult(tuple(sorted(forecasts, key=lambda item: item.source_key)))
+        recurring_remaining_total = sum(
+            source.remaining_amount for source in forecasts if source.cadence is not None
+        )
+        irregular_adjustment = self._irregular_adjustment(
+            records_by_source,
+            forecasts,
+            month_start=month_start,
+            month_end=month_end,
+            as_of=as_of,
+        )
+        return IncomeForecastResult(
+            tuple(sorted(forecasts, key=lambda item: item.source_key)),
+            recurring_remaining_total=recurring_remaining_total,
+            irregular_adjustment=irregular_adjustment,
+        )
 
     @staticmethod
     def _parse_record(income: Mapping[str, object]) -> _IncomeRecord | None:
@@ -125,7 +142,7 @@ class IncomeForecastEngine:
 
     @staticmethod
     def _source_key(income: Mapping[str, object]) -> str:
-        name = _normalized_text(income.get("name"), fallback="entrata")
+        name = _normalized_source_name(income.get("name"), fallback="entrata")
         category_value = income.get("income_category")
         if isinstance(category_value, Mapping):
             category_value = category_value.get("name")
@@ -144,7 +161,10 @@ class IncomeForecastEngine:
         as_of: date,
     ) -> IncomeSourceForecast:
         historical_mean = self._historical_mean(records, as_of)
-        cadence = self._infer_cadence(records)
+        recurrence_records = [
+            record for record in records if record.income_date < month_start
+        ]
+        cadence = self._infer_cadence(recurrence_records)
         recorded_amount = sum(
             record.amount
             for record in records
@@ -156,16 +176,17 @@ class IncomeForecastEngine:
                 source_key=source_key,
                 full_month_amount=historical_mean,
                 recorded_month_amount=recorded_amount,
-                remaining_amount=max(0.0, historical_mean - recorded_amount),
+                remaining_amount=0.0,
                 scheduled_dates=(),
                 periodicity_confidence=0.0,
+                cadence=None,
             )
 
-        recent_records = records[-3:]
+        recent_records = recurrence_records[-3:]
         scheduled_amount = float(median(record.amount for record in recent_records))
-        confidence = self._confidence(records, recent_records)
+        confidence = self._confidence(recurrence_records, recent_records)
         occurrences = self._occurrences_in_month(
-            anchor=records[-1].income_date,
+            anchor=recurrence_records[-1].income_date,
             cadence=cadence,
             month_start=month_start,
             month_end=month_end,
@@ -175,8 +196,19 @@ class IncomeForecastEngine:
         for occurrence in occurrences:
             if occurrence >= as_of:
                 effective_scheduled_amount += scheduled_amount
-                pending_dates.append(occurrence)
-            elif self._has_matching_record(records, occurrence, cadence):
+                if not self._has_matching_record(
+                    records,
+                    occurrence,
+                    cadence,
+                    scheduled_amount,
+                ):
+                    pending_dates.append(occurrence)
+            elif self._has_matching_record(
+                records,
+                occurrence,
+                cadence,
+                scheduled_amount,
+            ):
                 effective_scheduled_amount += scheduled_amount
 
         full_month_amount = (
@@ -187,10 +219,39 @@ class IncomeForecastEngine:
             source_key=source_key,
             full_month_amount=full_month_amount,
             recorded_month_amount=recorded_amount,
-            remaining_amount=max(0.0, full_month_amount - recorded_amount),
+            remaining_amount=scheduled_amount * len(pending_dates),
             scheduled_dates=tuple(pending_dates),
             periodicity_confidence=confidence,
+            cadence=cadence,
         )
+
+    def _irregular_adjustment(
+        self,
+        records_by_source: Mapping[str, Sequence[_IncomeRecord]],
+        forecasts: Sequence[IncomeSourceForecast],
+        *,
+        month_start: date,
+        month_end: date,
+        as_of: date,
+    ) -> float:
+        """Estimate future irregular income from the median of six monthly totals."""
+        if not month_start <= as_of <= month_end:
+            return 0.0
+
+        irregular_sources = {
+            source.source_key for source in forecasts if source.cadence is None
+        }
+        history_months = _previous_months(month_start, self.MONTHS_LOOKBACK)
+        monthly_totals = {month: 0.0 for month in history_months}
+        for source_key in irregular_sources:
+            for record in records_by_source[source_key]:
+                month_key = (record.income_date.year, record.income_date.month)
+                if month_key in monthly_totals:
+                    monthly_totals[month_key] += record.amount
+
+        typical_month = float(median(monthly_totals.values()))
+        remaining_days = max((month_end - as_of).days, 0)
+        return typical_month / 30.0 * remaining_days
 
     def _historical_mean(self, records: Sequence[_IncomeRecord], month_start: date) -> float:
         months = _previous_months(month_start, self.MONTHS_LOOKBACK)
@@ -258,11 +319,16 @@ class IncomeForecastEngine:
 
     @staticmethod
     def _has_matching_record(
-        records: Sequence[_IncomeRecord], occurrence: date, cadence: str
+        records: Sequence[_IncomeRecord],
+        occurrence: date,
+        cadence: str,
+        scheduled_amount: float,
     ) -> bool:
+        """Return whether a compatible amount was recorded near one occurrence."""
         tolerance_days = 1 if cadence in {"weekly", "biweekly"} else 3
         return any(
             abs((record.income_date - occurrence).days) <= tolerance_days
+            and abs(record.amount - scheduled_amount) / scheduled_amount <= 0.10
             for record in records
         )
 
@@ -274,6 +340,28 @@ def _normalized_text(value: object, *, fallback: str) -> str:
     normalized = unicodedata.normalize("NFKD", value)
     without_marks = "".join(char for char in normalized if not unicodedata.combining(char))
     return re.sub(r"\s+", " ", without_marks.strip().casefold())
+
+
+_CALENDAR_NAME_TOKENS = {
+    "gennaio", "febbraio", "marzo", "aprile", "maggio", "giugno",
+    "luglio", "agosto", "settembre", "ottobre", "novembre", "dicembre",
+    "january", "february", "march", "april", "may", "june", "july",
+    "august", "september", "october", "november", "december",
+}
+
+
+def _normalized_source_name(value: object, *, fallback: str) -> str:
+    """Normalize a source label while ignoring variable calendar suffixes."""
+    normalized = _normalized_text(value, fallback=fallback)
+    normalized = re.sub(r"\b(?:0?[1-9]|1[0-2])[/.-](?:\d{2}|\d{4})\b", " ", normalized)
+    tokens = [
+        token
+        for token in normalized.split()
+        if token not in _CALENDAR_NAME_TOKENS and not re.fullmatch(r"20\d{2}", token)
+    ]
+    while tokens and tokens[-1] in {"di", "del", "della"}:
+        tokens.pop()
+    return " ".join(tokens) or fallback
 
 
 def _previous_months(month_start: date, count: int) -> tuple[tuple[int, int], ...]:
