@@ -3,16 +3,145 @@ from datetime import date, datetime, timedelta
 from src.user_store import (
     User, UserStore, DailyMetrics, Feedback, OAuthSession, PlanChange, UserPlan, ChatMessage,
     LlmUsageEvent, LlmTokenReservation, DatabaseSchema, AuditLog, DataBreach,
-    TrialLifecycleEvent, TallyLead, ReferralReward,
+    TrialLifecycleEvent, TallyLead, ReferralReward, AuthToken, UserProfile, UserProfileGoal,
+    ConsentEvent, MarketingSyncTask,
 )
 from src.storage.models import (
     Expense, Income, Account, UserCategory, UserCategoryNotionLink,
     Subscription, SavedReport, SavingsGoal, SavingsGoalEvaluation, SubscriptionCandidate,
-    UserIncomeCategory, UserIncomeCategoryNotionLink,
+    UserIncomeCategory, UserIncomeCategoryNotionLink, RecurringIncomeRule,
+    AiImprovementSample,
 )
 import src.storage.models  # registra UserCategory e tabelle storage nella Base condivisa
 
 pytestmark = pytest.mark.integration
+
+
+def test_delete_user_completely_removes_new_registration_and_quality_data(mock_db_session):
+    """GDPR deletion removes every new per-user row before deleting the account."""
+    store = mock_db_session
+    chat_id = "delete_self_service"
+    store.add_user(chat_id=chat_id, storage_backend="postgres")
+    with store.Session() as session:
+        account = Account(user_id=chat_id, name="Conto")
+        session.add(account)
+        session.flush()
+        consent = ConsentEvent(
+            user_id=chat_id,
+            consent_type="algorithm_improvement",
+            granted=True,
+            version="2026-10-01",
+            source="test",
+        )
+        session.add_all([
+            AuthToken(
+                user_id=chat_id,
+                token_digest="digest-delete",
+                purpose="email_verification",
+                expires_at=datetime.utcnow() + timedelta(hours=1),
+            ),
+            UserProfile(user_id=chat_id, has_job=False),
+            UserProfileGoal(user_id=chat_id, goal_code="budget", priority_order=1),
+            consent,
+            RecurringIncomeRule(
+                user_id=chat_id,
+                name="Stipendio",
+                amount=1800,
+                cadence="monthly",
+                payday_day=27,
+                next_due_date=date(2026, 10, 27),
+                account_id=account.id,
+            ),
+        ])
+        session.flush()
+        session.add(
+            MarketingSyncTask(
+                user_id=chat_id,
+                consent_event_id=consent.id,
+                desired_state="subscribed",
+                next_retry_at=datetime.utcnow(),
+            )
+        )
+        session.add(
+            AiImprovementSample(
+                user_id=chat_id,
+                input_method="text",
+                proposed_fields_json={"category_id": 1},
+                final_fields_json={"category_id": 2},
+                changed_fields_json={"category_id": True},
+                model_provider="test",
+                model_name="test-model",
+                consent_event_id=consent.id,
+                expires_at=datetime.utcnow() + timedelta(days=90),
+            )
+        )
+        session.commit()
+
+    assert store.delete_user_completely(chat_id) == "postgres"
+    with store.Session() as session:
+        assert session.query(User).filter_by(chat_id=chat_id).count() == 0
+        assert session.query(AuthToken).filter_by(user_id=chat_id).count() == 0
+        assert session.query(UserProfile).filter_by(user_id=chat_id).count() == 0
+        assert session.query(ConsentEvent).filter_by(user_id=chat_id).count() == 0
+        assert session.query(MarketingSyncTask).filter_by(user_id=chat_id).count() == 0
+        assert session.query(RecurringIncomeRule).filter_by(user_id=chat_id).count() == 0
+        assert session.query(AiImprovementSample).filter_by(user_id=chat_id).count() == 0
+
+
+def test_reassign_user_chat_id_moves_new_per_user_rows(mock_db_session):
+    """Chat-id reassignment keeps registration and recurring data attached."""
+    store = mock_db_session
+    store.add_user(chat_id="old_chat", storage_backend="postgres")
+    with store.Session() as session:
+        account = Account(user_id="old_chat", name="Conto")
+        session.add(account)
+        session.flush()
+        consent = ConsentEvent(
+            user_id="old_chat",
+            consent_type="algorithm_improvement",
+            granted=True,
+            version="2026-10-01",
+            source="test",
+        )
+        session.add_all([
+            AuthToken(
+                user_id="old_chat",
+                token_digest="digest-reassign",
+                purpose="password_reset",
+                expires_at=datetime.utcnow() + timedelta(minutes=30),
+            ),
+            UserProfile(user_id="old_chat", has_job=True),
+            UserProfileGoal(user_id="old_chat", goal_code="budget", priority_order=1),
+            consent,
+            RecurringIncomeRule(
+                user_id="old_chat",
+                name="Stipendio",
+                amount=1800,
+                cadence="monthly",
+                payday_day=27,
+                next_due_date=date(2026, 10, 27),
+                account_id=account.id,
+            ),
+        ])
+        session.flush()
+        session.add(
+            MarketingSyncTask(
+                user_id="old_chat",
+                consent_event_id=consent.id,
+                desired_state="subscribed",
+                next_retry_at=datetime.utcnow(),
+            )
+        )
+        session.commit()
+
+    assert store.reassign_user_chat_id("old_chat", "new_chat") is True
+    with store.Session() as session:
+        assert session.query(UserProfile).filter_by(user_id="new_chat").count() == 1
+        assert session.query(UserProfileGoal).filter_by(user_id="new_chat").count() == 1
+        assert session.query(AuthToken).filter_by(user_id="new_chat").count() == 1
+        assert session.query(ConsentEvent).filter_by(user_id="new_chat").count() == 1
+        assert session.query(MarketingSyncTask).filter_by(user_id="new_chat").count() == 1
+        assert session.query(RecurringIncomeRule).filter_by(user_id="new_chat").count() == 1
 
 def test_add_and_get_user(mock_db_session):
     store = mock_db_session

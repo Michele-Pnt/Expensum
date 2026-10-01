@@ -19,7 +19,7 @@ from sqlalchemy import (
     text,
 )
 
-from src.user_store import Base
+from src.user_store import Base, EncryptedString
 
 
 # Modelli ORM (le tabelle)
@@ -202,7 +202,69 @@ class Income(Base):
     # Compatibility release: authoritative relationship, while income_type is
     # dual-written for old clients and the existing Notion select.
     income_category_id = Column(Integer, ForeignKey("user_income_categories.id"), nullable=True)
+    source_rule_id = Column(Integer, ForeignKey("recurring_income_rules.id"), nullable=True)
+    scheduled_for = Column(Date, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
+
+    __table_args__ = (
+        Index(
+            "uq_incomes_source_rule_scheduled",
+            "source_rule_id",
+            "scheduled_for",
+            unique=True,
+            sqlite_where=text("source_rule_id IS NOT NULL AND scheduled_for IS NOT NULL"),
+            postgresql_where=text("source_rule_id IS NOT NULL AND scheduled_for IS NOT NULL"),
+        ),
+    )
+
+
+class RecurringIncomeRule(Base):
+    """A user-owned rule from which due realized incomes are materialized."""
+
+    __tablename__ = "recurring_income_rules"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(String, ForeignKey("users.chat_id"), nullable=False)
+    name = Column(String, nullable=False)
+    amount = Column(Numeric(12, 2), nullable=False)
+    cadence = Column(String(16), nullable=False)
+    payday_day = Column(Integer, nullable=False)
+    next_due_date = Column(Date, nullable=False)
+    account_id = Column(Integer, ForeignKey("accounts.id"), nullable=False)
+    income_category_id = Column(Integer, ForeignKey("user_income_categories.id"), nullable=True)
+    active = Column(Boolean, nullable=False, default=True, server_default=text("true"))
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    updated_at = Column(
+        DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow
+    )
+    deactivated_at = Column(DateTime, nullable=True)
+
+    __table_args__ = (
+        Index("ix_recurring_income_rules_user_active", "user_id", "active"),
+    )
+
+
+class AiImprovementSample(Base):
+    """Consent-bound structured AI quality signal without raw user input."""
+
+    __tablename__ = "ai_improvement_samples"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(String, ForeignKey("users.chat_id"), nullable=False)
+    input_method = Column(String(16), nullable=False)
+    proposed_fields_json = Column(JSON, nullable=False)
+    final_fields_json = Column(JSON, nullable=False)
+    changed_fields_json = Column(JSON, nullable=False)
+    model_provider = Column(String(64), nullable=False)
+    model_name = Column(String(128), nullable=False)
+    consent_event_id = Column(Integer, ForeignKey("consent_events.id"), nullable=False)
+    ocr_text_encrypted = Column(EncryptedString, nullable=True)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    expires_at = Column(DateTime, nullable=False)
+
+    __table_args__ = (
+        Index("ix_ai_improvement_samples_user_created", "user_id", "created_at"),
+    )
 
 
 class Account(Base):

@@ -233,6 +233,17 @@ class User(Base):
     # Autenticazione email+password
     email = Column(String, nullable=True, unique=True)
     password_hash = Column(String, nullable=True)
+    email_verified_at = Column(DateTime, nullable=True)
+    registration_status = Column(
+        String(32), nullable=False, default="active", server_default="active"
+    )
+    registration_source = Column(
+        String(32), nullable=False, default="telegram", server_default="telegram"
+    )
+    beta_slot_reserved_until = Column(DateTime, nullable=True)
+    onboarding_profile_completed_at = Column(DateTime, nullable=True)
+    referral_code = Column(String, nullable=True, unique=True, index=True)
+    referred_by_code = Column(String, nullable=True, index=True)
 
     # Versione della sessione: incrementata per invalidare tutte le sessioni
     # attive dell'utente (cambio password, "esci da tutti i dispositivi"). Il
@@ -283,6 +294,114 @@ class User(Base):
 
     def __repr__(self):
         return f"<User(chat_id={self.chat_id}, username='{self.username}')>"
+
+
+class RegistrationCapacity(Base):
+    """Singleton row controlling the number of beta accounts and reservations."""
+
+    __tablename__ = "registration_capacity"
+
+    id = Column(Integer, primary_key=True)
+    max_accounts = Column(Integer, nullable=False, default=50, server_default="50")
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    updated_at = Column(
+        DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow
+    )
+
+
+class AuthToken(Base):
+    """One-time email verification or password-reset token digest."""
+
+    __tablename__ = "auth_tokens"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(String, ForeignKey("users.chat_id"), nullable=False)
+    token_digest = Column(String(128), nullable=False, unique=True)
+    purpose = Column(String(32), nullable=False)
+    expires_at = Column(DateTime, nullable=False)
+    used_at = Column(DateTime, nullable=True)
+    invalidated_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+    __table_args__ = (
+        Index("ix_auth_tokens_user_purpose", "user_id", "purpose"),
+    )
+
+
+class UserProfile(Base):
+    """Optional progressive onboarding profile, separated from credentials."""
+
+    __tablename__ = "user_profiles"
+
+    user_id = Column(String, ForeignKey("users.chat_id"), primary_key=True)
+    household_type = Column(String(32), nullable=True)
+    has_job = Column(Boolean, nullable=True)
+    financial_experience = Column(String(32), nullable=True)
+    report_detail_preference = Column(String(32), nullable=True)
+    acquisition_source = Column(String(64), nullable=True)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    updated_at = Column(
+        DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow
+    )
+
+
+class UserProfileGoal(Base):
+    """Ordered financial goal selected during progressive onboarding."""
+
+    __tablename__ = "user_profile_goals"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(String, ForeignKey("users.chat_id"), nullable=False)
+    goal_code = Column(String(64), nullable=False)
+    priority_order = Column(Integer, nullable=False)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+    __table_args__ = (
+        UniqueConstraint("user_id", "goal_code", name="uq_user_profile_goal_code"),
+        UniqueConstraint("user_id", "priority_order", name="uq_user_profile_goal_order"),
+        Index("ix_user_profile_goals_user_id", "user_id"),
+    )
+
+
+class ConsentEvent(Base):
+    """Append-only record of a mandatory or optional consent state change."""
+
+    __tablename__ = "consent_events"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(String, ForeignKey("users.chat_id"), nullable=False)
+    consent_type = Column(String(64), nullable=False)
+    granted = Column(Boolean, nullable=False)
+    version = Column(String(64), nullable=False)
+    source = Column(String(32), nullable=False)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+    __table_args__ = (
+        Index("ix_consent_events_user_type_created", "user_id", "consent_type", "created_at"),
+    )
+
+
+class MarketingSyncTask(Base):
+    """Retryable desired state for a user's Brevo marketing-list membership."""
+
+    __tablename__ = "marketing_sync_tasks"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(String, ForeignKey("users.chat_id"), nullable=False)
+    consent_event_id = Column(Integer, ForeignKey("consent_events.id"), nullable=False)
+    desired_state = Column(String(16), nullable=False)
+    status = Column(String(16), nullable=False, default="pending", server_default="pending")
+    attempt_count = Column(Integer, nullable=False, default=0, server_default="0")
+    next_retry_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    last_error_code = Column(String(64), nullable=True)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    updated_at = Column(
+        DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow
+    )
+
+    __table_args__ = (
+        Index("ix_marketing_sync_tasks_pending", "status", "next_retry_at"),
+    )
 
 # 3. TABELLA METRICHE AI GIORNALIERE
 class DailyMetrics(Base):
@@ -1716,6 +1835,7 @@ class UserStore(LedgerRepository, RetentionRepository):
             CategoryCandidate, UserIncomeCategory, UserIncomeCategoryNotionLink,
             IncomeCategoryNotionSyncTask, SavedReport, SavingsGoal, SavingsGoalEvaluation,
             Loan, LoanMonthlyCharge, MortgageSimulation, Notification,
+            RecurringIncomeRule, AiImprovementSample,
         )
 
         old_chat_id = str(old_chat_id)
@@ -1794,6 +1914,21 @@ class UserStore(LedgerRepository, RetentionRepository):
                     session.query(Feedback).filter(Feedback.chat_id == new_chat_id).delete()
                     session.query(DatabaseSchema).filter(DatabaseSchema.chat_id == new_chat_id).delete()
                     session.query(OAuthSession).filter(OAuthSession.chat_id == new_chat_id).delete()
+                    session.query(MarketingSyncTask).filter(
+                        MarketingSyncTask.user_id == new_chat_id
+                    ).delete()
+                    session.query(AiImprovementSample).filter(
+                        AiImprovementSample.user_id == new_chat_id
+                    ).delete()
+                    session.query(UserProfileGoal).filter(
+                        UserProfileGoal.user_id == new_chat_id
+                    ).delete()
+                    session.query(AuthToken).filter(AuthToken.user_id == new_chat_id).delete()
+                    session.query(RecurringIncomeRule).filter(
+                        RecurringIncomeRule.user_id == new_chat_id
+                    ).delete()
+                    session.query(UserProfile).filter(UserProfile.user_id == new_chat_id).delete()
+                    session.query(ConsentEvent).filter(ConsentEvent.user_id == new_chat_id).delete()
                     session.query(UserPlan).filter(UserPlan.chat_id == new_chat_id).delete()
                     session.query(PlanChange).filter(PlanChange.chat_id == new_chat_id).delete()
                     session.query(TrialLifecycleEvent).filter(TrialLifecycleEvent.chat_id == new_chat_id).delete()
@@ -1850,6 +1985,21 @@ class UserStore(LedgerRepository, RetentionRepository):
             session.query(UserAchievement).filter(UserAchievement.chat_id == old_chat_id).update({"chat_id": new_chat_id})
             session.query(UserGamificationProfile).filter(UserGamificationProfile.chat_id == old_chat_id).update({"chat_id": new_chat_id})
             session.query(ReportEvent).filter(ReportEvent.chat_id == old_chat_id).update({"chat_id": new_chat_id})
+            session.query(AuthToken).filter(AuthToken.user_id == old_chat_id).update(
+                {"user_id": new_chat_id}
+            )
+            session.query(UserProfile).filter(UserProfile.user_id == old_chat_id).update(
+                {"user_id": new_chat_id}
+            )
+            session.query(UserProfileGoal).filter(UserProfileGoal.user_id == old_chat_id).update(
+                {"user_id": new_chat_id}
+            )
+            session.query(ConsentEvent).filter(ConsentEvent.user_id == old_chat_id).update(
+                {"user_id": new_chat_id}
+            )
+            session.query(MarketingSyncTask).filter(
+                MarketingSyncTask.user_id == old_chat_id
+            ).update({"user_id": new_chat_id})
 
             # Tabelle finanziarie
             session.query(Expense).filter(Expense.user_id == old_chat_id).update({"user_id": new_chat_id})
@@ -1874,6 +2024,12 @@ class UserStore(LedgerRepository, RetentionRepository):
             session.query(LoanMonthlyCharge).filter(LoanMonthlyCharge.user_id == old_chat_id).update({"user_id": new_chat_id})
             session.query(MortgageSimulation).filter(MortgageSimulation.user_id == old_chat_id).update({"user_id": new_chat_id})
             session.query(Notification).filter(Notification.user_id == old_chat_id).update({"user_id": new_chat_id})
+            session.query(RecurringIncomeRule).filter(
+                RecurringIncomeRule.user_id == old_chat_id
+            ).update({"user_id": new_chat_id})
+            session.query(AiImprovementSample).filter(
+                AiImprovementSample.user_id == old_chat_id
+            ).update({"user_id": new_chat_id})
 
             # Ora nessuna FK referenzia piu' old_chat_id: la vecchia riga users si puo' cancellare
             session.query(User).filter(User.chat_id == old_chat_id).delete()
@@ -3082,6 +3238,7 @@ class UserStore(LedgerRepository, RetentionRepository):
             UserCategoryNotionLink, UserIncomeCategory, UserIncomeCategoryNotionLink,
             IncomeCategoryNotionSyncTask,
             SavedReport, SavingsGoal, SavingsGoalEvaluation, Notification,
+            RecurringIncomeRule, AiImprovementSample,
         )
 
         chat_id = str(chat_id)
@@ -3177,6 +3334,21 @@ class UserStore(LedgerRepository, RetentionRepository):
             session.query(UserIncomeCategory).filter(UserIncomeCategory.user_id == chat_id).delete()
             session.query(SavedReport).filter(SavedReport.user_id == chat_id).delete()
             session.query(ChatMessage).filter(ChatMessage.chat_id == chat_id).delete()
+            session.query(MarketingSyncTask).filter(
+                MarketingSyncTask.user_id == chat_id
+            ).delete()
+            session.query(AiImprovementSample).filter(
+                AiImprovementSample.user_id == chat_id
+            ).delete()
+            session.query(UserProfileGoal).filter(
+                UserProfileGoal.user_id == chat_id
+            ).delete()
+            session.query(AuthToken).filter(AuthToken.user_id == chat_id).delete()
+            session.query(RecurringIncomeRule).filter(
+                RecurringIncomeRule.user_id == chat_id
+            ).delete()
+            session.query(UserProfile).filter(UserProfile.user_id == chat_id).delete()
+            session.query(ConsentEvent).filter(ConsentEvent.user_id == chat_id).delete()
             # Ledger token
             session.query(LlmUsageEvent).filter(LlmUsageEvent.chat_id == chat_id).delete()
             session.query(LlmTokenReservation).filter(LlmTokenReservation.chat_id == chat_id).delete()
