@@ -224,6 +224,16 @@ def users_list():
     return render_template("users.html", users=users)
 
 
+@admin_bp.route("/admin/user-insights", strict_slashes=False)
+@_admin_required
+def user_insights():
+    """Actionable registration, consent and AI-quality aggregates."""
+    with _store().Session() as s:
+        access = admin_metrics.get_registration_access_metrics(s)
+        ai_quality = admin_metrics.get_ai_quality_metrics(s)
+    return render_template("user_insights.html", access=access, ai_quality=ai_quality)
+
+
 @admin_bp.route("/admin/user/<chat_id>", strict_slashes=False)
 @_admin_required
 def user_detail(chat_id: str):

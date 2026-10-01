@@ -27,6 +27,26 @@ pytestmark = pytest.mark.integration
 NOW = datetime(2026, 7, 14, 12, 0, 0)
 
 
+def test_registration_access_metrics_does_not_expose_email(mock_db_session):
+    """Registration capacity aggregates contain no user identifiers."""
+    from src.user_store import RegistrationCapacity
+
+    with mock_db_session.Session() as session:
+        session.add(RegistrationCapacity(id=1, max_accounts=50))
+        session.commit()
+        payload = m.get_registration_access_metrics(session)
+    assert payload["capacity"]["max"] == 50
+    assert "email" not in str(payload)
+
+
+def test_ai_quality_metrics_omit_sample_content(mock_db_session):
+    """AI dashboard metrics expose only aggregate dimensions."""
+    with mock_db_session.Session() as session:
+        payload = m.get_ai_quality_metrics(session)
+    assert "ocr_text" not in str(payload)
+    assert "proposed_fields_json" not in str(payload)
+
+
 def _seed(store):
     """Popola un dataset noto: 1 utente pro attivo con storico, 1 free nuovo."""
     with store.Session() as s:

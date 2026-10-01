@@ -39,8 +39,19 @@ from src.user_store import (
     TxEvent,
     User,
     UserPlan,
+    RegistrationCapacity,
+    UserProfile,
+    UserProfileGoal,
+    ConsentEvent,
+    MarketingSyncTask,
 )
-from src.storage.models import Expense, ExpenseLabelCluster, SubscriptionCandidate
+from src.storage.models import (
+    AiImprovementSample,
+    Expense,
+    ExpenseLabelCluster,
+    RecurringIncomeRule,
+    SubscriptionCandidate,
+)
 
 # Soglia storica del ledger token: coerente con la dashboard esistente, si
 # considerano solo gli eventi dal 2026-05-01 in avanti (prima i dati non erano
@@ -50,6 +61,49 @@ LEDGER_EPOCH = datetime(2026, 5, 1)
 # Prezzo del piano Pro usato per stimare l'MRR. Non è un dato di prodotto salvato
 # a DB: va impostato via env `PRO_PRICE_EUR` e aggiornato se cambia il listino.
 PRO_PRICE_EUR = float(os.getenv("PRO_PRICE_EUR", "4.99"))
+
+
+def get_registration_access_metrics(s: Session) -> dict[str, Any]:
+    """Return capacity and registration funnel aggregates without identifiers."""
+    capacity = s.query(RegistrationCapacity).filter_by(id=1).first()
+    max_accounts = capacity.max_accounts if capacity else 0
+    active = s.query(User).filter(User.registration_status == "active").count()
+    reserved = s.query(User).filter(
+        User.registration_status == "pending_verification"
+    ).count()
+    return {
+        "capacity": {
+            "max": max_accounts,
+            "occupied": active,
+            "reserved": reserved,
+            "remaining": max(0, max_accounts - active - reserved),
+        },
+        "funnel": {
+            "pending_verification": reserved,
+            "verified": active,
+            "onboarding_completed": s.query(User).filter(
+                User.onboarding_completed_at.isnot(None)
+            ).count(),
+        },
+    }
+
+
+def get_ai_quality_metrics(s: Session) -> dict[str, Any]:
+    """Return aggregate correction counts, never sample content or OCR."""
+    rows = s.query(
+        AiImprovementSample.input_method,
+        AiImprovementSample.model_provider,
+        func.count(AiImprovementSample.id),
+    ).group_by(
+        AiImprovementSample.input_method, AiImprovementSample.model_provider
+    ).all()
+    return {
+        "samples": [
+            {"input_method": method, "provider": provider, "count": int(count)}
+            for method, provider, count in rows
+        ],
+        "total": sum(int(count) for _, _, count in rows),
+    }
 
 # Operazioni LLM generate automaticamente dal sistema. La definizione è per
 # opt-out: una nuova operazione interattiva contribuisce alle metriche finché non

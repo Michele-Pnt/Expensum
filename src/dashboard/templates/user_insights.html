@@ -1,0 +1,20 @@
+{% extends "base.html" %}
+{% block content %}
+<h1 class="page-title">Insight utenti</h1>
+<div class="stats-grid">
+  <div class="stat-card glass-panel"><div class="stat-label">Posti beta occupati</div><div class="stat-value">{{ access.capacity.occupied }} / {{ access.capacity.max }}</div></div>
+  <div class="stat-card glass-panel"><div class="stat-label">Prenotazioni email</div><div class="stat-value">{{ access.capacity.reserved }}</div></div>
+  <div class="stat-card glass-panel"><div class="stat-label">Posti rimanenti</div><div class="stat-value">{{ access.capacity.remaining }}</div></div>
+  <div class="stat-card glass-panel"><div class="stat-label">Campioni AI consentiti</div><div class="stat-value">{{ ai_quality.total }}</div></div>
+</div>
+<div class="glass-panel" style="margin-top: 1.5rem; padding: 1.25rem">
+  <h2>Funnel registrazione</h2>
+  <p>Verificati: {{ access.funnel.verified }} · Onboarding completato: {{ access.funnel.onboarding_completed }}</p>
+</div>
+<div class="glass-panel" style="margin-top: 1.5rem; padding: 1.25rem">
+  <h2>Qualità AI</h2>
+  <table><thead><tr><th>Metodo</th><th>Provider</th><th>Campioni</th></tr></thead><tbody>
+  {% for row in ai_quality.samples %}<tr><td>{{ row.input_method }}</td><td>{{ row.provider }}</td><td>{{ row.count }}</td></tr>{% else %}<tr><td colspan="3">Nessun campione.</td></tr>{% endfor %}
+  </tbody></table>
+</div>
+{% endblock %}

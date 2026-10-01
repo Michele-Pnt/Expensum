@@ -27,6 +27,7 @@
                 <li><a href="{{ url_for('admin.referrals') }}" class="{% if request.endpoint == 'admin.referrals' %}active{% endif %}">🔗 Referral</a></li>
                 <li><a href="{{ url_for('admin.jobs_status') }}" class="{% if request.endpoint == 'admin.jobs_status' %}active{% endif %}">⏱️ Job</a></li>
                 <li><a href="{{ url_for('admin.users_list') }}" class="{% if request.endpoint == 'admin.users_list' %}active{% endif %}">👥 Utenti</a></li>
+                <li><a href="{{ url_for('admin.user_insights') }}" class="{% if request.endpoint == 'admin.user_insights' %}active{% endif %}">🧭 Insight utenti</a></li>
                 <li><a href="{{ url_for('admin.feedbacks_list') }}" class="{% if request.endpoint == 'admin.feedbacks_list' %}active{% endif %}">📧 Feedback</a></li>
                 <li><a href="{{ url_for('admin.logs_viewer') }}" class="{% if request.endpoint == 'admin.logs_viewer' %}active{% endif %}">💻 Log</a></li>
                 <li><a href="https://eu.posthog.com/project/186394/dashboard/835311" target="_blank" rel="noopener noreferrer">🦔 PostHog ↗</a></li>
