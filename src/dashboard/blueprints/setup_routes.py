@@ -33,6 +33,15 @@ setup_bp = Blueprint("setup", __name__)
 # anche auth_routes.py verrà estratto.
 TELEGRAM_REQUEST_TIMEOUT = 10
 
+ONBOARDING_GOALS = frozenset({
+    "cashflow_control", "budget", "emergency_fund", "savings_goal",
+    "debt_reduction", "increase_savings",
+})
+PROFILE_FIELDS = frozenset({
+    "household_type", "has_job", "financial_experience",
+    "report_detail_preference", "acquisition_source",
+})
+
 
 def _store():
     return current_app.config["STORE"]
@@ -1001,6 +1010,32 @@ def api_onboarding_step():
         return jsonify({"error": "step required"}), 400
     _store().save_onboarding_progress(chat_id, step, data)
     return jsonify({"status": "ok"})
+
+
+@setup_bp.route("/api/onboarding/profile", methods=["POST"])
+def api_onboarding_profile():
+    """Persist validated ordered goals and optional progressive profile data."""
+    chat_id, _ = _resolve_request_chat_id()
+    if not chat_id:
+        return jsonify({"error": "Unauthorized"}), 401
+    body = request.get_json(silent=True) or {}
+    raw_goals = body.get("goals")
+    if not isinstance(raw_goals, list) or not raw_goals:
+        return jsonify({"error": "At least one goal is required"}), 400
+    if len(raw_goals) > len(ONBOARDING_GOALS):
+        return jsonify({"error": "Too many goals"}), 400
+    goals = []
+    for index, item in enumerate(raw_goals, start=1):
+        if not isinstance(item, dict) or item.get("code") not in ONBOARDING_GOALS:
+            return jsonify({"error": "Invalid goal"}), 400
+        goals.append({"code": item["code"], "priority_order": index})
+    if len({item["code"] for item in goals}) != len(goals):
+        return jsonify({"error": "Duplicate goal"}), 400
+    profile = body.get("profile") or {}
+    if not isinstance(profile, dict) or set(profile) - PROFILE_FIELDS:
+        return jsonify({"error": "Invalid profile field"}), 400
+    _store().save_onboarding_profile(chat_id, goals, profile)
+    return jsonify({"status": "ok", "goals": goals})
 
 
 @setup_bp.route("/api/onboarding/generate-categories", methods=["POST"])

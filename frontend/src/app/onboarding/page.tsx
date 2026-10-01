@@ -15,6 +15,7 @@ import {
   Switch,
   FormControlLabel,
 } from "@mui/material";
+import { GOAL_CODES, toggleGoal } from "./onboardingModel";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -23,7 +24,50 @@ interface WizardState {
   currency: string;
   timezone: string;
   hobbies: string[];
+  goals: string[];
   notificationsEnabled: boolean;
+}
+
+const GOAL_LABELS: Record<string, string> = {
+  cashflow_control: "Avere maggiore controllo del mio flusso di denaro",
+  budget: "Rispettare un budget",
+  emergency_fund: "Costruire un fondo di emergenza",
+  savings_goal: "Risparmiare per un obiettivo",
+  debt_reduction: "Ridurre debiti e rate",
+  increase_savings: "Aumentare il risparmio",
+};
+
+function GoalsStep({
+  value,
+  onChange,
+  onNext,
+  onBack,
+}: {
+  value: string[];
+  onChange: (value: string[]) => void;
+  onNext: () => void;
+  onBack: () => void;
+}) {
+  return (
+    <StepWrapper title="Cosa vuoi ottenere?" required onNext={onNext} onBack={onBack} canNext={value.length > 0}>
+      <Typography variant="caption" sx={{ color: "var(--color-text-2)" }}>
+        Seleziona uno o più obiettivi. L&apos;ordine indica la priorità.
+      </Typography>
+      <Box sx={{ display: "flex", flexDirection: "column", gap: 1, mt: 2 }}>
+        {GOAL_CODES.map((code) => (
+          <ToggleButton
+            key={code}
+            value={code}
+            selected={value.includes(code)}
+            onChange={() => onChange(toggleGoal(value, code))}
+            sx={{ ...toggleBtnSx, textAlign: "left", justifyContent: "flex-start" }}
+          >
+            {value.includes(code) ? `${value.indexOf(code) + 1}. ` : ""}{GOAL_LABELS[code]}
+          </ToggleButton>
+        ))}
+      </Box>
+    </StepWrapper>
+  );
 }
 
 function detectLocaleDefaults(): { timezone: string; currency: string } {
@@ -459,14 +503,15 @@ const toggleBtnSx = {
 
 // ─── Step definitions ─────────────────────────────────────────────────────────
 // step 0 = welcome        (non conta nel progress)
-// step 1 = age_gate       (visible 1/5)
-// step 2 = language       (visible 2/5)
-// step 3 = lifestyle      (visible 3/5)
-// step 4 = notifications  (visible 4/5)
-// step 5 = confirm        (visible 5/5)
-// step 6 = aha-moment     (no progress bar — step finale)
+// step 1 = age_gate       (visible 1/6)
+// step 2 = language       (visible 2/6)
+// step 3 = goals          (visible 3/6)
+// step 4 = lifestyle      (visible 4/6)
+// step 5 = notifications  (visible 5/6)
+// step 6 = confirm        (visible 6/6)
+// step 7 = aha-moment     (no progress bar — step finale)
 
-const TOTAL_VISIBLE = 5;
+const TOTAL_VISIBLE = 6;
 
 // ─── Main wizard ──────────────────────────────────────────────────────────────
 
@@ -484,6 +529,7 @@ export default function OnboardingPage() {
     currency: detectedCurrency,
     timezone: detectedTz,
     hobbies: [],
+    goals: [],
     notificationsEnabled: true,
   });
 
@@ -554,6 +600,13 @@ export default function OnboardingPage() {
   const handleComplete = useCallback(async () => {
     setSubmitting(true);
     try {
+      await apiFetch("/api/onboarding/profile", {
+        method: "POST",
+        body: {
+          goals: state.goals.map((code, index) => ({ code, priority_order: index + 1 })),
+          profile: {},
+        },
+      });
       await apiFetch("/api/onboarding/complete", {
         method: "POST",
         body: {
@@ -680,6 +733,15 @@ export default function OnboardingPage() {
           )}
 
           {step === 3 && (
+            <GoalsStep
+              value={state.goals}
+              onChange={(goals) => update({ goals })}
+              onNext={() => goNext("goals", { goals: state.goals })}
+              onBack={goBack}
+            />
+          )}
+
+          {step === 4 && (
             <LifestyleStep
               value={state.hobbies}
               onChange={(v) => update({ hobbies: v })}
@@ -689,7 +751,7 @@ export default function OnboardingPage() {
             />
           )}
 
-          {step === 4 && (
+          {step === 5 && (
             <NotificationsStep
               enabled={state.notificationsEnabled}
               onEnabledChange={(v) => update({ notificationsEnabled: v })}
@@ -701,7 +763,7 @@ export default function OnboardingPage() {
             />
           )}
 
-          {step === 5 && (
+          {step === 6 && (
             <ConfirmStep
               state={state}
               onConfirm={handleComplete}
@@ -710,7 +772,7 @@ export default function OnboardingPage() {
             />
           )}
 
-          {step === 6 && <InviteStep onContinue={goToApp} />}
+          {step === 7 && <InviteStep onContinue={goToApp} />}
 
         </Box>
       </Box>

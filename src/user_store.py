@@ -1510,6 +1510,48 @@ class UserStore(LedgerRepository, RetentionRepository):
             user.onboarding_step = 'completed'
             session.commit()
 
+    def save_onboarding_profile(
+        self,
+        chat_id: str,
+        goals: list[dict[str, int]],
+        profile: dict[str, object] | None = None,
+    ) -> None:
+        """Atomically replace ordered goals and update optional profile fields."""
+        chat_id = str(chat_id)
+        with self.Session() as session:
+            user = session.query(User).filter(User.chat_id == chat_id).first()
+            if not user:
+                raise ValueError("User not found")
+            session.query(UserProfileGoal).filter(
+                UserProfileGoal.user_id == chat_id
+            ).delete(synchronize_session=False)
+            for item in goals:
+                session.add(UserProfileGoal(
+                    user_id=chat_id,
+                    goal_code=item["code"],
+                    priority_order=item["priority_order"],
+                ))
+            if profile is not None:
+                row = session.query(UserProfile).filter_by(user_id=chat_id).first()
+                if row is None:
+                    row = UserProfile(user_id=chat_id)
+                    session.add(row)
+                for field in (
+                    "household_type", "has_job", "financial_experience",
+                    "report_detail_preference", "acquisition_source",
+                ):
+                    if field in profile:
+                        setattr(row, field, profile[field])
+            session.commit()
+
+    def get_profile_goals(self, chat_id: str) -> list[str]:
+        """Return ordered financial goal codes for one user."""
+        with self.Session() as session:
+            rows = session.query(UserProfileGoal).filter(
+                UserProfileGoal.user_id == str(chat_id)
+            ).order_by(UserProfileGoal.priority_order).all()
+            return [row.goal_code for row in rows]
+
     def set_has_demo_data(self, chat_id: str, value: bool) -> None:
         """Imposta il flag has_demo_data per l'utente."""
         chat_id = str(chat_id)
