@@ -114,7 +114,14 @@ class FinancialStorage(ABC):
         ...
 
     @abstractmethod
-    def create_account(self, name: str, initial_balance: float = 0.0) -> dict:
+    def create_account(
+        self,
+        name: str,
+        initial_balance: float = 0.0,
+        *,
+        currency: str = "EUR",
+        account_type: str = "checking",
+    ) -> dict:
         """Crea un nuovo conto. Restituisce dict con almeno 'id' e 'name'."""
         ...
 

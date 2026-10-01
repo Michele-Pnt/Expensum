@@ -392,9 +392,18 @@ class NotionStorage(FinancialStorage):
     def fetch_accounts(self) -> list[dict]:
         return self._client.fetch_accounts()
 
-    def create_account(self, name: str, initial_balance: float = 0.0) -> dict:
+    def create_account(
+        self,
+        name: str,
+        initial_balance: float = 0.0,
+        *,
+        currency: str = "EUR",
+        account_type: str = "checking",
+    ) -> dict:
+        """Create a Notion account; unsupported metadata is intentionally ignored."""
         result = self._client.create_account(name, initial_amount=initial_balance)
-        return {"id": result["id"], "name": name}
+        return {"id": result["id"], "name": name, "currency": currency,
+                "account_type": account_type}
 
     def create_category(
         self, name: str, monthly_budget: float | None = None,

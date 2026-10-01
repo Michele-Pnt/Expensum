@@ -798,13 +798,20 @@ class PostgresStorage(FinancialStorage):
         self._commit()
         return result
 
-    def create_account(self, name: str, initial_balance: float = 0.0,
-                       account_type: str | None = None) -> dict:
+    def create_account(
+        self,
+        name: str,
+        initial_balance: float = 0.0,
+        *,
+        currency: str = "EUR",
+        account_type: str | None = "checking",
+    ) -> dict:
         """Crea un conto. `initial_balance` diventa `opening_balance`."""
         account = Account(
             user_id=self._user_id,
             name=name,
             opening_balance=initial_balance,
+            currency=currency,
             account_type=account_type,
         )
         self._session.add(account)

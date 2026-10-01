@@ -14,6 +14,7 @@ import {
   ToggleButtonGroup,
   Switch,
   FormControlLabel,
+  TextField,
 } from "@mui/material";
 import { GOAL_CODES, toggleGoal } from "./onboardingModel";
 
@@ -25,6 +26,10 @@ interface WizardState {
   timezone: string;
   hobbies: string[];
   goals: string[];
+  hasJob: boolean;
+  salaryAmount: string;
+  salaryAccountName: string;
+  salaryPaydayDay: string;
   notificationsEnabled: boolean;
 }
 
@@ -66,6 +71,32 @@ function GoalsStep({
           </ToggleButton>
         ))}
       </Box>
+    </StepWrapper>
+  );
+}
+
+function SalaryStep({ state, onChange, onNext, onBack, onSkip }: {
+  state: WizardState;
+  onChange: (value: Partial<WizardState>) => void;
+  onNext: () => void;
+  onBack: () => void;
+  onSkip: () => void;
+}) {
+  const valid = !state.hasJob || (
+    Number(state.salaryAmount) > 0 && state.salaryAccountName.trim() !== "" &&
+    Number(state.salaryPaydayDay) >= 1 && Number(state.salaryPaydayDay) <= 31
+  );
+  return (
+    <StepWrapper title="Hai un lavoro?" onNext={onNext} onBack={onBack} onSkip={onSkip} canNext={valid}>
+      <FormControlLabel
+        control={<Switch checked={state.hasJob} onChange={(event) => onChange({ hasJob: event.target.checked })} />}
+        label="Sì, ho un'entrata ricorrente"
+      />
+      {state.hasJob && <Box sx={{ display: "flex", flexDirection: "column", gap: 2, mt: 2 }}>
+        <TextField label="Importo netto" type="number" value={state.salaryAmount} onChange={(event) => onChange({ salaryAmount: event.target.value })} />
+        <TextField label="Conto di accredito" value={state.salaryAccountName} onChange={(event) => onChange({ salaryAccountName: event.target.value })} />
+        <TextField label="Giorno di accredito" type="number" inputProps={{ min: 1, max: 31 }} value={state.salaryPaydayDay} onChange={(event) => onChange({ salaryPaydayDay: event.target.value })} />
+      </Box>}
     </StepWrapper>
   );
 }
@@ -506,12 +537,13 @@ const toggleBtnSx = {
 // step 1 = age_gate       (visible 1/6)
 // step 2 = language       (visible 2/6)
 // step 3 = goals          (visible 3/6)
-// step 4 = lifestyle      (visible 4/6)
-// step 5 = notifications  (visible 5/6)
-// step 6 = confirm        (visible 6/6)
-// step 7 = aha-moment     (no progress bar — step finale)
+// step 4 = salary         (visible 4/7)
+// step 5 = lifestyle      (visible 5/7)
+// step 6 = notifications  (visible 6/7)
+// step 7 = confirm        (visible 7/7)
+// step 8 = aha-moment     (no progress bar — step finale)
 
-const TOTAL_VISIBLE = 6;
+const TOTAL_VISIBLE = 7;
 
 // ─── Main wizard ──────────────────────────────────────────────────────────────
 
@@ -530,6 +562,10 @@ export default function OnboardingPage() {
     timezone: detectedTz,
     hobbies: [],
     goals: [],
+    hasJob: false,
+    salaryAmount: "",
+    salaryAccountName: "",
+    salaryPaydayDay: "27",
     notificationsEnabled: true,
   });
 
@@ -607,6 +643,18 @@ export default function OnboardingPage() {
           profile: {},
         },
       });
+      if (state.hasJob) {
+        await apiFetch("/api/onboarding/income", {
+          method: "POST",
+          body: {
+            amount: Number(state.salaryAmount),
+            account_name: state.salaryAccountName,
+            payday_day: Number(state.salaryPaydayDay),
+            cadence: "monthly",
+            income_name: "Stipendio",
+          },
+        });
+      }
       await apiFetch("/api/onboarding/complete", {
         method: "POST",
         body: {
@@ -630,7 +678,7 @@ export default function OnboardingPage() {
       // Non reindirizza subito: mostra la schermata di condivisione referral
       // (picco di entusiasmo appena finito il form, prima che si distragga).
       setAnimDir("forward");
-      setStep(6);
+      setStep(8);
       setSubmitting(false);
     } catch {
       setSubmitting(false);
@@ -742,6 +790,16 @@ export default function OnboardingPage() {
           )}
 
           {step === 4 && (
+            <SalaryStep
+              state={state}
+              onChange={update}
+              onNext={() => goNext("salary", { has_job: state.hasJob })}
+              onBack={goBack}
+              onSkip={() => goNext("salary_skipped")}
+            />
+          )}
+
+          {step === 5 && (
             <LifestyleStep
               value={state.hobbies}
               onChange={(v) => update({ hobbies: v })}
@@ -751,7 +809,7 @@ export default function OnboardingPage() {
             />
           )}
 
-          {step === 5 && (
+          {step === 6 && (
             <NotificationsStep
               enabled={state.notificationsEnabled}
               onEnabledChange={(v) => update({ notificationsEnabled: v })}
@@ -763,7 +821,7 @@ export default function OnboardingPage() {
             />
           )}
 
-          {step === 6 && (
+          {step === 7 && (
             <ConfirmStep
               state={state}
               onConfirm={handleComplete}
@@ -772,7 +830,7 @@ export default function OnboardingPage() {
             />
           )}
 
-          {step === 7 && <InviteStep onContinue={goToApp} />}
+          {step === 8 && <InviteStep onContinue={goToApp} />}
 
         </Box>
       </Box>

@@ -20,6 +20,7 @@ from src.dashboard.auth import _get_user_by_chat_id, _resolve_request_chat_id
 from src.dashboard.blueprints.space_routes import _is_fallback_category
 from src.dashboard.budget_validation import _parse_money, _validate_category_budgets_with_general_budget
 from src.notion_client import NotionFinanceClient
+from src.recurring_income_service import RecurringIncomeService
 from src.storage.notion_storage import NotionStorage
 from src.storage.postgres_storage import PostgresStorage
 from src.workspace_bootstrapper import bootstrap_lifestyle_categories
@@ -1036,6 +1037,45 @@ def api_onboarding_profile():
         return jsonify({"error": "Invalid profile field"}), 400
     _store().save_onboarding_profile(chat_id, goals, profile)
     return jsonify({"status": "ok", "goals": goals})
+
+
+@setup_bp.route("/api/onboarding/income", methods=["POST"])
+def api_onboarding_income():
+    """Configure an optional recurring salary and its destination account."""
+    store = _store()
+    chat_id, _ = _resolve_request_chat_id()
+    if not chat_id:
+        return jsonify({"error": "Unauthorized"}), 401
+    body = request.get_json(silent=True) or {}
+    try:
+        amount = float(body["amount"])
+        payday_day = int(body["payday_day"])
+        account_name = str(body["account_name"]).strip()
+        income_name = str(body.get("income_name") or "Stipendio").strip()
+        cadence = str(body.get("cadence") or "monthly")
+    except (KeyError, TypeError, ValueError):
+        return jsonify({"error": "Invalid recurring income payload"}), 400
+    user = _get_user_by_chat_id(chat_id)
+    if not user or user.storage_backend != "postgres":
+        return jsonify({"error": "Recurring income requires the internal storage"}), 400
+    db_session = store.Session()
+    try:
+        storage = PostgresStorage(session=db_session, user_id=chat_id)
+        result = RecurringIncomeService(
+            store, storage, chat_id, currency=user.currency or "EUR"
+        ).configure_salary(
+            account_name=account_name,
+            income_name=income_name,
+            amount=amount,
+            cadence=cadence,
+            payday_day=payday_day,
+        )
+        return jsonify({"status": "ok", "account_id": result.account_id,
+                        "rule_id": result.rule_id})
+    except (ValueError, KeyError) as exc:
+        return jsonify({"error": str(exc)}), 400
+    finally:
+        db_session.close()
 
 
 @setup_bp.route("/api/onboarding/generate-categories", methods=["POST"])
