@@ -61,6 +61,12 @@ class ConsentService:
                     )
                 )
             session.commit()
+            if not granted and consent_type in {
+                "algorithm_improvement", *self.SOURCE_CONSENTS
+            }:
+                from src.ai_improvement import delete_user_quality_samples
+
+                delete_user_quality_samples(self.store, user_id)
             return event
 
     def record_batch(
