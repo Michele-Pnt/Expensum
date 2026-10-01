@@ -18,6 +18,7 @@ from sqlalchemy import func
 
 from config import Config
 from src import analytics
+from src.ai_improvement import capture_quality_sample
 from src.dashboard.auth import _get_user_by_chat_id, _resolve_request_chat_id
 from src.dashboard.blueprints.goals_routes import _complete_reached_goals_safe
 from src.dashboard.storage import (
@@ -806,6 +807,21 @@ def api_chat_confirm():
             chat_id, parsed_type, input_method, "confirmed", "webapp",
             reason="category_corrected" if category_was_corrected else None,
         ) or {}
+        try:
+            if input_method in {"text", "voice", "ocr"}:
+                capture_quality_sample(
+                    store, chat_id, input_method, data, data,
+                    {"provider": "mistral", "model": "small"},
+                )
+        except Exception as exc:
+            current_app.logger.warning(
+                "ai_quality_capture_failed",
+                extra={
+                    "domain": "usage",
+                    "event": "ai_quality_capture_failed",
+                    "meta": {"input_method": input_method, "error": type(exc).__name__},
+                },
+            )
         # Le chiavi della streak ci sono solo a ciclo completato; gli achievement
         # non si notificano da qui, li mostra la webapp leggendo `unseen_unlocks`.
         if rewards.get("cycle_completed_days"):

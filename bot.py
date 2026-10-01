@@ -83,6 +83,7 @@ from src import analytics
 from src import brevo_client
 from src.marketing_sync import process_marketing_sync_tasks
 from src.recurring_income_service import process_due_recurring_incomes
+from src.ai_improvement import capture_quality_sample
 from src.unsubscribe_token import make_unsubscribe_token
 from src.gamification import engine as gamification
 from src.gamification.notifications import build_messages as build_achievement_messages
@@ -2430,6 +2431,7 @@ async def _save_to_notion(query, context, chat_id: str, data: dict | None, accou
             chat_id, tx_type, input_method, "confirmed", "telegram",
             reason="category_corrected" if data.get("category_was_corrected") else None,
         ) or {}
+        _capture_ai_quality_best_effort(chat_id, input_method, data, data)
         # Il dict contiene le chiavi della streak solo a ciclo completato: testarne
         # la verità non basta più, adesso può contenere solo achievement.
         if rewards.get("cycle_completed_days"):
@@ -3822,12 +3824,13 @@ def _nightly_retention_cleanup() -> None:
         deleted_candidates = _user_store.cleanup_stale_category_candidates(days=90)
         deleted_sub_candidates = _user_store.cleanup_stale_subscription_candidates(days=120)
         deleted_notifications = _user_store.cleanup_old_notifications(days=90)
+        deleted_ai_samples = _user_store.cleanup_expired_ai_samples(days=90)
         logger.info(
             "[NightlyRetention] OAuth sessions rimosse: %d, chat_messages rimossi: %d, "
             "job_runs rimossi: %d, category_candidates rimossi: %d, subscription_candidates rimossi: %d, "
-            "notifications rimosse: %d",
+            "notifications rimosse: %d, ai_samples rimossi: %d",
             deleted_oauth, deleted_chats, deleted_jobs, deleted_candidates, deleted_sub_candidates,
-            deleted_notifications,
+            deleted_notifications, deleted_ai_samples,
         )
     except Exception as exc:
         log_exception(logger, level="error", domain="jobs", event="retention_job_failed", exception=exc)
@@ -4240,6 +4243,28 @@ def _daily_recurring_income_job() -> None:
             "meta": {"created": summary.created, "skipped": summary.skipped},
         },
     )
+
+
+def _capture_ai_quality_best_effort(
+    chat_id: str, input_method: str, proposed: dict, final: dict
+) -> None:
+    """Capture only consent-bound structured fields after a confirmed transaction."""
+    if input_method not in {"text", "voice", "ocr"}:
+        return
+    try:
+        capture_quality_sample(
+            _user_store, chat_id, input_method, proposed, final,
+            {"provider": "mistral", "model": "small"},
+        )
+    except Exception as exc:
+        logger.warning(
+            "ai_quality_capture_failed",
+            extra={
+                "domain": "usage",
+                "event": "ai_quality_capture_failed",
+                "meta": {"input_method": input_method, "error": type(exc).__name__},
+            },
+        )
 
 
 async def _start_scheduler(app: Application) -> None:

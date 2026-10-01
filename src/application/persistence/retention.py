@@ -79,3 +79,12 @@ class RetentionRepository:
         if deleted:
             self._record_cleanup("job_runs_retained", deleted)
         return deleted
+
+    def cleanup_expired_ai_samples(self, days: int = 90) -> int:
+        """Remove consent-bound AI samples beyond their explicit retention."""
+        from src.ai_improvement import cleanup_expired_ai_samples
+
+        deleted = cleanup_expired_ai_samples(self, days=days)
+        if deleted:
+            self._record_cleanup("ai_improvement_samples_retained", deleted)
+        return deleted
