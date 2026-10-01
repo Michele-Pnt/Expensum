@@ -12,6 +12,8 @@ stessa deliverability):
 """
 
 import logging
+from html import escape
+from urllib.parse import quote
 
 import requests
 from tenacity import (
@@ -153,3 +155,20 @@ def send_transactional_email(
     )
     if response.status_code >= 400:
         response.raise_for_status()
+
+
+def send_verification_email(to_email: str, raw_token: str) -> None:
+    """Send only the one-time verification link, never a password."""
+    verification_url = (
+        f"{Config.WEBAPP_BASE_URL.rstrip('/')}/verify-email?token={quote(raw_token, safe='')}"
+    )
+    html_content = (
+        "<p>Conferma il tuo indirizzo email per attivare il tuo account Expensum.</p>"
+        f'<p><a href="{escape(verification_url, quote=True)}">Verifica email</a></p>'
+        "<p>Il link scade tra 24 ore.</p>"
+    )
+    send_transactional_email(
+        to_email,
+        "Conferma il tuo account Expensum",
+        html_content,
+    )

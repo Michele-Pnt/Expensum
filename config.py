@@ -176,11 +176,9 @@ class Config:
     # creati manualmente (administrative provisioning) e le credenziali inviate
     # via email. Riattivare (true) solo al lancio pubblico.
     PUBLIC_REGISTRATION_ENABLED: bool = os.getenv("PUBLIC_REGISTRATION_ENABLED", "false").lower() == "true"
-    # Accesso beta automatico al submit del form Tally: crea l'account e manda le
-    # credenziali subito, senza revisione manuale. Kill-switch rapido: mettere a
-    # false blocca le nuove creazioni automatiche senza toccare il resto del flusso
-    # (il lead resta comunque salvato/sincronizzato su Brevo).
-    AUTO_BETA_ACCESS_ENABLED: bool = os.getenv("AUTO_BETA_ACCESS_ENABLED", "true").lower() == "true"
+    # Canale storico Tally dismesso: la registrazione beta passa dal sito con
+    # password scelta dall'utente e verifica email.
+    AUTO_BETA_ACCESS_ENABLED: bool = os.getenv("AUTO_BETA_ACCESS_ENABLED", "false").lower() == "true"
     # Tetto sul numero di account beta creati automaticamente (oltre, servono
     # creazioni manuali via administrative provisioning). Protegge da un afflusso
     # di submit non previsto in questa fase.

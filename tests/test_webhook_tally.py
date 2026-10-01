@@ -1,24 +1,26 @@
+"""Regression tests for the retired Tally account-provisioning channel."""
+
 import base64
 import hashlib
 import hmac
 import json
-import threading
-import pytest
-from unittest.mock import patch
 
-pytestmark = pytest.mark.e2e
+import pytest
+
+
+pytestmark = pytest.mark.integration
 
 
 @pytest.fixture(autouse=True)
 def tally_signing_secret(monkeypatch):
-    """Imposta un segreto fittizio senza leggere la configurazione reale."""
+    """Use a deterministic signing secret without reading production config."""
     from config import Config
 
-    monkeypatch.setattr(Config, "TALLY_WEBHOOK_SIGNING_SECRET", "test-signing-secret", raising=False)
+    monkeypatch.setattr(Config, "TALLY_WEBHOOK_SIGNING_SECRET", "test-signing-secret")
 
 
 def _signed_tally_post(client, payload, secret="test-signing-secret"):
-    """Invia il body esatto che Tally firmerebbe con il segreto di test."""
+    """Send the exact HMAC body that Tally would sign."""
     body = json.dumps(payload).encode()
     signature = base64.b64encode(
         hmac.new(secret.encode(), body, hashlib.sha256).digest()
@@ -32,151 +34,55 @@ def _signed_tally_post(client, payload, secret="test-signing-secret"):
 
 
 def _tally_payload(submission_id="sub_123", email="lead@example.com"):
+    """Build a representative signed legacy payload."""
     return {
-        "eventId": "evt_1",
         "eventType": "FORM_RESPONSE",
         "data": {
             "submissionId": submission_id,
-            "formId": "44pAAr",
             "fields": [
-                {"key": "question_name", "label": "Nome", "type": "INPUT_TEXT", "value": "Mario"},
-                {"key": "question_email", "label": "Email", "type": "INPUT_EMAIL", "value": email},
+                {"label": "Nome", "type": "INPUT_TEXT", "value": "Mario"},
+                {"label": "Email", "type": "INPUT_EMAIL", "value": email},
             ],
         },
     }
 
 
-class _SyncThread(threading.Thread):
-    """Sottoclasse di Thread che esegue il target subito in .start(), senza
-    aprire un vero thread OS.
-
-    In test, sqlite:///:memory: dà una connessione (quindi un DB) diversa per
-    ogni thread OS: eseguire il job di sync su un vero thread separato
-    romperebbe i test perché non vedrebbe le tabelle create sul thread
-    principale. In produzione DATABASE_URL è PostgreSQL, dove questo non è un
-    problema (stessa istanza fisica per ogni connessione). Sottoclassare (invece
-    di sostituire interamente threading.Thread) evita di rompere altri usi di
-    Thread/Timer nello stesso processo (es. flask-limiter).
-    """
-
-    def start(self):
-        self.run()
-
-
-def test_webhook_tally_saves_lead_and_syncs_to_brevo(client):
+def test_signed_tally_request_is_retired_without_storing_lead(client):
+    """A valid legacy request cannot create a lead or account anymore."""
     from src.dashboard.app import store
+    from src.user_store import TallyLead
 
-    with patch("src.dashboard.blueprints.public.threading.Thread", _SyncThread), \
-         patch("src.dashboard.blueprints.public.brevo_client.upsert_contact") as mock_upsert, \
-         patch("src.dashboard.blueprints.public.beta_access.grant_beta_access", return_value=None):
-        response = _signed_tally_post(
-            client, _tally_payload(submission_id="sub_new", email="new@example.com")
+    response = _signed_tally_post(
+        client, _tally_payload(submission_id="retired_1", email="legacy@example.com")
+    )
+
+    assert response.status_code == 410
+    with store.Session() as session:
+        assert (
+            session.query(TallyLead)
+            .filter_by(tally_submission_id="retired_1")
+            .count()
+            == 0
         )
-        assert response.status_code == 200
-
-    mock_upsert.assert_called_once_with("new@example.com", list_ids=[5])
-
-    lead, is_new = store.save_tally_lead("sub_new", "new@example.com", "{}")
-    assert is_new is False
-    assert lead.email == "new@example.com"
-    assert lead.synced_to_brevo is True
+    user = store.get_user_by_email_any_status("legacy@example.com")
+    assert user is None
 
 
-def test_webhook_tally_is_idempotent_on_duplicate_submission(client):
-    with patch("src.dashboard.blueprints.public.threading.Thread", _SyncThread), \
-         patch("src.dashboard.blueprints.public.brevo_client.upsert_contact") as mock_upsert, \
-         patch("src.dashboard.blueprints.public.beta_access.grant_beta_access", return_value=None):
-        payload = _tally_payload(submission_id="sub_dup", email="dup@example.com")
+def test_repeated_signed_tally_request_stays_retired(client):
+    """Tally retries receive the same retirement response and no side effect."""
+    payload = _tally_payload(submission_id="retired_2")
 
-        first = _signed_tally_post(client, payload)
-        assert first.status_code == 200
-        assert mock_upsert.call_count == 1
+    first = _signed_tally_post(client, payload)
+    second = _signed_tally_post(client, payload)
 
-        # Tally può reinviare lo stesso webhook (retry): stesso submissionId,
-        # non deve rifare il sync Brevo una seconda volta.
-        second = _signed_tally_post(client, payload)
-        assert second.status_code == 200
-        assert mock_upsert.call_count == 1
-
-
-def test_webhook_tally_missing_submission_id_returns_400(client):
-    response = _signed_tally_post(client, {"data": {"fields": []}})
-    assert response.status_code == 400
-
-
-def test_webhook_tally_without_email_does_not_sync(client):
-    with patch("src.dashboard.blueprints.public.threading.Thread", _SyncThread), \
-         patch("src.dashboard.blueprints.public.brevo_client.upsert_contact") as mock_upsert:
-        payload = _tally_payload(submission_id="sub_noemail")
-        payload["data"]["fields"] = [{"key": "q", "label": "Nome", "type": "INPUT_TEXT", "value": "Mario"}]
-
-        response = _signed_tally_post(client, payload)
-        assert response.status_code == 200
-
-    mock_upsert.assert_not_called()
-
-
-def test_webhook_tally_auto_grants_beta_access_when_enabled(client, monkeypatch):
-    from config import Config
-
-    monkeypatch.setattr(Config, "AUTO_BETA_ACCESS_ENABLED", True)
-    monkeypatch.setattr(Config, "AUTO_BETA_ACCESS_MAX_ACCOUNTS", 50)
-
-    with patch("src.dashboard.blueprints.public.threading.Thread", _SyncThread), \
-         patch("src.dashboard.blueprints.public.brevo_client.upsert_contact"), \
-         patch("src.dashboard.blueprints.public.beta_access.grant_beta_access", return_value=("web_abc", "pwd")) as mock_grant, \
-         patch("src.dashboard.app.store.mark_tally_lead_beta_access_granted") as mock_mark:
-        response = _signed_tally_post(
-            client, _tally_payload(submission_id="sub_auto", email="auto@example.com")
-        )
-        assert response.status_code == 200
-
-    mock_grant.assert_called_once()
-    args = mock_grant.call_args.args
-    assert args[1] == "auto@example.com"
-    assert args[2] == "Mario"
-    mock_mark.assert_called_once_with("sub_auto")
-
-
-def test_webhook_tally_skips_auto_grant_when_disabled(client, monkeypatch):
-    from config import Config
-
-    monkeypatch.setattr(Config, "AUTO_BETA_ACCESS_ENABLED", False)
-
-    with patch("src.dashboard.blueprints.public.threading.Thread", _SyncThread), \
-         patch("src.dashboard.blueprints.public.brevo_client.upsert_contact"), \
-         patch("src.dashboard.blueprints.public.beta_access.grant_beta_access") as mock_grant:
-        response = _signed_tally_post(
-            client, _tally_payload(submission_id="sub_off", email="off@example.com")
-        )
-        assert response.status_code == 200
-
-    mock_grant.assert_not_called()
-
-
-def test_webhook_tally_skips_auto_grant_when_cap_reached(client, monkeypatch):
-    from config import Config
-
-    monkeypatch.setattr(Config, "AUTO_BETA_ACCESS_ENABLED", True)
-    monkeypatch.setattr(Config, "AUTO_BETA_ACCESS_MAX_ACCOUNTS", 1)
-
-    with patch("src.dashboard.blueprints.public.threading.Thread", _SyncThread), \
-         patch("src.dashboard.blueprints.public.brevo_client.upsert_contact"), \
-         patch("src.dashboard.app.store.count_beta_accounts_granted", return_value=1), \
-         patch("src.dashboard.blueprints.public.beta_access.grant_beta_access") as mock_grant:
-        response = _signed_tally_post(
-            client, _tally_payload(submission_id="sub_cap", email="cap@example.com")
-        )
-        assert response.status_code == 200
-
-    mock_grant.assert_not_called()
+    assert first.status_code == second.status_code == 410
 
 
 def test_webhook_tally_rejects_invalid_signature(client):
-    """Una richiesta non firmata da Tally non puo' creare un lead."""
+    """An unsigned request cannot reach the retirement response."""
     response = client.post(
         "/webhooks/tally",
-        data=json.dumps(_tally_payload(submission_id="sub_forged")),
+        data=json.dumps(_tally_payload(submission_id="forged")),
         content_type="application/json",
         headers={"Tally-Signature": "not-a-valid-signature"},
     )
@@ -185,13 +91,13 @@ def test_webhook_tally_rejects_invalid_signature(client):
 
 
 def test_webhook_tally_is_unavailable_without_signing_secret(client, monkeypatch):
-    """Un deploy privo di segreto non deve tornare ad accettare webhook anonimi."""
+    """A deploy without the legacy secret fails closed."""
     from config import Config
 
     monkeypatch.setattr(Config, "TALLY_WEBHOOK_SIGNING_SECRET", "")
     response = client.post(
         "/webhooks/tally",
-        data=json.dumps(_tally_payload(submission_id="sub_unconfigured")),
+        data=json.dumps(_tally_payload(submission_id="unconfigured")),
         content_type="application/json",
     )
 

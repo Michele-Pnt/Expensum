@@ -1,5 +1,4 @@
-"""Route pubbliche/anonime della dashboard: stats social proof, tracking analytics,
-webhook Tally (waitlist beta) e Stripe (stub), unsubscribe email.
+"""Route pubbliche/anonime della dashboard: stats, analytics e webhook legacy.
 
 Blueprint leaf: legge lo store condiviso via `current_app.config["STORE"]`, mai
 import diretto di `app.py`/`factory.py` (nessun ciclo). Stesso principio di
@@ -10,11 +9,8 @@ from __future__ import annotations
 import base64
 import hashlib
 import hmac
-import json
 import logging
 import re
-import secrets
-import threading
 import time
 import uuid
 
@@ -22,10 +18,9 @@ from flask import Blueprint, current_app, jsonify, request
 from sqlalchemy import func
 
 from config import Config
-from src import analytics, beta_access, brevo_client
+from src import analytics
 from src.dashboard.auth import _get_session_chat_id
 from src.dashboard.extensions import limiter
-from src.dashboard.referrals import _send_referral_reward_emails
 from src.user_store import User
 
 logger = logging.getLogger(__name__)
@@ -47,6 +42,8 @@ def _is_valid_tally_signature(raw_body: bytes, received_signature: str, secret: 
     return hmac.compare_digest(expected_signature, received_signature)
 
 
+# ---------------------------------------------------------------------------
+# Webhook Tally (retired legacy channel)
 # ---------------------------------------------------------------------------
 # /api/public/stats
 # ---------------------------------------------------------------------------
@@ -149,114 +146,12 @@ def api_track():
 
 
 # ---------------------------------------------------------------------------
-# Webhook Tally (waitlist beta)
+# Webhook Tally (retired legacy channel)
 # ---------------------------------------------------------------------------
-
-def _extract_tally_email(fields: list) -> str | None:
-    """Estrae l'email dai campi di un submit Tally (per tipo o label)."""
-    for field in fields:
-        if not isinstance(field, dict):
-            continue
-        if field.get("type") == "INPUT_EMAIL":
-            value = field.get("value")
-            if isinstance(value, str) and value.strip():
-                return value.strip().lower()
-    for field in fields:
-        if not isinstance(field, dict):
-            continue
-        label = (field.get("label") or "").strip().lower()
-        value = field.get("value")
-        if "email" in label and isinstance(value, str) and value.strip():
-            return value.strip().lower()
-    return None
-
-
-def _extract_tally_name(fields: list) -> str:
-    """Estrae il nome dai campi di un submit Tally (per label), stringa vuota se assente."""
-    for field in fields:
-        if not isinstance(field, dict):
-            continue
-        label = (field.get("label") or "").strip().lower()
-        value = field.get("value")
-        if "nome" in label and isinstance(value, str) and value.strip():
-            return value.strip()
-    return ""
-
-
-def _extract_tally_ref(fields: list) -> str | None:
-    """Estrae il codice referral (campo hidden 'ref') da un submit Tally, se presente."""
-    for field in fields:
-        if not isinstance(field, dict):
-            continue
-        key = (field.get("key") or "").strip().lower()
-        label = (field.get("label") or "").strip().lower()
-        value = field.get("value")
-        if ("ref" in key or "ref" in label) and isinstance(value, str) and value.strip():
-            return value.strip()
-    return None
-
-
-def _sync_tally_lead_to_brevo(tally_submission_id: str, email: str, name: str = "") -> None:
-    """Sincronizza un lead Tally su Brevo e, se sotto il tetto configurato,
-    crea subito l'account beta e invia le credenziali (in background: risponde
-    subito 200 a Tally, che ha timeout stretti sul webhook, senza far dipendere
-    l'ack dalla latenza di Brevo).
-    """
-    store = _store()
-    try:
-        brevo_client.upsert_contact(email, list_ids=[Config.BREVO_BETA_WAITLIST_LIST_ID])
-        store.mark_tally_lead_synced(tally_submission_id)
-    except Exception:
-        logger.exception(
-            "Errore sync lead Tally verso Brevo",
-            extra={"domain": "dashboard", "event": "tally_brevo_sync_failed"},
-        )
-
-    if not Config.AUTO_BETA_ACCESS_ENABLED:
-        return
-
-    try:
-        if store.count_beta_accounts_granted() >= Config.AUTO_BETA_ACCESS_MAX_ACCOUNTS:
-            logger.warning(
-                "Tetto account beta automatici raggiunto, nessuna creazione",
-                extra={"domain": "dashboard", "event": "beta_access_cap_reached"},
-            )
-            return
-        granted = beta_access.grant_beta_access(store, email, name)
-        if granted:
-            store.mark_tally_lead_beta_access_granted(tally_submission_id)
-            logger.info(
-                "Account beta creato automaticamente da lead Tally",
-                extra={"domain": "dashboard", "event": "beta_access_auto_granted"},
-            )
-    except Exception:
-        logger.exception(
-            "Errore creazione account beta automatica",
-            extra={"domain": "dashboard", "event": "beta_access_auto_failed"},
-        )
-
-    # L'account beta appena creato (o già esistente) potrebbe sbloccare reward
-    # referral rimasti 'pending' (come 'referred' o come 'referrer' in attesa).
-    try:
-        applied = store.apply_pending_referral_rewards(email)
-        if applied:
-            _send_referral_reward_emails(applied, unlocked_lifetime_founder_email=None)
-    except Exception:
-        logger.exception(
-            "Errore applicazione reward referral pendenti",
-            extra={"domain": "dashboard", "event": "referral_reward_apply_failed"},
-        )
-
-
 @public_bp.route("/webhooks/tally", methods=["POST"])
 @limiter.limit("60 per minute")
 def webhook_tally():
-    """Riceve i submit del form Tally (waitlist beta) e sincronizza il lead su Brevo.
-
-    Chiamata server-to-server da Tally, non autenticata via cookie di sessione
-    (vedi carve-out in enforce_csrf_on_forms). Idempotente su submissionId:
-    i retry del webhook Tally non generano doppie righe né doppi sync.
-    """
+    """Reject the retired Tally account-provisioning channel after signature checks."""
     signing_secret = Config.TALLY_WEBHOOK_SIGNING_SECRET
     if not signing_secret:
         logger.error(
@@ -274,71 +169,11 @@ def webhook_tally():
         )
         return jsonify({"error": "invalid_webhook_signature"}), 401
 
-    store = _store()
-    payload = request.get_json(silent=True) or {}
-    data = payload.get("data") or {}
-    submission_id = data.get("submissionId")
-    if not submission_id or not isinstance(submission_id, str):
-        return jsonify({"error": "missing submissionId"}), 400
-
-    fields = data.get("fields") or []
-    email = _extract_tally_email(fields) if isinstance(fields, list) else None
-    name = _extract_tally_name(fields) if isinstance(fields, list) else ""
-    ref = _extract_tally_ref(fields) if isinstance(fields, list) else None
-
-    lead, is_new = store.save_tally_lead(
-        tally_submission_id=submission_id,
-        email=email,
-        raw_payload=json.dumps(payload),
-        referral_code=secrets.token_urlsafe(6),
-        referred_by_code=ref,
-    )
-
     logger.info(
-        "Lead Tally ricevuto",
-        extra={
-            "domain": "dashboard",
-            "event": "tally_lead_received",
-            "meta": {"is_new": is_new, "has_email": bool(email), "has_ref": bool(ref)},
-        },
+        "Canale Tally dismesso",
+        extra={"domain": "dashboard", "event": "tally_webhook_retired", "meta": {}},
     )
-
-    # Attribuzione referral: va fatta sincrona (non nel thread di background) così
-    # i ReferralReward esistono già prima che _sync_tally_lead_to_brevo tenti di
-    # applicarli alla creazione dell'account beta.
-    if is_new and ref:
-        referrer_lead = store.get_tally_lead_by_referral_code(ref)
-        # Il confronto sulle email è la guardia vera contro l'auto-invito: due submit
-        # della stessa persona producono lead con id diversi. `create_referral_rewards`
-        # ricontrolla comunque, questa è solo la prima linea.
-        same_person = (
-            referrer_lead is not None
-            and (referrer_lead.email or "").strip().lower() == (email or "").strip().lower()
-        )
-        if referrer_lead and referrer_lead.id != lead.id and not same_person:
-            try:
-                result = store.create_referral_rewards(lead, referrer_lead)
-                unlocked_email = referrer_lead.email if result.get("lifetime_founder_unlocked") else None
-                if unlocked_email:
-                    threading.Thread(
-                        target=_send_referral_reward_emails,
-                        args=([], unlocked_email),
-                        daemon=True,
-                    ).start()
-            except Exception:
-                logger.exception(
-                    "Errore creazione reward referral",
-                    extra={"domain": "dashboard", "event": "referral_rewards_create_failed"},
-                )
-
-    if is_new and email:
-        threading.Thread(
-            target=_sync_tally_lead_to_brevo,
-            args=(submission_id, email, name),
-            daemon=True,
-        ).start()
-
-    return jsonify({"ok": True})
+    return jsonify({"error": "tally_registration_retired"}), 410
 
 
 # ---------------------------------------------------------------------------

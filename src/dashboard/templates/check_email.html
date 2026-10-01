@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Controlla la tua email — Expensum</title>
+    <style>
+        body { background: #1C363D; color: #E9F1EA; font-family: sans-serif; padding: 48px 20px; }
+        main { max-width: 460px; margin: auto; text-align: center; }
+        p { color: #B0B5B9; line-height: 1.6; }
+        a { color: #5FC4CB; }
+        input, button { padding: 12px; border-radius: 8px; border: 0; }
+        input { width: 62%; }
+        button { background: #5FC4CB; color: #1C363D; font-weight: 700; }
+        form { margin-top: 28px; }
+    </style>
+</head>
+<body>
+    <main>
+        <h1>Controlla la tua email</h1>
+        <p>Ti abbiamo inviato un link per verificare l'indirizzo e attivare l'account.</p>
+        <p>Non lo trovi? Controlla anche la cartella spam oppure richiedi un nuovo invio.</p>
+        <form method="POST" action="{{ url_for('auth.resend_verification_email') }}">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+            <input type="email" name="email" placeholder="tua@email.com" required>
+            <button type="submit">Reinvia</button>
+        </form>
+        <p><a href="{{ url_for('auth.web_login') }}">Torna al login</a></p>
+    </main>
+</body>
+</html>

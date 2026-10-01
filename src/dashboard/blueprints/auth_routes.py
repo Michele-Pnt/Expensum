@@ -13,7 +13,6 @@ import json
 import logging
 import re
 import threading
-import uuid
 from datetime import datetime, timedelta
 
 import requests
@@ -22,6 +21,7 @@ from markupsafe import escape
 
 from config import Config
 from src import analytics
+from src import brevo_client
 from src.category_sync import refresh_category_averages
 from src.dashboard.auth import (
     _get_session_chat_id,
@@ -32,6 +32,12 @@ from src.dashboard.auth import (
 from src.dashboard.extensions import limiter
 from src.dashboard.referrals import _send_referral_reward_emails
 from src.notification_service import create_notification
+from src.auth_tokens import issue_auth_token
+from src.registration_service import (
+    RegistrationCapacityReached,
+    RegistrationEmailExists,
+    RegistrationService,
+)
 from src.notion_client import NotionFinanceClient
 from src.storage.models import Notification
 from src.storage.notion_storage import NotionStorage
@@ -170,6 +176,13 @@ def web_login():
                 store.reactivate_user(user.chat_id)
         if user:
             reset_failed_logins(email)
+            if user.registration_status == "pending_verification":
+                return render_template(
+                    "login.html",
+                    error="Controlla la tua email per verificare l'account prima di accedere.",
+                    registration_enabled=Config.PUBLIC_REGISTRATION_ENABLED,
+                    next_url=next_url,
+                )
             if not _user_has_web_access(user):
                 # Account collegato a Notion: la web app non è disponibile.
                 return render_template(
@@ -261,12 +274,7 @@ def web_login():
 @auth_bp.route("/register", methods=["GET", "POST"])
 @limiter.limit("5 per minute")
 def web_register():
-    """Registrazione web: crea un account senza passare da Telegram.
-
-    Disattivata in fase beta (Config.PUBLIC_REGISTRATION_ENABLED=False): gli
-    account vengono creati manualmente via administrative provisioning e le
-    credenziali inviate via email, per limitare l'accesso ai soli beta tester.
-    """
+    """Registrazione web con prenotazione beta e verifica obbligatoria dell'email."""
     store = _store()
     if not Config.PUBLIC_REGISTRATION_ENABLED:
         return render_template(
@@ -279,8 +287,14 @@ def web_register():
     if chat_id:
         return redirect(_resolve_authenticated_redirect(chat_id))
 
+    referral_code = (request.args.get("ref") or request.form.get("ref") or "").strip()
+    if referral_code:
+        session["pending_referral_code"] = referral_code[:128]
+    else:
+        referral_code = session.get("pending_referral_code")
+
     if request.method == "GET":
-        return render_template("register.html", error=None)
+        return render_template("register.html", error=None, referral_code=referral_code)
 
     first_name = (request.form.get("first_name") or "").strip()
     last_name = (request.form.get("last_name") or "").strip()
@@ -289,9 +303,10 @@ def web_register():
     password_confirm = request.form.get("password_confirm") or ""
     privacy_accepted = request.form.get("privacy_accepted") == "on"
     tos_accepted = request.form.get("tos_accepted") == "on"
+    age_attested = request.form.get("age_attested") == "on"
 
     def _err(msg: str):
-        return render_template("register.html", error=msg)
+        return render_template("register.html", error=msg, referral_code=referral_code)
 
     if not first_name or not last_name:
         return _err("Inserisci nome e cognome.")
@@ -301,59 +316,94 @@ def web_register():
         return _err("La password deve essere di almeno 8 caratteri.")
     if password != password_confirm:
         return _err("Le password non coincidono.")
-    if not privacy_accepted or not tos_accepted:
-        return _err("Devi accettare privacy policy e termini di servizio per registrarti.")
-    if store.get_user_by_email(email):
-        return _err("Email già registrata.")
+    if not privacy_accepted or not tos_accepted or not age_attested:
+        return _err("Devi accettare privacy, termini e attestare di avere almeno 18 anni.")
 
-    web_chat_id = f"web_{uuid.uuid4().hex}"
     try:
-        store.add_user(
-            chat_id=web_chat_id,
-            storage_backend="postgres",
-            setup_status="COMPLETED",
-            setup_completed_at=datetime.utcnow(),
-            username=f"{first_name} {last_name}",
-            is_active=True,
+        pending = RegistrationService(store).reserve(
+            email=email,
+            first_name=first_name,
+            last_name=last_name,
+            password=password,
+            mandatory_consents={
+                "privacy_policy_version": Config.CURRENT_PRIVACY_POLICY_VERSION,
+                "tos_version": Config.CURRENT_TOS_VERSION,
+                "age_attestation": True,
+            },
+            referral_code=referral_code,
         )
-        store.set_credentials(web_chat_id, email, password)
-        store.accept_privacy_policy(web_chat_id, Config.CURRENT_PRIVACY_POLICY_VERSION)
-        store.write_audit_log(
-            web_chat_id, actor="user", action="consent_change",
-            metadata={"consent_type": "privacy_policy", "version": Config.CURRENT_PRIVACY_POLICY_VERSION},
-            ip_address=request.remote_addr, user_agent=request.headers.get("User-Agent"),
-        )
-        store.accept_terms_of_service(web_chat_id, Config.CURRENT_TOS_VERSION)
-        store.write_audit_log(
-            web_chat_id, actor="user", action="consent_change",
-            metadata={"consent_type": "terms_of_service", "version": Config.CURRENT_TOS_VERSION},
-            ip_address=request.remote_addr, user_agent=request.headers.get("User-Agent"),
-        )
-    except Exception:
-        logger.exception("Errore registrazione web per email=%s", email)
-        return _err("Errore durante la registrazione. Riprova.")
-
-    analytics.track(web_chat_id, "user_signed_up", {"auth_method": "web", "storage_backend": "postgres", "platform": "web"})
-    analytics.identify(web_chat_id, {"auth_method": "web", "storage_backend": "postgres", "platform": "web"})
-    try:
-        applied = store.apply_pending_referral_rewards(email)
-        if applied:
-            threading.Thread(
-                target=_send_referral_reward_emails,
-                args=(applied, None),
-                daemon=True,
-            ).start()
+    except RegistrationCapacityReached:
+        return _err("La beta è temporaneamente completa. Riprova più avanti.")
+    except RegistrationEmailExists:
+        return _err("Se l'indirizzo è già registrato, controlla la casella email per accedere.")
+    except ValueError as exc:
+        return _err(str(exc))
     except Exception:
         logger.exception(
-            "Errore applicazione reward referral pendenti alla registrazione",
-            extra={"domain": "dashboard", "event": "referral_reward_apply_failed"},
+            "Errore registrazione web",
+            extra={"domain": "security", "event": "registration_failed"},
         )
-    # Appena registrato: sessione persistente, così non deve rifare login subito.
+        return _err("Errore durante la registrazione. Riprova.")
+
+    try:
+        brevo_client.send_verification_email(email, pending.raw_token)
+    except Exception:
+        logger.exception(
+            "Errore invio verifica registrazione",
+            extra={"domain": "security", "event": "verification_email_failed"},
+        )
+    session.pop("pending_referral_code", None)
+    analytics.track(
+        pending.user.chat_id,
+        "user_registration_started",
+        {"auth_method": "web", "platform": "web"},
+    )
+    return redirect(url_for("auth.check_email"))
+
+
+@auth_bp.route("/check-email", methods=["GET"])
+def check_email():
+    """Show the neutral post-registration email-check screen."""
+    return render_template("check_email.html")
+
+
+@auth_bp.route("/verify-email", methods=["GET"])
+@limiter.limit("20 per minute")
+def verify_email():
+    """Consume a verification token and start the authenticated onboarding flow."""
+    token = request.args.get("token", "")
+    user = RegistrationService(_store()).activate(token) if token else None
+    if user is None:
+        return render_template(
+            "verification_result.html",
+            success=False,
+            message="Il link non è valido o è già scaduto.",
+        ), 400
     session.permanent = True
     session["user_logged_in"] = True
-    session["chat_id"] = web_chat_id
-    session["token_version"] = 0
+    session["chat_id"] = user.chat_id
+    session["token_version"] = user.token_version or 0
     return redirect("/onboarding")
+
+
+@auth_bp.route("/verify-email/resend", methods=["POST"])
+@limiter.limit("5 per minute")
+def resend_verification_email():
+    """Resend a verification link with a response that does not enumerate emails."""
+    email = (request.form.get("email") or "").strip().casefold()
+    user = _store().get_user_by_email_any_status(email) if email else None
+    if user and user.registration_status == "pending_verification":
+        try:
+            raw_token = issue_auth_token(
+                _store(), user.chat_id, "email_verification", timedelta(hours=24)
+            )
+            brevo_client.send_verification_email(email, raw_token)
+        except Exception:
+            logger.exception(
+                "Errore reinvio verifica registrazione",
+                extra={"domain": "security", "event": "verification_resend_failed"},
+            )
+    return redirect(url_for("auth.check_email"))
 
 
 @auth_bp.route("/privacy")

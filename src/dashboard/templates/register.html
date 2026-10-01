@@ -197,6 +197,7 @@
 
             <form method="POST" action="/register">
                 <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                {% if referral_code %}<input type="hidden" name="ref" value="{{ referral_code }}">{% endif %}
                 <div class="row">
                     <div class="field">
                         <label>Nome</label>
@@ -227,6 +228,10 @@
                 <div class="consent">
                     <input type="checkbox" id="tos_accepted" name="tos_accepted" required>
                     <label for="tos_accepted">Ho letto e accetto i <a href="/terms" target="_blank">Termini di Servizio</a>.</label>
+                </div>
+                <div class="consent">
+                    <input type="checkbox" id="age_attested" name="age_attested" required>
+                    <label for="age_attested">Dichiaro di avere almeno 18 anni.</label>
                 </div>
 
                 <button type="submit">Registrati →</button>

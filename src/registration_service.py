@@ -16,6 +16,7 @@ from src.user_store import (
     AuditLog,
     AuthToken,
     PlanChange,
+    ReferralReward,
     RegistrationCapacity,
     User,
     UserPlan,
@@ -142,7 +143,8 @@ class RegistrationService:
                 registration_source="web",
                 beta_slot_reserved_until=now + REGISTRATION_RESERVATION_TTL,
                 is_active=True,
-                setup_status="WAIT_ACCOUNTS",
+                setup_status="COMPLETED",
+                setup_completed_at=now,
                 privacy_policy_version_accepted=mandatory_consents["privacy_policy_version"],
                 privacy_accepted_at=now,
                 tos_version_accepted=mandatory_consents["tos_version"],
@@ -179,6 +181,8 @@ class RegistrationService:
             user.email_verified_at = now
             user.registration_status = "active"
             user.beta_slot_reserved_until = None
+            user.referral_code = user.referral_code or secrets.token_urlsafe(6)
+            self._create_direct_referral_rewards(session, user)
             session.add(
                 UserPlan(
                     chat_id=user.chat_id,
@@ -208,4 +212,42 @@ class RegistrationService:
                 )
             )
             session.commit()
+            try:
+                self.store.apply_pending_referral_rewards(user.email)
+            except Exception:
+                # Referral rewards are non-critical; activation remains successful.
+                pass
             return user
+
+    @staticmethod
+    def _create_direct_referral_rewards(session, user: User) -> None:
+        """Create pending rewards for a verified website referral."""
+        if not user.referred_by_code or not user.email:
+            return
+        referrer = session.query(User).filter(
+            User.referral_code == user.referred_by_code,
+            User.chat_id != user.chat_id,
+        ).first()
+        if referrer is None or not referrer.email:
+            return
+        session.add(
+            ReferralReward(
+                beneficiary_email=user.email,
+                beneficiary_chat_id=user.chat_id,
+                role="referred",
+                status="pending",
+            )
+        )
+        referrer_rewards = session.query(ReferralReward).filter(
+            ReferralReward.role == "referrer",
+            ReferralReward.beneficiary_email == referrer.email,
+        ).count()
+        if referrer_rewards < 3:
+            session.add(
+                ReferralReward(
+                    beneficiary_email=referrer.email,
+                    beneficiary_chat_id=referrer.chat_id,
+                    role="referrer",
+                    status="pending",
+                )
+            )
