@@ -32,6 +32,15 @@ type SettingsResponse = {
   };
 };
 
+type OptionalConsents = {
+  product_analytics: boolean;
+  marketing_email: boolean;
+  algorithm_improvement: boolean;
+  structured_text_usage: boolean;
+  structured_voice_usage: boolean;
+  ocr_text_usage: boolean;
+};
+
 async function downloadFile(url: string, filename: string): Promise<void> {
   const res = await fetch(url, { credentials: "same-origin" });
   if (!res.ok) {
@@ -59,6 +68,7 @@ export default function PrivacyPage() {
     | "name"
     | "email"
     | "password"
+    | "optional_consent"
     | "consent"
     | "tos_consent"
     | null
@@ -72,6 +82,14 @@ export default function PrivacyPage() {
   const [policyCurrent, setPolicyCurrent] = useState<string | null>(null);
   const [tosAccepted, setTosAccepted] = useState<string | null>(null);
   const [tosCurrent, setTosCurrent] = useState<string | null>(null);
+  const [consents, setConsents] = useState<OptionalConsents>({
+    product_analytics: false,
+    marketing_email: false,
+    algorithm_improvement: false,
+    structured_text_usage: false,
+    structured_voice_usage: false,
+    ocr_text_usage: false,
+  });
 
   const [firstName, setFirstName] = useState("");
   const [lastName, setLastName] = useState("");
@@ -105,10 +123,49 @@ export default function PrivacyPage() {
       setTosCurrent(json.account?.tos_current_version ?? null);
       setFirstName(json.account?.first_name ?? "");
       setLastName(json.account?.last_name ?? "");
+      const consentRes = await fetch("/api/settings/consents", {
+        credentials: "same-origin",
+      });
+      if (consentRes.ok) {
+        const consentJson = await consentRes.json();
+        setConsents((current) => ({ ...current, ...(consentJson.current || {}) }));
+      }
     } catch {
       // Stato consenso non disponibile: il banner resta nascosto.
     }
   }, []);
+
+  async function updateConsents(next: OptionalConsents) {
+    setBusy("optional_consent");
+    setError(null);
+    try {
+      const csrfToken = await getCsrfToken();
+      const res = await fetch("/api/settings/consents", {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { "Content-Type": "application/json", "X-CSRFToken": csrfToken },
+        body: JSON.stringify({ choices: next, source: "settings" }),
+      });
+      const json = await res.json();
+      if (!res.ok || !json.ok) throw new Error(json.error || "consent_update_failed");
+      setConsents(next);
+      setInfo("Preferenze privacy aggiornate.");
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Non sono riuscito ad aggiornare i consensi.");
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  function setConsent(name: keyof OptionalConsents, value: boolean) {
+    const next = { ...consents, [name]: value };
+    if (name === "algorithm_improvement" && !value) {
+      next.structured_text_usage = false;
+      next.structured_voice_usage = false;
+      next.ocr_text_usage = false;
+    }
+    void updateConsents(next);
+  }
 
   useEffect(() => {
     loadPreferences();
@@ -393,6 +450,49 @@ export default function PrivacyPage() {
               {busy === "csv" ? "Generazione..." : "Scarica transazioni (CSV)"}
             </Button>
           </CardActions>
+        </Card>
+
+        <Card sx={{ borderRadius: 4 }}>
+          <CardContent>
+            <Typography variant="h6" fontWeight={700} gutterBottom>
+              Consensi facoltativi
+            </Typography>
+            <Typography color="text.secondary" sx={{ mb: 1 }}>
+              Sono tutti facoltativi e puoi revocarli in qualsiasi momento.
+            </Typography>
+            {(Object.keys(consents) as (keyof OptionalConsents)[]).map((name) => (
+              <FormControlLabel
+                key={name}
+                control={
+                  <Switch
+                    checked={consents[name]}
+                    disabled={
+                      busy !== null ||
+                      (name !== "algorithm_improvement" &&
+                        name !== "product_analytics" &&
+                        name !== "marketing_email" &&
+                        !consents.algorithm_improvement)
+                    }
+                    onChange={(event) => setConsent(name, event.target.checked)}
+                  />
+                }
+                label={name.replaceAll("_", " ")}
+                sx={{ display: "flex", justifyContent: "space-between" }}
+              />
+            ))}
+            <Stack direction="row" spacing={1} sx={{ mt: 2 }}>
+              <Button variant="outlined" onClick={() => void updateConsents(
+                Object.fromEntries(Object.keys(consents).map((key) => [key, true])) as OptionalConsents
+              )} disabled={busy !== null}>
+                Accetta tutto
+              </Button>
+              <Button variant="text" onClick={() => void updateConsents(
+                Object.fromEntries(Object.keys(consents).map((key) => [key, false])) as OptionalConsents
+              )} disabled={busy !== null}>
+                Rifiuta tutto
+              </Button>
+            </Stack>
+          </CardContent>
         </Card>
 
         <Card sx={{ borderRadius: 4 }}>

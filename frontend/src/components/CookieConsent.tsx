@@ -2,6 +2,8 @@
 
 import { useEffect } from "react";
 import "vanilla-cookieconsent/dist/cookieconsent.css";
+import { mergeConsentState, OptionalConsentState } from "./consentModel";
+import { getCsrfToken } from "@/lib/csrf";
 
 declare global {
   interface Window {
@@ -22,6 +24,51 @@ declare global {
 // come oggi; solo il page_view "grezzo" lo gestisce gtag.js in autonomia,
 // per non contare due volte la stessa pageview.
 let gaLoaded = false;
+let serverConsent: Partial<OptionalConsentState> = {};
+let serverConsentLoaded = false;
+
+async function loadServerConsent(): Promise<void> {
+  try {
+    const response = await fetch("/api/settings/consents", { credentials: "same-origin" });
+    if (!response.ok) return;
+    const body = await response.json();
+    serverConsent = mergeConsentState(
+      {
+        product_analytics: false,
+        marketing_email: false,
+        algorithm_improvement: false,
+        structured_text_usage: false,
+        structured_voice_usage: false,
+        ocr_text_usage: false,
+      },
+      body.current || {},
+    );
+    serverConsentLoaded = true;
+  } catch {
+    // Anonymous visitors have no server-side consent state.
+  }
+}
+
+async function pushCookieConsent(CC: { acceptedCategory: (category: string) => boolean }) {
+  try {
+    const csrfToken = await getCsrfToken();
+    await fetch("/api/settings/consents", {
+      method: "POST",
+      credentials: "same-origin",
+      headers: { "Content-Type": "application/json", "X-CSRFToken": csrfToken },
+      body: JSON.stringify({
+        source: "cookie_banner",
+        choices: {
+          product_analytics: CC.acceptedCategory("analytics"),
+          marketing_email: CC.acceptedCategory("marketing"),
+        },
+      }),
+    });
+  } catch {
+    // Anonymous visitors and unavailable sessions remain browser-only.
+  }
+}
+
 function loadGoogleAnalytics(): void {
   if (gaLoaded) return;
   const measurementId = process.env.NEXT_PUBLIC_GA4_MEASUREMENT_ID;
@@ -71,9 +118,21 @@ export default function CookieConsentBanner(): null {
       // fail-closed. L'evento "cc:consent-changed" permette a chi ha già
       // provato a tracciare di ritentare non appena il consenso è disponibile.
       const exposeConsentApi = () => {
-        window.__cookieConsentApi = CC;
-        if (CC.acceptedCategory("analytics")) loadGoogleAnalytics();
+        window.__cookieConsentApi = {
+          acceptedCategory: (category: string) => {
+            if (category === "analytics" && serverConsentLoaded) {
+              return CC.acceptedCategory(category) && serverConsent.product_analytics === true;
+            }
+            return CC.acceptedCategory(category);
+          },
+        };
+        if (window.__cookieConsentApi.acceptedCategory("analytics")) loadGoogleAnalytics();
         window.dispatchEvent(new Event("cc:consent-changed"));
+      };
+
+      const syncServerConsent = async () => {
+        await loadServerConsent();
+        exposeConsentApi();
       };
 
       CC.run({
@@ -104,9 +163,18 @@ export default function CookieConsentBanner(): null {
           marketing: {},
         },
 
-        onFirstConsent: exposeConsentApi,
-        onConsent: exposeConsentApi,
-        onChange: exposeConsentApi,
+        onFirstConsent: () => {
+          exposeConsentApi();
+          void pushCookieConsent(CC);
+        },
+        onConsent: () => {
+          exposeConsentApi();
+          void pushCookieConsent(CC);
+        },
+        onChange: () => {
+          exposeConsentApi();
+          void pushCookieConsent(CC);
+        },
 
         language: {
           default: "it",
@@ -161,6 +229,7 @@ export default function CookieConsentBanner(): null {
       // Copre il caso di consenso già salvato in una sessione precedente,
       // per cui onConsent potrebbe non rifirare in modo osservabile qui.
       exposeConsentApi();
+      void syncServerConsent();
     });
 
     return () => { mounted = false; };

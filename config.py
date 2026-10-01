@@ -132,6 +132,7 @@ class Config:
     BREVO_API_KEY: str = os.getenv("BREVO_API_KEY", "")
     # ID della lista Brevo "Beta Waitlist" (Contacts → Lists → apri la lista → ID nell'URL)
     BREVO_BETA_WAITLIST_LIST_ID: int = int(os.getenv("BREVO_BETA_WAITLIST_LIST_ID", "5"))
+    BREVO_MARKETING_LIST_ID: int = int(os.getenv("BREVO_MARKETING_LIST_ID", "6"))
     # Segreto HMAC configurato nel webhook Tally: autentica i submit server-to-server.
     TALLY_WEBHOOK_SIGNING_SECRET: str = os.getenv("TALLY_WEBHOOK_SIGNING_SECRET", "")
     # Mittente delle email transazionali (deve essere un dominio verificato su Brevo:

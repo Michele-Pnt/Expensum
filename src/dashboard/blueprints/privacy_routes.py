@@ -15,6 +15,8 @@ from src.dashboard.auth import _get_user_by_chat_id, _resolve_request_chat_id
 from src.dashboard.budget_validation import _category_budget_total_for_user, _parse_money
 from src.dashboard.extensions import limiter
 from src.dashboard.storage import _get_storage_for_chat
+from src.consent_service import ConsentService, InvalidConsentCombination
+from src.marketing_sync import process_marketing_sync_tasks
 from src.privacy_export import (
     CSV_HEADER,
     NOTION_CSV_UNAVAILABLE_MESSAGE,
@@ -86,6 +88,63 @@ def api_settings_get():
             "tokens_reset_at": reset_at.isoformat() if reset_at else None,
             "alert": plan.get("alert"),
         },
+    })
+
+
+@privacy_bp.route("/api/settings/consents", methods=["GET"])
+def api_consents_get():
+    """Return current optional consents and append-only history for the user."""
+    chat_id, _ = _resolve_request_chat_id()
+    if not chat_id:
+        return jsonify({"error": "Unauthorized"}), 401
+    service = ConsentService(_store())
+    history = service.history(chat_id)
+    return jsonify({
+        "current": service.current(chat_id),
+        "history": [
+            {
+                "consent_type": event.consent_type,
+                "granted": event.granted,
+                "version": event.version,
+                "source": event.source,
+                "created_at": event.created_at.isoformat(),
+            }
+            for event in history
+        ],
+    })
+
+
+@privacy_bp.route("/api/settings/consents", methods=["POST"])
+@limiter.limit("10 per minute")
+def api_consents_update():
+    """Append optional consent changes from settings or the cookie bridge."""
+    chat_id, _ = _resolve_request_chat_id()
+    if not chat_id:
+        return jsonify({"error": "Unauthorized"}), 401
+    body = request.get_json(silent=True) or {}
+    choices = body.get("choices")
+    if not isinstance(choices, dict):
+        return jsonify({"error": "choices must be an object"}), 400
+    try:
+        events = ConsentService(_store()).record_batch(
+            chat_id,
+            {str(key): bool(value) for key, value in choices.items()},
+            str(body.get("source") or "settings"),
+            str(body.get("version") or Config.CURRENT_PRIVACY_POLICY_VERSION),
+        )
+    except (InvalidConsentCombination, ValueError) as exc:
+        return jsonify({"error": str(exc)}), 400
+    try:
+        process_marketing_sync_tasks(_store(), limit=20)
+    except Exception:
+        current_app.logger.exception(
+            "Immediate marketing consent sync failed",
+            extra={"domain": "dashboard", "event": "marketing_sync_immediate_failed"},
+        )
+    return jsonify({
+        "ok": True,
+        "current": ConsentService(_store()).current(chat_id),
+        "recorded": len(events),
     })
 
 

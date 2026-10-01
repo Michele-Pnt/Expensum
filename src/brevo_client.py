@@ -105,6 +105,35 @@ def upsert_contact(
     before_sleep=before_sleep_log(logger, logging.WARNING),
     reraise=True,
 )
+def remove_contact_from_list(email: str, list_id: int) -> None:
+    """Remove a contact from one Brevo list without deleting the contact."""
+    if not Config.BREVO_API_KEY:
+        logger.warning(
+            "BREVO_API_KEY non configurata, skip remove_contact_from_list",
+            extra={"domain": "dashboard", "event": "brevo_skipped_no_api_key"},
+        )
+        return
+    response = requests.post(
+        f"{_BASE_URL}/contacts/lists/{list_id}/contacts/remove",
+        headers={
+            "api-key": Config.BREVO_API_KEY,
+            "content-type": "application/json",
+            "accept": "application/json",
+        },
+        json={"emails": [email]},
+        timeout=_REQUEST_TIMEOUT,
+    )
+    if response.status_code >= 400:
+        response.raise_for_status()
+
+
+@retry(
+    retry=retry_if_exception(_is_retryable),
+    stop=stop_after_attempt(4),
+    wait=wait_exponential(multiplier=1, min=2, max=30),
+    before_sleep=before_sleep_log(logger, logging.WARNING),
+    reraise=True,
+)
 def send_transactional_email(
     to_email: str,
     subject: str,
