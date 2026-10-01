@@ -135,6 +135,15 @@
             color: #e66767;
             margin-bottom: 20px;
         }
+        .success {
+            background: rgba(95, 196, 203, 0.10);
+            border: 1.5px solid rgba(95, 196, 203, 0.35);
+            border-radius: 10px;
+            padding: 10px 14px;
+            font-size: 13px;
+            color: #5FC4CB;
+            margin-bottom: 20px;
+        }
 
         button {
             width: 100%;
@@ -197,6 +206,9 @@
             <div class="card-sub">{% if admin_mode %}Inserisci la password amministratore{% else %}Accedi con email e password{% endif %}</div>
 
             {% if error %}<div class="error">{{ error }}</div>{% endif %}
+            {% if request.args.get('reset') == 'success' %}
+            <div class="success">Password aggiornata. Ora puoi accedere.</div>
+            {% endif %}
 
             <form method="POST" action="{% if admin_mode %}{{ url_for('auth.admin_login') }}{% else %}{{ url_for('auth.web_login') }}{% endif %}">
                 <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
@@ -219,6 +231,12 @@
                 {% endif %}
                 <button type="submit">Accedi →</button>
             </form>
+
+            {% if not admin_mode %}
+            <a href="{{ url_for('auth.forgot_password') }}" class="register-link">
+                Password dimenticata?
+            </a>
+            {% endif %}
 
             {% if not admin_mode and registration_enabled %}
             <a href="/register" class="register-link">Non hai un account? Registrati →</a>

@@ -172,3 +172,16 @@ def send_verification_email(to_email: str, raw_token: str) -> None:
         "Conferma il tuo account Expensum",
         html_content,
     )
+
+
+def send_password_reset_email(to_email: str, raw_token: str) -> None:
+    """Send a one-time password reset link without including credentials."""
+    reset_url = (
+        f"{Config.WEBAPP_BASE_URL.rstrip('/')}/reset-password?token={quote(raw_token, safe='')}"
+    )
+    html_content = (
+        "<p>Abbiamo ricevuto una richiesta per reimpostare la password di Expensum.</p>"
+        f'<p><a href="{escape(reset_url, quote=True)}">Reimposta password</a></p>'
+        "<p>Il link scade tra 30 minuti. Se non sei stato tu, ignora questa email.</p>"
+    )
+    send_transactional_email(to_email, "Reimposta la password di Expensum", html_content)

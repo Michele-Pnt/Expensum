@@ -22,6 +22,7 @@ from markupsafe import escape
 from config import Config
 from src import analytics
 from src import brevo_client
+from src.auth_tokens import consume_auth_token
 from src.category_sync import refresh_category_averages
 from src.dashboard.auth import (
     _get_session_chat_id,
@@ -404,6 +405,61 @@ def resend_verification_email():
                 extra={"domain": "security", "event": "verification_resend_failed"},
             )
     return redirect(url_for("auth.check_email"))
+
+
+@auth_bp.route("/forgot-password", methods=["GET", "POST"])
+@limiter.limit("5 per minute")
+def forgot_password():
+    """Request a password reset link without disclosing account existence."""
+    if request.method == "POST":
+        email = (request.form.get("email") or "").strip().casefold()
+        user = _store().get_user_by_email_any_status(email) if email else None
+        if user and user.is_active and user.registration_status != "pending_verification":
+            try:
+                raw_token = issue_auth_token(
+                    _store(), user.chat_id, "password_reset", timedelta(minutes=30)
+                )
+                brevo_client.send_password_reset_email(email, raw_token)
+            except Exception:
+                logger.exception(
+                    "Errore richiesta recupero password",
+                    extra={"domain": "security", "event": "password_reset_email_failed"},
+                )
+        return render_template("forgot_password.html", submitted=True)
+    return render_template("forgot_password.html", submitted=False)
+
+
+@auth_bp.route("/reset-password", methods=["GET", "POST"])
+@limiter.limit("10 per minute")
+def reset_password():
+    """Reset a password with a valid one-time token and revoke all sessions."""
+    raw_token = request.args.get("token") or request.form.get("token") or ""
+    if request.method == "GET":
+        return render_template("reset_password.html", token=raw_token, error=None)
+
+    password = request.form.get("password") or ""
+    password_confirm = request.form.get("password_confirm") or ""
+    if len(password) < 8:
+        return render_template(
+            "reset_password.html",
+            token=raw_token,
+            error="La password deve contenere almeno 8 caratteri.",
+        ), 400
+    if password != password_confirm:
+        return render_template(
+            "reset_password.html",
+            token=raw_token,
+            error="Le password non coincidono.",
+        ), 400
+
+    chat_id = consume_auth_token(_store(), raw_token, "password_reset")
+    if not chat_id or not _store().update_password(chat_id, password):
+        return render_template(
+            "reset_password.html",
+            token="",
+            error="Il link non è valido o è già scaduto.",
+        ), 400
+    return redirect(url_for("auth.web_login", reset="success"))
 
 
 @auth_bp.route("/privacy")
