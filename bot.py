@@ -82,6 +82,7 @@ from src.report_notify import display_name, notify_webapp_report
 from src import analytics
 from src import brevo_client
 from src.marketing_sync import process_marketing_sync_tasks
+from src.recurring_income_service import process_due_recurring_incomes
 from src.unsubscribe_token import make_unsubscribe_token
 from src.gamification import engine as gamification
 from src.gamification.notifications import build_messages as build_achievement_messages
@@ -4228,6 +4229,19 @@ def _marketing_consent_sync_job() -> None:
     )
 
 
+def _daily_recurring_income_job() -> None:
+    """Materialize due recurring incomes without logging financial content."""
+    summary = process_due_recurring_incomes(_user_store, date.today())
+    logger.info(
+        "daily_recurring_income_completed",
+        extra={
+            "domain": "usage",
+            "event": "daily_recurring_income_completed",
+            "meta": {"created": summary.created, "skipped": summary.skipped},
+        },
+    )
+
+
 async def _start_scheduler(app: Application) -> None:
     """Hook post_init PTB: cattura il loop PTB e avvia APScheduler con il loop corretto."""
     # Registra i comandi via API Telegram (setMyCommands) a ogni avvio: sostituisce
@@ -4267,6 +4281,7 @@ async def _start_scheduler(app: Application) -> None:
     scheduler.add_job(_nightly_subscription_job, 'cron', hour=3, minute=5, args=[app, loop], id='nightly_subscription_job')
     scheduler.add_job(_nightly_retention_cleanup, 'cron', hour=3, minute=10, id='nightly_retention_cleanup')
     scheduler.add_job(_marketing_consent_sync_job, 'cron', hour=3, minute=20, id='marketing_consent_sync_job')
+    scheduler.add_job(_daily_recurring_income_job, 'cron', hour=2, minute=55, id='daily_recurring_income_job')
     scheduler.add_job(_nightly_inactivity_job, 'cron', hour=5, minute=0, id='nightly_inactivity_job')
     scheduler.add_job(_nightly_streak_reset_job, 'cron', hour=3, minute=15, args=[app, loop], id='nightly_streak_reset_job')
     scheduler.add_job(_gamification_reconcile_job, 'cron', hour=3, minute=25, args=[app, loop], id='gamification_reconcile_job')

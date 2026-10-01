@@ -54,6 +54,8 @@ class NotionStorage(FinancialStorage):
         income_category_id: int | None = None,
         income_category_name: str | None = None,
         income_type: str | None = None,
+        source_rule_id: int | None = None,
+        scheduled_for: date | None = None,
     ) -> dict:
         from src.income_categories import normalize_income_category_name
 

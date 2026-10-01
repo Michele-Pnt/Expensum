@@ -5,7 +5,8 @@ from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal
 
-from src.storage.models import RecurringIncomeRule
+from src.storage.models import Income, RecurringIncomeRule
+from src.storage.postgres_storage import PostgresStorage
 
 
 CADENCES = frozenset({"monthly"})
@@ -117,3 +118,59 @@ class RecurringIncomeService:
             income_category_id=category.get("id"),
         )
         return SalaryConfiguration(account_id=int(account["id"]), rule_id=rule.id)
+
+
+@dataclass(frozen=True)
+class RecurringIncomeSummary:
+    """Counts produced by one due-income materialization pass."""
+
+    created: int = 0
+    skipped: int = 0
+
+
+def _advance_monthly(day: int, current: date) -> date:
+    """Advance a monthly payday while clamping short months."""
+    year, month = current.year, current.month + 1
+    if month == 13:
+        year, month = year + 1, 1
+    return date(year, month, min(day, monthrange(year, month)[1]))
+
+
+def process_due_recurring_incomes(store, as_of: date) -> RecurringIncomeSummary:
+    """Materialize due rules exactly once using the occurrence unique key."""
+    created = skipped = 0
+    with store.Session() as session:
+        rules = session.query(RecurringIncomeRule).filter(
+            RecurringIncomeRule.active.is_(True),
+            RecurringIncomeRule.next_due_date <= as_of,
+        ).all()
+    for rule_snapshot in rules:
+        with store.Session() as session:
+            rule = session.get(RecurringIncomeRule, rule_snapshot.id)
+            if rule is None or not rule.active or rule.next_due_date > as_of:
+                skipped += 1
+                continue
+            existing = session.query(Income).filter(
+                Income.source_rule_id == rule.id,
+                Income.scheduled_for == rule.next_due_date,
+            ).first()
+            if existing is not None:
+                rule.next_due_date = _advance_monthly(rule.payday_day, rule.next_due_date)
+                session.commit()
+                skipped += 1
+                continue
+            income = Income(
+                user_id=rule.user_id,
+                income_date=rule.next_due_date,
+                amount=rule.amount,
+                name=rule.name,
+                account_id=rule.account_id,
+                income_category_id=rule.income_category_id,
+                source_rule_id=rule.id,
+                scheduled_for=rule.next_due_date,
+            )
+            session.add(income)
+            rule.next_due_date = _advance_monthly(rule.payday_day, rule.next_due_date)
+            session.commit()
+            created += 1
+    return RecurringIncomeSummary(created=created, skipped=skipped)

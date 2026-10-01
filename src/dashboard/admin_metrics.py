@@ -804,6 +804,7 @@ SCHEDULER_TZ = ZoneInfo("Europe/Rome")
 # (scheduled job). Serve a rilevare i job attesi ma mai eseguiti oggi ("no-show").
 JOB_SCHEDULE: list[dict[str, Any]] = [
     {"job_id": "db_backup", "label": "Backup DB (pg_dump→B2)", "kind": "daily", "hour": 2, "minute": 30},
+    {"job_id": "daily_recurring_income_job", "label": "Entrate ricorrenti", "kind": "daily", "hour": 2, "minute": 55},
     {"job_id": "nightly_category_sync", "label": "Sync categorie", "kind": "daily", "hour": 3, "minute": 0},
     {"job_id": "nightly_subscription_job", "label": "Subscription", "kind": "daily", "hour": 3, "minute": 5},
     {"job_id": "nightly_retention_cleanup", "label": "Retention cleanup", "kind": "daily", "hour": 3, "minute": 10},

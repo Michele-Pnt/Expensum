@@ -717,6 +717,8 @@ class PostgresStorage(FinancialStorage):
         income_category_id: int | None = None,
         income_category_name: str | None = None,
         income_type: str | None = None,
+        source_rule_id: int | None = None,
+        scheduled_for: date | None = None,
     ) -> dict:
         """Crea un'entrata. Il saldo del conto è calcolato on-read, non persistito."""
         try:
@@ -738,6 +740,8 @@ class PostgresStorage(FinancialStorage):
             account_id=acc_id_int,
             income_type=resolved_name,
             income_category_id=resolved_category_id,
+            source_rule_id=source_rule_id,
+            scheduled_for=scheduled_for,
         )
         self._session.add(income)
         self._commit()
