@@ -141,6 +141,7 @@ class RegistrationService:
                 last_name=(last_name or "").strip(),
                 registration_status="pending_verification",
                 registration_source="web",
+                storage_backend="postgres",
                 beta_slot_reserved_until=now + REGISTRATION_RESERVATION_TTL,
                 is_active=True,
                 setup_status="COMPLETED",
