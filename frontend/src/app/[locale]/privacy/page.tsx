@@ -41,7 +41,7 @@ export default async function PrivacyPolicyPage({
       subtitle={
         isEn
           ? "Notice on the processing of personal data under EU Regulation 2016/679 (GDPR) and Italian Legislative Decree 196/2003 as amended by Legislative Decree 101/2018. Last updated: September 2, 2026."
-          : "Informativa sul trattamento dei dati personali ai sensi del Regolamento UE 2016/679 (GDPR) e del D.Lgs. 196/2003 come modificato dal D.Lgs. 101/2018. Ultimo aggiornamento: 2 settembre 2026."
+          : "Informativa sul trattamento dei dati personali ai sensi del Regolamento UE 2016/679 (GDPR) e del D.Lgs. 196/2003 come modificato dal D.Lgs. 101/2018. Ultimo aggiornamento: 1 ottobre 2026."
       }
     >
       {isEn ? <PrivacyContentEn /> : <PrivacyContentIt />}

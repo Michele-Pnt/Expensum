@@ -53,8 +53,14 @@ export default function PrivacyContentIt() {
           </li>
           <li>
             <strong>Email e password</strong> (solo utenti web app): per autenticazione.
-            La password è conservata in forma di hash irreversibile (bcrypt).
+            La password è conservata in forma di hash irreversibile (Argon2id). La verifica
+            dell&apos;indirizzo email e il recupero della password usano link monouso a scadenza.
             Base giuridica: esecuzione del contratto (Art. 6(1)(b)).
+          </li>
+          <li>
+            <strong>Profilo finanziario progressivo</strong>: obiettivi ordinati, situazione
+            lavorativa, conto di accredito e preferenze dichiarate per personalizzare il servizio.
+            I campi facoltativi richiedono consenso e possono essere omessi.
           </li>
           <li>
             <strong>Dati finanziari</strong> (importi, categorie, conti, abbonamenti, obiettivi
@@ -98,17 +104,15 @@ export default function PrivacyContentIt() {
             Base giuridica: consenso (Art. 6(1)(a)).
           </li>
           <li>
-            <strong>Email lista d&apos;attesa beta</strong> (tramite form Tally.so): raccolta
-            su base consenso dell&apos;utente che compila il form, ai fini di informarlo del
-            lancio del servizio. <strong>Durante la fase beta</strong>, se i posti disponibili
-            lo consentono, la compilazione del form può comportare la creazione immediata di
-            un account Expensum attivo (email, password generata, accesso alla web app) e
-            l&apos;invio delle relative credenziali via email; in tal caso il trattamento dei
-            dati dell&apos;account segue le regole della Sezione 2.1 (base giuridica: esecuzione
-            del contratto, Art. 6(1)(b)) anziché quelle della lista d&apos;attesa.
-            Base giuridica per l&apos;iscrizione alla lista d&apos;attesa in sé: consenso
-            (Art. 6(1)(a)), revocabile in qualsiasi momento scrivendo a
-            <a href="mailto:expensum.finance@gmail.com"> expensum.finance@gmail.com</a>.
+            <strong>Registrazione autonoma</strong>: l&apos;utente sceglie direttamente la password,
+            accetta i documenti obbligatori e riceve solo il link di verifica via email.
+            Tally non crea account e non vengono inviate password via email.
+          </li>
+          <li>
+            <strong>Miglioramento degli algoritmi</strong>: con consenso esplicito possiamo
+            conservare per 90 giorni solo campi strutturati, differenze di correzione e testo OCR
+            cifrato quando sono attivi sia il consenso generale sia quello OCR. Audio, foto e
+            transcript non sono conservati per questa finalità.
           </li>
         </ul>
       </section>
@@ -203,19 +207,10 @@ export default function PrivacyContentIt() {
               <td>Trattamento interno UE</td>
             </tr>
             <tr>
-              <td><strong>Tally.so</strong></td>
-              <td>Per sviluppo form</td>
-              <td>Belgio (UE)</td>
-              <td>Consenso (Art. 6(1)(a))</td>
-              <td>Trattamento interno UE</td>
-            </tr>
-            <tr>
               <td><strong>Brevo (Sendinblue SA)</strong></td>
-              <td>Invio email agli iscritti alla lista d&apos;attesa beta e, se viene creato un
-              account beta, email transazionale con le credenziali di accesso</td>
+              <td>Invio dei link transazionali e sincronizzazione della lista marketing solo con consenso</td>
               <td>Francia (UE)</td>
-              <td>Consenso (Art. 6(1)(a)) per l&apos;email di lista d&apos;attesa; Contratto
-              (Art. 6(1)(b)) per l&apos;email transazionale con le credenziali di accesso</td>
+              <td>Consenso (Art. 6(1)(a)) o contratto (Art. 6(1)(b))</td>
               <td>Trattamento interno UE</td>
             </tr>
             <tr>
@@ -283,10 +278,10 @@ export default function PrivacyContentIt() {
         <h2>5. Conservazione dei dati</h2>
         <ul>
           <li><strong>Dati account e finanziari</strong>: conservati fino alla cancellazione volontaria dell&apos;account da parte dell&apos;utente.</li>
+          <li><strong>Campioni per miglioramento algoritmi</strong>: 90 giorni; cancellazione immediata alla revoca del consenso.</li>
           <li><strong>Log tecnici</strong> (inclusi IP): 90 giorni dall&apos;evento, poi eliminazione automatica.</li>
           <li><strong>Messaggi vocali originali</strong>: non conservati, eliminati immediatamente dopo la trascrizione.</li>
           <li><strong>Dati di consenso cookie</strong>: 6 mesi (durata del cookie di consenso).</li>
-          <li><strong>Email lista d&apos;attesa</strong> (Tally): fino al lancio del servizio o alla revoca del consenso, se precedente, salvo che il form abbia generato la creazione di un account beta, nel qual caso si applica la regola &quot;Dati account e finanziari&quot; sopra.</li>
           <li><strong>Backup</strong>: i backup del database vengono eliminati entro 30 giorni dalla cancellazione dell&apos;account.</li>
         </ul>
         <p>

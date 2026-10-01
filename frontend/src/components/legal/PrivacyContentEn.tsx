@@ -52,8 +52,14 @@ export default function PrivacyContentEn() {
           </li>
           <li>
             <strong>Email and password</strong> (web app users only): for authentication.
-            The password is stored as an irreversible hash (bcrypt).
+            The password is stored as an irreversible Argon2id hash. Email verification and
+            password recovery use expiring one-time links.
             Legal basis: performance of a contract (Art. 6(1)(b)).
+          </li>
+          <li>
+            <strong>Progressive financial profile</strong>: ordered goals, employment status,
+            salary destination account and declared preferences used to personalize the service.
+            Optional fields can be skipped and require consent.
           </li>
           <li>
             <strong>Financial data</strong> (amounts, categories, accounts, subscriptions,
@@ -96,17 +102,15 @@ export default function PrivacyContentEn() {
             Legal basis: consent (Art. 6(1)(a)).
           </li>
           <li>
-            <strong>Beta waitlist email</strong> (via Tally.so form): collected on the basis of
-            the consent of the user who fills in the form, in order to inform them of the
-            service launch. <strong>During the beta phase</strong>, if capacity allows, filling
-            in the form may result in the immediate creation of an active Expensum account
-            (email, generated password, web app access) and the corresponding credentials
-            being sent by email; in that case the account data is processed under the rules
-            in Section 2.1 (legal basis: contract performance, Art. 6(1)(b)) instead of the
-            waitlist rules.
-            Legal basis for the waitlist sign-up itself: consent (Art. 6(1)(a)), withdrawable
-            at any time by writing to
-            <a href="mailto:expensum.finance@gmail.com"> expensum.finance@gmail.com</a>.
+            <strong>Self-service registration</strong>: the user chooses a password, accepts
+            the mandatory documents and receives only an email verification link. Tally does not
+            create accounts and passwords are never sent by email.
+          </li>
+          <li>
+            <strong>Algorithm improvement</strong>: with explicit consent, for 90 days we may
+            retain structured fields, correction differences and encrypted OCR text when both
+            the general and OCR consents are active. Audio, photos and transcripts are not kept
+            for this purpose.
           </li>
         </ul>
       </section>
@@ -201,19 +205,10 @@ export default function PrivacyContentEn() {
               <td>Internal EU processing</td>
             </tr>
             <tr>
-              <td><strong>Tally.so</strong></td>
-              <td>Form development</td>
-              <td>Belgium (EU)</td>
-              <td>Consent (Art. 6(1)(a))</td>
-              <td>Internal EU processing</td>
-            </tr>
-            <tr>
               <td><strong>Brevo (Sendinblue SA)</strong></td>
-              <td>Sends emails to beta waitlist subscribers and, if a beta account is
-              created, a transactional email with login credentials</td>
+              <td>Sends transactional links and synchronizes the marketing list only with consent</td>
               <td>France (EU)</td>
-              <td>Consent (Art. 6(1)(a)) for the waitlist email; Contract (Art. 6(1)(b)) for
-              the transactional login-credentials email</td>
+              <td>Consent (Art. 6(1)(a)) or Contract (Art. 6(1)(b))</td>
               <td>Internal EU processing</td>
             </tr>
             <tr>
@@ -280,10 +275,10 @@ export default function PrivacyContentEn() {
         <h2>5. Data retention</h2>
         <ul>
           <li><strong>Account and financial data</strong>: retained until the user voluntarily deletes their account.</li>
+          <li><strong>Algorithm-improvement samples</strong>: 90 days; immediate deletion after consent withdrawal.</li>
           <li><strong>Technical logs</strong> (including IPs): 90 days from the event, then automatically deleted.</li>
           <li><strong>Original voice messages</strong>: not retained, deleted immediately after transcription.</li>
           <li><strong>Cookie consent data</strong>: 6 months (duration of the consent cookie).</li>
-          <li><strong>Waitlist email</strong> (Tally): until the service launch or withdrawal of consent, whichever comes first, unless the form resulted in the creation of a beta account, in which case the &quot;Account and financial data&quot; rule above applies.</li>
           <li><strong>Backups</strong>: database backups are deleted within 30 days of account deletion.</li>
         </ul>
         <p>

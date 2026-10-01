@@ -37,7 +37,7 @@ class Config:
     # --- PRIVACY POLICY ---
     # Incrementare quando il testo di privacy.html cambia in modo sostanziale:
     # forza un nuovo consenso esplicito (consent_change in audit_log).
-    CURRENT_PRIVACY_POLICY_VERSION: str = "2026-06-30"
+    CURRENT_PRIVACY_POLICY_VERSION: str = "2026-10-01"
 
     # --- TERMINI DI SERVIZIO ---
     # Stesso meccanismo della privacy policy: incrementare quando il testo dei ToS
