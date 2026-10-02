@@ -199,7 +199,12 @@ def _add_income_occurrence_columns() -> None:
 
 
 def _backfill_users_and_referrals() -> None:
-    """Mark legacy accounts verified and move unambiguous referral ownership."""
+    """Mark legacy accounts verified and move deterministic referral ownership.
+
+    Tally accepted repeated submissions for the same email.  The migration uses
+    the newest lead for that email and only copies referral codes that are unique
+    across the legacy table, keeping the new unique user index safe.
+    """
     connection = op.get_bind()
     connection.execute(
         sa.text(
@@ -210,36 +215,44 @@ def _backfill_users_and_referrals() -> None:
         )
     )
 
-    duplicate_email = connection.execute(
+    tally_rows = connection.execute(
         sa.text(
-            "SELECT lower(trim(email)) FROM tally_leads "
-            "WHERE email IS NOT NULL AND trim(email) <> '' "
-            "GROUP BY lower(trim(email)) HAVING count(*) > 1"
+            "SELECT id, email, referral_code, referred_by_code FROM tally_leads "
+            "WHERE email IS NOT NULL AND trim(email) <> '' ORDER BY id"
         )
-    ).first()
-    if duplicate_email:
-        raise RuntimeError("Duplicate Tally referral rows require manual migration review")
+    ).mappings()
+    latest_by_email: dict[str, dict[str, object]] = {}
+    referral_code_counts: dict[str, int] = {}
+    for row in tally_rows:
+        email = str(row["email"]).strip().casefold()
+        latest_by_email[email] = dict(row)
+        code = row["referral_code"]
+        if code:
+            code_key = str(code).strip()
+            referral_code_counts[code_key] = referral_code_counts.get(code_key, 0) + 1
 
-    duplicate_code = connection.execute(
-        sa.text(
-            "SELECT referral_code FROM tally_leads "
-            "WHERE referral_code IS NOT NULL GROUP BY referral_code HAVING count(*) > 1"
+    users = connection.execute(
+        sa.text("SELECT chat_id, email FROM users WHERE email IS NOT NULL")
+    ).mappings()
+    for user in users:
+        email = str(user["email"]).strip().casefold()
+        lead = latest_by_email.get(email)
+        if lead is None:
+            continue
+        code = str(lead["referral_code"]).strip() if lead["referral_code"] else None
+        if code and referral_code_counts.get(code) != 1:
+            code = None
+        connection.execute(
+            sa.text(
+                "UPDATE users SET referral_code = :referral_code, "
+                "referred_by_code = :referred_by_code WHERE chat_id = :chat_id"
+            ),
+            {
+                "referral_code": code,
+                "referred_by_code": lead["referred_by_code"],
+                "chat_id": user["chat_id"],
+            },
         )
-    ).first()
-    if duplicate_code:
-        raise RuntimeError("Duplicate Tally referral codes require manual migration review")
-
-    connection.execute(
-        sa.text(
-            "UPDATE users SET referral_code = ("
-            "SELECT t.referral_code FROM tally_leads t "
-            "WHERE lower(trim(t.email)) = lower(trim(users.email))"
-            "), referred_by_code = ("
-            "SELECT t.referred_by_code FROM tally_leads t "
-            "WHERE lower(trim(t.email)) = lower(trim(users.email))"
-            ") WHERE email IS NOT NULL"
-        )
-    )
 
 
 def _seed_capacity_row() -> None:

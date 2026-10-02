@@ -88,7 +88,8 @@ def test_existing_users_are_backfilled_active_and_verified(tmp_path, monkeypatch
             text(
                 "INSERT INTO tally_leads "
                 "(tally_submission_id, email, referral_code, referred_by_code) "
-                "VALUES ('owner-submission', 'owner@example.test', 'OWNER42', NULL), "
+                "VALUES ('owner-old-submission', 'owner@example.test', 'OLDOWNER42', NULL), "
+                "('owner-submission', 'owner@example.test', 'OWNER42', NULL), "
                 "('friend-submission', 'friend@example.test', NULL, 'OWNER42')"
             )
         )
