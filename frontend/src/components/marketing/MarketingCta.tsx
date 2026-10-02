@@ -1,12 +1,7 @@
 "use client";
 
-import { useState } from "react";
 import { ArrowUpRight } from "lucide-react";
-import { openTallyWaitlist } from "@/lib/tallyWaitlist";
-import { getReferralCode } from "@/lib/waitlist";
 import styles from "./MarketingCta.module.css";
-
-const TALLY_FORM_ID = "44pAAr";
 
 type MarketingCtaProps = {
   label: string;
@@ -21,21 +16,13 @@ export default function MarketingCta({
   href = "#inizia",
   waitlist = false,
 }: MarketingCtaProps) {
-  const [referralCode] = useState<string | null>(() => (
-    typeof window === "undefined" ? null : getReferralCode(window.location.search)
-  ));
-
-  const openWaitlist = () => {
-    void openTallyWaitlist(TALLY_FORM_ID, referralCode);
-  };
-
   return (
     <div className={styles.group}>
       {waitlist ? (
-        <button className={styles.primary} type="button" onClick={openWaitlist}>
+        <a className={styles.primary} href="/register">
           {label}
           <ArrowUpRight aria-hidden="true" size={18} strokeWidth={1.8} />
-        </button>
+        </a>
       ) : (
         <a className={styles.primary} href={href}>
           {label}

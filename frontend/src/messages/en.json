@@ -8,7 +8,8 @@
       "comeFunziona": "How it works",
       "prezzi": "Pricing",
       "menu": "Menu",
-      "accedi": "Log in"
+      "accedi": "Log in",
+      "registrati": "Sign up"
     },
     "hero": {
       "pill": "Powered by AI",
@@ -18,10 +19,10 @@
       "subLine2": "",
       "scrollDown": "Scroll down",
       "socialProof": "{count, number} expenses tracked with Expensum so far",
-      "betaBadge": "Private beta · access by email",
+      "betaBadge": "Private beta · online registration",
       "betaEyebrow": "Private beta",
-      "betaPrompt": "Enter your email and receive your credentials.",
-      "betaCta": "Get access"
+      "betaPrompt": "Create your account directly on the website.",
+      "betaCta": "Sign up"
     },
     "perChi": {
       "titleLine1": "It doesn’t matter where you start.",

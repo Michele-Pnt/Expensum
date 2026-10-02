@@ -8,7 +8,8 @@
       "comeFunziona": "Come funziona",
       "prezzi": "Prezzi",
       "menu": "Menu",
-      "accedi": "Accedi"
+      "accedi": "Accedi",
+      "registrati": "Registrati"
     },
     "hero": {
       "pill": "Powered by AI",
@@ -18,10 +19,10 @@
       "subLine2": "",
       "scrollDown": "Scorri in basso",
       "socialProof": "{count, number} spese già tracciate con Expensum",
-      "betaBadge": "Beta privata · accesso via email",
+      "betaBadge": "Beta privata · registrazione online",
       "betaEyebrow": "Beta privata",
-      "betaPrompt": "Inserisci la tua email e ricevi le credenziali.",
-      "betaCta": "Ottieni l’accesso"
+      "betaPrompt": "Crea il tuo account direttamente dal sito.",
+      "betaCta": "Registrati"
     },
     "perChi": {
       "titleLine1": "Expensum fa per te quando:",

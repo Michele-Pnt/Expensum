@@ -15,19 +15,12 @@ import LanguageSwitcher from "@/components/LanguageSwitcher";
 import AtomFeatureSection, { type AtomFeature } from "@/components/landing/AtomFeatureSection";
 import HowItWorksSection, { type HowStep } from "@/components/landing/HowItWorksSection";
 import ProductScreenFrame, { type ProductScreenKind } from "@/components/marketing/ProductScreenFrame";
-import { openTallyWaitlist } from "@/lib/tallyWaitlist";
-import { getReferralCode } from "@/lib/waitlist";
 import styles from "./page.module.css";
-
-const TALLY_FORM_ID = "44pAAr";
 
 export default function LandingPage() {
   const t = useTranslations("Landing");
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [expensesTracked, setExpensesTracked] = useState<number | null>(null);
-  const [referralCode] = useState<string | null>(() => (
-    typeof window === "undefined" ? null : getReferralCode(window.location.search)
-  ));
 
   useEffect(() => {
     let cancelled = false;
@@ -43,14 +36,6 @@ export default function LandingPage() {
       cancelled = true;
     };
   }, []);
-
-  const openWaitlist = () => {
-    void openTallyWaitlist(TALLY_FORM_ID, referralCode);
-  };
-
-  const scrollToWaitlist = () => {
-    document.getElementById("hero-waitlist-form")?.scrollIntoView({ behavior: "smooth", block: "center" });
-  };
 
   useEffect(() => {
     const io = new IntersectionObserver(
@@ -125,13 +110,12 @@ export default function LandingPage() {
             <Link href="/faq" className={styles.navLink}>FAQ</Link>
           </div>
           <div className={styles.navActions}>
-            {/* /login è una route Flask (proxata via next.config.ts rewrites),
-                non una pagina Next.js localizzata: <a> semplice, niente Link con prefisso locale.
-                "Registrati" è nascosto finché il prodotto è in beta privata a lista d'attesa:
-                l'unico ingresso pubblico è il form waitlist nell'hero, per non contraddire
-                il posizionamento "accesso esclusivo". */}
+            {/* Le route di autenticazione sono Flask, proxate via next.config.ts rewrites. */}
             <a href="/login" className={styles.btnPrimary}>
               {t("nav.accedi")}
+            </a>
+            <a href="/register" className={styles.btnPrimary}>
+              {t("nav.registrati")}
             </a>
             <LanguageSwitcher />
             {/* Hamburger — solo mobile */}
@@ -155,6 +139,9 @@ export default function LandingPage() {
             <Link href="/funzionalita" className={styles.mobileMenuLink} onClick={() => setMobileMenuOpen(false)}>Funzionalità</Link>
             <Link href="/sicurezza" className={styles.mobileMenuLink} onClick={() => setMobileMenuOpen(false)}>Sicurezza</Link>
             <Link href="/faq" className={styles.mobileMenuLink} onClick={() => setMobileMenuOpen(false)}>FAQ</Link>
+            <a href="/register" className={styles.mobileMenuLink} onClick={() => setMobileMenuOpen(false)}>
+              {t("nav.registrati")}
+            </a>
           </div>
         )}
       </nav>
@@ -182,22 +169,18 @@ export default function LandingPage() {
                 </div>
               )}
               <div className={styles.heroActions}>
-                <div id="hero-waitlist-form" className={styles.heroWaitlistForm}>
+                <div id="hero-registration" className={styles.heroWaitlistForm}>
                   <div className={styles.waitlistPrompt}>
                     <div>
                       <span className={styles.waitlistEyebrow}>{t("hero.betaEyebrow")}</span>
                       <p>{t("hero.betaPrompt")}</p>
                     </div>
-                    <button
-                      type="button"
+                    <a
+                      href="/register"
                       className={styles.waitlistButton}
-                      onClick={openWaitlist}
-                      data-tally-open={TALLY_FORM_ID}
-                      data-tally-layout="modal"
-                      data-tally-hide-title="1"
                     >
                       {t("hero.betaCta")} <span aria-hidden="true">→</span>
-                    </button>
+                    </a>
                   </div>
                 </div>
               </div>
@@ -351,9 +334,9 @@ export default function LandingPage() {
                   <span className={styles.pricingAmount}>€89</span>
                   <span className={styles.pricingPeriod}>{t("pricing.oneTime")}</span>
                 </div>
-                <button onClick={scrollToWaitlist} className={styles.btnPrimary}>
+                <a href="/register" className={styles.btnPrimary}>
                   {t("pricing.lifetime.cta")}
-                </button>
+                </a>
                 <ul className={styles.featureList}>
                   {premiumFeatures.map((feat) => (
                     <li key={feat} className={styles.featureListItem}>
