@@ -37,8 +37,7 @@ const GOAL_LABELS: Record<string, string> = {
   cashflow_control: "Avere maggiore controllo del mio flusso di denaro",
   budget: "Rispettare un budget",
   emergency_fund: "Costruire un fondo di emergenza",
-  savings_goal: "Risparmiare per un obiettivo",
-  debt_reduction: "Ridurre debiti e rate",
+  savings_goal: "Raggiungere un obiettivo",
   increase_savings: "Aumentare il risparmio",
 };
 

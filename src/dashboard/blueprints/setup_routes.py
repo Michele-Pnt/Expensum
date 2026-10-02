@@ -36,7 +36,7 @@ TELEGRAM_REQUEST_TIMEOUT = 10
 
 ONBOARDING_GOALS = frozenset({
     "cashflow_control", "budget", "emergency_fund", "savings_goal",
-    "debt_reduction", "increase_savings",
+    "increase_savings",
 })
 PROFILE_FIELDS = frozenset({
     "household_type", "has_job", "financial_experience",

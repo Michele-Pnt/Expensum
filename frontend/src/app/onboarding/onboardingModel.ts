@@ -3,7 +3,6 @@ export const GOAL_CODES = [
   "budget",
   "emergency_fund",
   "savings_goal",
-  "debt_reduction",
   "increase_savings",
 ] as const;
 
