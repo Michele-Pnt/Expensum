@@ -53,6 +53,26 @@ const nextConfig: NextConfig = {
         destination: `${backendOrigin}/register`,
       },
       {
+        source: "/forgot-password",
+        destination: `${backendOrigin}/forgot-password`,
+      },
+      {
+        source: "/reset-password",
+        destination: `${backendOrigin}/reset-password`,
+      },
+      {
+        source: "/check-email",
+        destination: `${backendOrigin}/check-email`,
+      },
+      {
+        source: "/verify-email",
+        destination: `${backendOrigin}/verify-email`,
+      },
+      {
+        source: "/verify-email/resend",
+        destination: `${backendOrigin}/verify-email/resend`,
+      },
+      {
         source: "/logout",
         destination: `${backendOrigin}/logout`,
       },
