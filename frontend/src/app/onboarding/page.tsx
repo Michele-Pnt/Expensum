@@ -2,12 +2,13 @@
 
 import { useState, useEffect, useCallback } from "react";
 import { useRouter } from "next/navigation";
-import { apiFetch, ApiError } from "@/lib/api";
+import { apiErrorMessage, apiFetch, ApiError } from "@/lib/api";
 import { trackOnboardingStepCompleted, trackOnboardingCompleted, trackReferralLinkGenerated } from "@/lib/analytics";
 import {
   Box,
   Typography,
   Button,
+  Alert,
   CircularProgress,
   LinearProgress,
   ToggleButton,
@@ -550,6 +551,7 @@ export default function OnboardingPage() {
   const router = useRouter();
   const [step, setStep] = useState(0);
   const [submitting, setSubmitting] = useState(false);
+  const [submitError, setSubmitError] = useState<string | null>(null);
   const [ageLoading, setAgeLoading] = useState(false);
   const [animDir, setAnimDir] = useState<"forward" | "back">("forward");
 
@@ -634,6 +636,7 @@ export default function OnboardingPage() {
 
   const handleComplete = useCallback(async () => {
     setSubmitting(true);
+    setSubmitError(null);
     try {
       await apiFetch("/api/onboarding/profile", {
         method: "POST",
@@ -679,10 +682,20 @@ export default function OnboardingPage() {
       setAnimDir("forward");
       setStep(8);
       setSubmitting(false);
-    } catch {
+    } catch (error) {
       setSubmitting(false);
+      if (error instanceof ApiError && error.message === "auth_401") {
+        router.replace("/login");
+        return;
+      }
+      setSubmitError(
+        apiErrorMessage(
+          error,
+          "Non siamo riusciti a completare l'account. Riprova tra poco.",
+        ),
+      );
     }
-  }, [state]);
+  }, [router, state]);
 
   const goToApp = useCallback(() => {
     // Hard reload: TourProvider deve rimontarsi sulla app per leggere i flag
@@ -821,12 +834,15 @@ export default function OnboardingPage() {
           )}
 
           {step === 7 && (
-            <ConfirmStep
-              state={state}
-              onConfirm={handleComplete}
-              onBack={goBack}
-              loading={submitting}
-            />
+            <>
+              {submitError && <Alert severity="error" sx={{ mb: 2 }}>{submitError}</Alert>}
+              <ConfirmStep
+                state={state}
+                onConfirm={handleComplete}
+                onBack={goBack}
+                loading={submitting}
+              />
+            </>
           )}
 
           {step === 8 && <InviteStep onContinue={goToApp} />}
