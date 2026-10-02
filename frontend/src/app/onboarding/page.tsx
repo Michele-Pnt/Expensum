@@ -17,7 +17,14 @@ import {
   FormControlLabel,
   TextField,
 } from "@mui/material";
-import { GOAL_CODES, toggleGoal } from "./onboardingModel";
+import {
+  acceptAllOptionalConsents,
+  DEFAULT_OPTIONAL_CONSENTS,
+  GOAL_CODES,
+  OptionalConsentState,
+  rejectAllOptionalConsents,
+  toggleGoal,
+} from "./onboardingModel";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -32,6 +39,7 @@ interface WizardState {
   salaryAccountName: string;
   salaryPaydayDay: string;
   notificationsEnabled: boolean;
+  consents: OptionalConsentState;
 }
 
 const GOAL_LABELS: Record<string, string> = {
@@ -296,6 +304,97 @@ function NotificationsStep({
   );
 }
 
+function ConsentStep({
+  value,
+  onChange,
+  onNext,
+  onBack,
+}: {
+  value: OptionalConsentState;
+  onChange: (value: OptionalConsentState) => void;
+  onNext: () => void;
+  onBack: () => void;
+}) {
+  const setConsent = (name: keyof OptionalConsentState, enabled: boolean) => {
+    const next = { ...value, [name]: enabled };
+    if (name === "algorithm_improvement" && !enabled) {
+      next.structured_text_usage = false;
+      next.structured_voice_usage = false;
+      next.ocr_text_usage = false;
+    }
+    onChange(next);
+  };
+
+  const items: Array<{ name: keyof OptionalConsentState; label: string; help: string }> = [
+    {
+      name: "product_analytics",
+      label: "Aiutaci a migliorare Expensum",
+      help: "Statistiche aggregate e non necessarie al funzionamento del servizio.",
+    },
+    {
+      name: "marketing_email",
+      label: "Ricevere comunicazioni via email",
+      help: "Novità, consigli e aggiornamenti sul prodotto.",
+    },
+    {
+      name: "algorithm_improvement",
+      label: "Contribuire al miglioramento degli algoritmi",
+      help: "Usare dati strutturati per migliorare le funzioni automatiche.",
+    },
+    {
+      name: "structured_text_usage",
+      label: "Usare i dati inseriti come testo per il training",
+      help: "Richiede il consenso generale al miglioramento degli algoritmi.",
+    },
+    {
+      name: "structured_voice_usage",
+      label: "Usare i dati derivati dagli audio per il training",
+      help: "Non conserviamo l’audio per questo scopo: usiamo solo dati strutturati.",
+    },
+    {
+      name: "ocr_text_usage",
+      label: "Usare i dati derivati dall’OCR per il training",
+      help: "Non usiamo la foto: solo il testo strutturato estratto dallo scontrino.",
+    },
+  ];
+
+  return (
+    <StepWrapper title="Privacy e miglioramento del servizio" onNext={onNext} onBack={onBack} canNext>
+      <Typography variant="body2" sx={{ color: "var(--color-text-2)", mb: 2 }}>
+        Le scelte sono facoltative. Puoi cambiarle in qualsiasi momento da Impostazioni → Privacy.
+        I consensi per il training sono disattivati in partenza.
+      </Typography>
+      <Box sx={{ display: "flex", gap: 1, mb: 2 }}>
+        <Button variant="outlined" size="small" onClick={() => onChange(acceptAllOptionalConsents())}>
+          Accetta tutto
+        </Button>
+        <Button variant="outlined" size="small" onClick={() => onChange(rejectAllOptionalConsents())}>
+          Rifiuta tutto
+        </Button>
+      </Box>
+      <Box sx={{ display: "flex", flexDirection: "column", gap: 1 }}>
+        {items.map((item) => (
+          <Box key={item.name} sx={{ borderBottom: "1px solid var(--color-border)", py: 1 }}>
+            <FormControlLabel
+              control={
+                <Switch
+                  checked={value[item.name]}
+                  disabled={item.name !== "algorithm_improvement" && item.name.includes("usage") && !value.algorithm_improvement}
+                  onChange={(event) => setConsent(item.name, event.target.checked)}
+                />
+              }
+              label={item.label}
+            />
+            <Typography variant="caption" sx={{ display: "block", color: "var(--color-text-2)", ml: 6 }}>
+              {item.help}
+            </Typography>
+          </Box>
+        ))}
+      </Box>
+    </StepWrapper>
+  );
+}
+
 function ConfirmStep({
   state,
   onConfirm,
@@ -534,16 +633,17 @@ const toggleBtnSx = {
 
 // ─── Step definitions ─────────────────────────────────────────────────────────
 // step 0 = welcome        (non conta nel progress)
-// step 1 = age_gate       (visible 1/6)
-// step 2 = language       (visible 2/6)
-// step 3 = goals          (visible 3/6)
-// step 4 = salary         (visible 4/7)
-// step 5 = lifestyle      (visible 5/7)
-// step 6 = notifications  (visible 6/7)
-// step 7 = confirm        (visible 7/7)
-// step 8 = aha-moment     (no progress bar — step finale)
+// step 1 = age_gate       (visible 1/8)
+// step 2 = language       (visible 2/8)
+// step 3 = goals          (visible 3/8)
+// step 4 = salary         (visible 4/8)
+// step 5 = lifestyle      (visible 5/8)
+// step 6 = notifications  (visible 6/8)
+// step 7 = consents       (visible 7/8)
+// step 8 = confirm        (visible 8/8)
+// step 9 = aha-moment     (no progress bar — step finale)
 
-const TOTAL_VISIBLE = 7;
+const TOTAL_VISIBLE = 8;
 
 // ─── Main wizard ──────────────────────────────────────────────────────────────
 
@@ -568,6 +668,7 @@ export default function OnboardingPage() {
     salaryAccountName: "",
     salaryPaydayDay: "27",
     notificationsEnabled: true,
+    consents: DEFAULT_OPTIONAL_CONSENTS,
   });
 
   const update = useCallback((partial: Partial<WizardState>) => {
@@ -657,6 +758,10 @@ export default function OnboardingPage() {
           },
         });
       }
+      await apiFetch("/api/settings/consents", {
+        method: "POST",
+        body: { choices: state.consents, source: "onboarding" },
+      });
       await apiFetch("/api/onboarding/complete", {
         method: "POST",
         body: {
@@ -680,7 +785,7 @@ export default function OnboardingPage() {
       // Non reindirizza subito: mostra la schermata di condivisione referral
       // (picco di entusiasmo appena finito il form, prima che si distragga).
       setAnimDir("forward");
-      setStep(8);
+      setStep(9);
       setSubmitting(false);
     } catch (error) {
       setSubmitting(false);
@@ -834,6 +939,15 @@ export default function OnboardingPage() {
           )}
 
           {step === 7 && (
+            <ConsentStep
+              value={state.consents}
+              onChange={(consents) => update({ consents })}
+              onNext={() => goNext("consents", { consents: state.consents })}
+              onBack={goBack}
+            />
+          )}
+
+          {step === 8 && (
             <>
               {submitError && <Alert severity="error" sx={{ mb: 2 }}>{submitError}</Alert>}
               <ConfirmStep
@@ -845,7 +959,7 @@ export default function OnboardingPage() {
             </>
           )}
 
-          {step === 8 && <InviteStep onContinue={goToApp} />}
+          {step === 9 && <InviteStep onContinue={goToApp} />}
 
         </Box>
       </Box>
