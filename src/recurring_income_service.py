@@ -5,8 +5,10 @@ from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal
 
+from src.storage import rls
 from src.storage.models import Income, RecurringIncomeRule
 from src.storage.postgres_storage import PostgresStorage
+from src.user_store import User
 
 
 CADENCES = frozenset({"monthly"})
@@ -59,6 +61,7 @@ def create_recurring_income_rule(
     if not 1 <= payday_day <= 31:
         raise ValueError("Payday must be between 1 and 31")
     with store.Session() as session:
+        rls.bind_user(session, user_id)
         rule = RecurringIncomeRule(
             user_id=str(user_id), name=name.strip() or "Stipendio", amount=amount,
             cadence=cadence, payday_day=payday_day,
@@ -140,12 +143,30 @@ def process_due_recurring_incomes(store, as_of: date) -> RecurringIncomeSummary:
     """Materialize due rules exactly once using the occurrence unique key."""
     created = skipped = 0
     with store.Session() as session:
-        rules = session.query(RecurringIncomeRule).filter(
-            RecurringIncomeRule.active.is_(True),
-            RecurringIncomeRule.next_due_date <= as_of,
-        ).all()
-    for rule_snapshot in rules:
+        user_ids = [
+            row[0]
+            for row in session.query(User.chat_id).filter(
+                User.storage_backend == "postgres",
+                User.is_active.is_(True),
+            ).all()
+        ]
+
+    # RLS requires one transaction-local tenant binding per user.  Querying all
+    # recurring rules in an unbound session would fail closed on PostgreSQL.
+    rule_snapshots = []
+    for user_id in user_ids:
         with store.Session() as session:
+            rls.bind_user(session, user_id)
+            rule_snapshots.extend(
+                session.query(RecurringIncomeRule).filter(
+                    RecurringIncomeRule.user_id == user_id,
+                    RecurringIncomeRule.active.is_(True),
+                    RecurringIncomeRule.next_due_date <= as_of,
+                ).all()
+            )
+    for rule_snapshot in rule_snapshots:
+        with store.Session() as session:
+            rls.bind_user(session, rule_snapshot.user_id)
             rule = session.get(RecurringIncomeRule, rule_snapshot.id)
             if rule is None or not rule.active or rule.next_due_date > as_of:
                 skipped += 1
