@@ -845,17 +845,12 @@ def get_engagement_acquisition(
 # ---------------------------------------------------------------------------
 # 11. Stato scheduled job (esiti + no-show)
 # ---------------------------------------------------------------------------
-# Timezone in cui sono espressi gli orari di JOB_SCHEDULE: deve restare allineata
-# al `timezone="Europe/Rome"` passato a BackgroundScheduler in bot.py::_start_scheduler
-# (e al job schedule per scheduled job, anch'esso in local timezone).
-# `now` in questo modulo è sempre naive-UTC (datetime.utcnow()): l'orario locale va
-# quindi convertito in UTC prima di essere confrontato, altrimenti "atteso oggi" e la
-# rilevazione no-show sono sfasati dell'offset CET/CEST (1h o 2h a seconda del periodo
-# dell'anno).
+# The schedule uses the same local timezone as BackgroundScheduler in bot.py.
+# `now` in this module is naive UTC, so local schedule times must be converted
+# before comparing them with the current time.
 SCHEDULER_TZ = ZoneInfo("Europe/Rome")
 
-# Schedule atteso, mirror di bot.py::_start_scheduler + del scheduled job
-# (scheduled job). Serve a rilevare i job attesi ma mai eseguiti oggi ("no-show").
+# Expected schedule, aligned with bot.py::_start_scheduler, used to detect missed jobs.
 JOB_SCHEDULE: list[dict[str, Any]] = [
     {"job_id": "db_backup", "label": "Backup DB (pg_dump→B2)", "kind": "daily", "hour": 2, "minute": 30},
     {"job_id": "daily_recurring_income_job", "label": "Entrate ricorrenti", "kind": "daily", "hour": 2, "minute": 55},
