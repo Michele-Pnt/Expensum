@@ -1,3 +1,4 @@
+/* eslint-disable @next/next/no-html-link-for-pages -- Registration is a Flask rewrite. */
 "use client";
 
 import { ArrowUpRight } from "lucide-react";

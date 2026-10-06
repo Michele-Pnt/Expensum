@@ -5,7 +5,7 @@ src/dashboard/admin_metrics.py::get_expense_label_cluster_stats.
 Tier `integration`: usa la fixture condivisa `mock_db_session` (SQLite in-memory)
 definita in tests/conftest.py, come tests/test_admin_metrics.py.
 """
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -15,7 +15,7 @@ from src.user_store import User
 
 pytestmark = pytest.mark.integration
 
-NOW = datetime(2026, 9, 2, 12, 0, 0)
+NOW = datetime.now(timezone.utc).replace(tzinfo=None)
 
 
 def _seed(store):

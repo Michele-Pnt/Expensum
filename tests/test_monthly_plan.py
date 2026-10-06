@@ -429,6 +429,10 @@ class TestMonthlyPlanBuilder:
     def test_income_forecast_uses_full_next_month_and_exposes_sources(self):
         storage = self._make_storage()
         reference = date(2026, 9, 16)
+        storage.fetch_income.return_value = [
+            {"date": date(2026, month, 1), "amount": 2000.0, "name": "Stipendio"}
+            for month in range(3, 9)
+        ]
         data = MonthlyPlanBuilder().build(storage, reference_date=reference)
 
         assert data.target_month == date(2026, 10, 1)

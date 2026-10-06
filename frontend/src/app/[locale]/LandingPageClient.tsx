@@ -1,3 +1,4 @@
+/* eslint-disable @next/next/no-html-link-for-pages -- Auth paths are unlocalized Flask rewrites. */
 "use client";
 
 import React, { useEffect, useState } from "react";
