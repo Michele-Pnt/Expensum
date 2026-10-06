@@ -42,3 +42,6 @@ build/
 .idea/
 *.swp
 *.swo
+
+# Local frontend review artifacts
+frontend/.tmp/
