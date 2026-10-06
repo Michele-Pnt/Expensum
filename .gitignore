@@ -1,0 +1,44 @@
+# Secrets and local configuration
+.env
+.env.*
+!.env.example
+!.env.local.example
+secrets/
+*-service-account*.json
+*sa-key*.json
+
+# Local databases and logs
+*.db
+*.db-journal
+*.sqlite
+*.sqlite3
+logs/
+*.log
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.coverage*
+htmlcov/
+
+# Node.js / Next.js
+node_modules/
+.next/
+out/
+.turbo/
+
+# Build and editor artifacts
+dist/
+build/
+.DS_Store
+.vscode/
+.idea/
+*.swp
+*.swo
