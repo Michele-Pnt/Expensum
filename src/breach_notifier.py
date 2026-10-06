@@ -7,7 +7,7 @@ il messaggio a tutti gli utenti attivi tramite il canale Telegram, registra l'es
 violazioni (`data_breaches.users_notified`) e nell'audit log.
 
 NB: il canale **email** non è ancora operativo — nel codebase non esiste un client email (l'integrazione
-Brevo è in roadmap, cfr. the email integration roadmap). Finché non viene integrato, la comunicazione
+non è ancora stata integrata). Finché non viene integrato, la comunicazione
 ufficiale agli interessati passa da Telegram + pagina web `/security-incident-{id}`. Il punto di
 estensione è marcato con `_send_email_stub`.
 """

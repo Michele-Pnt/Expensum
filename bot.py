@@ -3748,7 +3748,7 @@ def _nightly_inactivity_job() -> None:
 
     Solo utenti Postgres: per Notion servirebbe una chiamata API per utente,
     troppo costosa e soggetta a rate limit per un controllo nightly su tutta la
-    base utenti (vedi the Notion API limits).
+    base utenti.
 
     `expenses` ha la Row-Level Security abilitata (vedi `UserStore._user_session`):
     una query aggregata su una sessione non bindata al tenant non vede nessuna

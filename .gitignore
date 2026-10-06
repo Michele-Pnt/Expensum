@@ -45,3 +45,16 @@ build/
 
 # Local frontend review artifacts
 frontend/.tmp/
+
+# Private agent instructions and planning files
+.claude/
+.codex/
+.agents/
+AGENTS.md
+CLAUDE.md
+ROADMAP.md
+SESSION_LOG.md
+docs/agents/
+docs/archived/
+docs/runbooks/
+docs/internal/

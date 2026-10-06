@@ -11,7 +11,7 @@ ritrovare anche dopo, non solo nell'istante in cui si verifica.
 
 Layer sottile e backend-agnostico rispetto allo storage finanziario: `Notification`
 non è un dato finanziario dell'utente, quindi non serve l'astrazione Notion/Postgres
-defined by the storage architecture — usa direttamente una `Session` SQLAlchemy, stesso pattern
+prevista dall’architettura dello storage — usa direttamente una `Session` SQLAlchemy, stesso pattern
 di `src/subscription_detector.py`.
 """
 from __future__ import annotations
