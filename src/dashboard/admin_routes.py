@@ -327,7 +327,7 @@ _MAX_SCAN_LINES = 4000  # tetto di righe lette per file (bound di memoria)
 def _parse_log_line(line: str) -> dict[str, Any] | None:
     """Parsa una riga JSON Lines nel formato di config.JsonFormatter.
 
-    Mirror di log analysis tooling::_parse_jsonl_line (schema ts/level/domain/
+    Il parsing segue lo schema ts/level/domain/
     event/meta), tenuto locale per non dipendere da un import del package scripts/.
     """
     try:

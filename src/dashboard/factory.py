@@ -26,7 +26,7 @@ logger = logging.getLogger(__name__)
 def create_app() -> Flask:
     """Costruisce l'app Flask della dashboard: config, estensioni, hook globali."""
     # static_url_path sotto /admin: nginx proxya a Flask solo /admin, /auth e
-    # /api (vedi deployment documentation) — lo static_url_path di default "/static" cade
+    # /api — lo static_url_path di default "/static" cade
     # fuori da questi prefissi e finisce sul frontend Next.js (404), lasciando
     # la dashboard admin senza CSS. Solo i template della dashboard (base.html)
     # referenziano static/, quindi spostarlo sotto /admin/static non tocca le

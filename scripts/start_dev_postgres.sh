@@ -22,7 +22,7 @@ LOG_DIR="$PROJECT_DIR/logs"
 mkdir -p "$LOG_DIR"
 
 if [ ! -f "$PROJECT_DIR/.env.local" ]; then
-    echo "Errore: manca .env.local — copialo da .env.local.example (vedi development documentation)" >&2
+    echo "Errore: manca .env.local — copialo da .env.local.example (vedi docs/development.md)" >&2
     exit 1
 fi
 

@@ -1218,7 +1218,7 @@ def test_telegram_login_reassigns_account_to_new_chat_id(client, monkeypatch):
     from src.dashboard.app import store
 
     # La route arruola la riassegnazione in coda e attende (polling) il worker fuori
-    # banda (scripts/process_reassignment_jobs.py) — vedi
+    # banda (the reassignment worker) — vedi
     # UserStore.enqueue_chat_id_reassignment/wait_for_reassignment_job. Nessun worker
     # gira nei test: si simula il suo turno eseguendo la coda al posto dello sleep.
     monkeypatch.setattr(

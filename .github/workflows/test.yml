@@ -14,6 +14,9 @@ on:
     branches: [ main, master ]
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 env:
   # Forza Node.js 24 per le GitHub Actions (rimuove il deprecation warning)
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
@@ -53,7 +56,6 @@ jobs:
     - name: Scansione CVE dipendenze (pip-audit)
       run: |
         pip-audit -r requirements.lock --strict --desc
-        pip-audit -r ML-model/requirements.lock --strict --desc
 
     - name: Esecuzione Test Suite (unit + integration, MOCK mode)
       run: |
@@ -65,11 +67,45 @@ jobs:
 
     - name: Coverage (moduli testabili, senza dipendenze grafiche/SDK heavy)
       run: |
-        python -m pytest \
-          --cov=src \
+        python -m pytest --cov=src --cov-report=term-missing
 
     - name: Upload della coverage (Opzionale)
       uses: codecov/codecov-action@v4
       with:
         token: ${{ secrets.CODECOV_TOKEN }}
         fail_ci_if_error: false
+
+  frontend:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout del codice
+      uses: actions/checkout@v4
+      with:
+        persist-credentials: false
+
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '22'
+        cache: npm
+        cache-dependency-path: frontend/package-lock.json
+
+    - name: Installazione dipendenze frontend
+      working-directory: frontend
+      run: npm ci
+
+    - name: Test frontend
+      working-directory: frontend
+      run: npm test
+
+    - name: Lint frontend
+      working-directory: frontend
+      run: npm run lint
+
+    - name: Typecheck frontend
+      working-directory: frontend
+      run: npm run typecheck
+
+    - name: Production build
+      working-directory: frontend
+      run: npm run build

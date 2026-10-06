@@ -721,7 +721,7 @@ class ChatIdReassignmentJob(Base):
     tabella (stesso criterio di `JobRun` in `user_store.py`). L'app (ruolo
     DML-only) può solo arruolare/leggere; solo `scripts/process_reassignment_jobs.py`
     (ruolo owner, mai esposto a rete) esegue davvero la riassegnazione — vedi
-    security design notes § Vulnerabilità residua #2.
+    the queued reassignment design.
     """
 
     __tablename__ = "chat_id_reassignment_jobs"

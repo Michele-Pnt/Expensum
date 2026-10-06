@@ -31,7 +31,7 @@ if db_url:
     # configparser (usato da Alembic) interpreta '%' come sintassi di interpolazione:
     # va raddoppiato ('%%') o la set_main_option solleva ValueError. NB: i caratteri
     # strutturali dell'URL (@ : / ?) in una password vanno comunque percent-encoded a
-    # monte — consigliata una password alfanumerica per i ruoli DB (vedi deployment documentation).
+    # monte — consigliata una password alfanumerica per i ruoli DB.
     config.set_main_option("sqlalchemy.url", db_url.replace("%", "%%"))
 
 # Interpret the config file for Python logging.

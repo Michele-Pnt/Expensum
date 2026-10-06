@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # =============================================================================
-# dev_db.sh — gestione dell'ambiente Postgres locale 1:1 con la produzione.
-# Documentazione completa: development documentation
+# dev_db.sh — gestione del database PostgreSQL locale per sviluppo e test.
+# Documentazione: docs/development.md
 #
 # Comandi:
 #   up        Avvia il container Postgres (localhost:5433)

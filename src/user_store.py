@@ -900,7 +900,7 @@ class UserStore(LedgerRepository, RetentionRepository):
         # su SQLite (dev/test) gira sempre, non c'è separazione di ruoli né Alembic.
         # Su Postgres gira SOLO se RUN_RUNTIME_MIGRATIONS=true: in produzione il
         # runtime usa un ruolo DML-only senza privilegi DDL, e lo schema lo gestisce
-        # esclusivamente Alembic. Vedi deployment documentation e development documentation.
+        # esclusivamente Alembic. Vedi docs/development.md.
         is_sqlite = self.engine.dialect.name == "sqlite"
         run_runtime_ddl = is_sqlite or os.getenv("RUN_RUNTIME_MIGRATIONS", "false").lower() == "true"
         if run_runtime_ddl:
@@ -946,8 +946,7 @@ class UserStore(LedgerRepository, RetentionRepository):
         minima: usarla SOLO per operazioni cross-tenant impossibili sotto RLS
         (es. reassign_user_chat_id, old→new user_id). Mai per flussi per-utente.
 
-        Dall'introduzione della coda (Opzione B, v. security design notes § Vulnerabilità
-        residua #2), l'unico chiamante in produzione è
+        Dall'introduzione della coda (Opzione B, v. the queued reassignment design), l'unico chiamante in produzione è
         `scripts/process_reassignment_jobs.py` — un processo separato, mai esposto a
         rete, che è l'unico a tenere `MIGRATION_DATABASE_URL` in memoria. bot.py e
         src/dashboard/app.py non la usano più direttamente.
@@ -1772,7 +1771,7 @@ class UserStore(LedgerRepository, RetentionRepository):
         a `scripts/process_reassignment_jobs.py`, l'unico processo con le credenziali
         owner (`MIGRATION_DATABASE_URL`), mai esposto a rete. Vedi
         `wait_for_reassignment_job` per attendere l'esito e `reassign_user_chat_id` per
-        la logica effettiva. security design notes § Vulnerabilità residua #2.
+        la logica effettiva.
         """
         from src.storage.models import ChatIdReassignmentJob
 
@@ -1868,7 +1867,7 @@ class UserStore(LedgerRepository, RetentionRepository):
         SOLO da `scripts/process_reassignment_jobs.py` (worker fuori banda con credenziali
         owner) — il bot/dashboard non la chiamano più direttamente, usano
         `enqueue_chat_id_reassignment` + `wait_for_reassignment_job`. Vedi Opzione B in
-        security design notes § Vulnerabilità residua #2.
+        the queued reassignment design.
         Se il `new_chat_id` è già occupato da un altro account reale, solleva ValueError.
         """
         from src.storage.models import (
@@ -3134,7 +3133,7 @@ class UserStore(LedgerRepository, RetentionRepository):
 
         Normalmente l'utente ha già un TallyLead (arrivato dalla waitlist) con
         un referral_code assegnato al submit. Per gli account creati fuori da quel
-        flusso (es. administrative provisioning) crea un TallyLead sintetico solo
+        flusso amministrativo crea un TallyLead sintetico solo
         per ospitare il referral_code, così la web app può sempre mostrare un link.
         """
         email = (email or "").strip().lower()
@@ -3240,7 +3239,7 @@ class UserStore(LedgerRepository, RetentionRepository):
 
         Ritorna (chat_id, password) oppure None se esiste già un account per
         quell'email (a qualunque stato). Stessa logica usata sia dal comando
-        manuale (administrative provisioning) sia dalla creazione automatica
+        amministrativa sia dalla creazione automatica
         al submit del form Tally (src/dashboard/app.py).
 
         Il consenso privacy/ToS NON viene auto-popolato qui: resta `NULL` finché

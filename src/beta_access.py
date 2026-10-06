@@ -1,8 +1,8 @@
 """
 src/beta_access.py — Creazione account beta e invio email di accesso.
 
-Condiviso tra creazione manuale (administrative provisioning) e automatica al
-submit del form Tally (src/dashboard/app.py::webhook_tally, con tetto
+Condiviso tra la creazione amministrativa e quella automatica al submit del
+form Tally (src/dashboard/app.py::webhook_tally, con tetto
 Config.AUTO_BETA_ACCESS_MAX_ACCOUNTS).
 """
 

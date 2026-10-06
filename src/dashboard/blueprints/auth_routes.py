@@ -1089,7 +1089,7 @@ def telegram_login_miniapp():
     # Gestisce accesso da chat_id diverso (cambio account Telegram). Riassegnazione
     # cross-tenant: arruolata qui (ruolo DML-only), eseguita da
     # scripts/process_reassignment_jobs.py (worker fuori banda, ruolo owner mai esposto
-    # a rete). Vedi security design notes § Vulnerabilità residua #2.
+    # a rete). The worker applies the update outside the request handler.
     final_chat_id = chat_id
     if user.chat_id != chat_id:
         job_id = store.enqueue_chat_id_reassignment(user.chat_id, chat_id)

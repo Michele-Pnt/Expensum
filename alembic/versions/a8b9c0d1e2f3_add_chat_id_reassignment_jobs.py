@@ -6,8 +6,7 @@ migration girava in-process nel bot/dashboard con MIGRATION_DATABASE_URL sempre
 residente in memoria nel processo esposto a internet. Da ora l'app (ruolo
 DML-only) si limita ad arruolare la richiesta in questa tabella; un worker
 separato (scripts/process_reassignment_jobs.py, unico processo con le
-credenziali owner, mai esposto a rete) la esegue e aggiorna lo stato — vedi
-security design notes, Vulnerabilita' residua #2.
+credenziali owner, mai esposto a rete) la esegue e aggiorna lo stato in a separate worker.
 
 Tabella operativa senza dati finanziari (solo due chat_id e uno stato): nessuna
 RLS, stesso criterio di job_runs.

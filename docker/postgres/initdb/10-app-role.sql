@@ -10,7 +10,6 @@
 --   - solo SELECT/INSERT/UPDATE/DELETE → una eventuale SQL injection non può
 --     DROP/ALTER né leggere fuori dal proprio tenant (grazie alla RLS)
 --
--- La guida equivalente per la VPS di produzione è in deployment documentation.
 -- =============================================================================
 
 CREATE ROLE expensum_app WITH

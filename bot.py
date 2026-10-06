@@ -178,7 +178,7 @@ class _StorageClientCache(TTLCache):
         super().__delitem__(key)
 
 
-# Cache client storage: TTL 30 min, max 200 utenti (VPS Hetzner CX23 — 4GB RAM)
+# Cache client storage: TTL 30 min, max 200 utenti (limits memory use on small hosts)
 _storage_clients: TTLCache = _StorageClientCache(maxsize=200, ttl=1800)
 
 
@@ -1247,7 +1247,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             return
         # Riassegnazione cross-tenant: arruolata qui (ruolo DML-only), eseguita da
         # scripts/process_reassignment_jobs.py (worker fuori banda, ruolo owner mai
-        # esposto a rete). Vedi security design notes § Vulnerabilità residua #2.
+        # esposto a rete). The worker applies the update outside the request handler.
         job_id = _user_store.enqueue_chat_id_reassignment(old_chat_id, chat_id)
         status, error_text = _user_store.wait_for_reassignment_job(job_id)
         if status == "failed":
@@ -3115,7 +3115,7 @@ def _notify_category_reassignments(
 def _nightly_category_sync(app: Application, loop: asyncio.AbstractEventLoop) -> None:
     """Job APScheduler alle 03:00 — aggiorna medie categorie per tutti gli utenti attivi.
 
-    Sequenziale con 200ms di sleep tra utenti per non saturare CPU/rete su Hetzner CX23.
+    Sequenziale con 200ms di sleep tra utenti per ridurre carico e traffico di rete.
     Ogni utente Notion usa il proprio OAuth token → bucket rate limit separato.
 
     Per gli utenti Notion la sync è anche riconciliante: rimuove dalla cache le

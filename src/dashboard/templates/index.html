@@ -15,7 +15,7 @@
 <div class="stats-grid">
     <!-- RAM -->
     <div class="stat-card glass-panel">
-        <div class="stat-label">Uso Memoria Server {{ ui.info("Percentuale di RAM usata sul server, letta con psutil. Il VPS Netcup ha 4 GB: sopra l'80% (rosso) il rischio è che bot e PostgreSQL rallentino o vadano in errore per memoria esaurita.") }}</div>
+        <div class="stat-label">Uso Memoria Server {{ ui.info("Percentuale di RAM usata sul server, letta con psutil. Sopra l'80% (rosso) possono verificarsi rallentamenti o errori dovuti alla pressione sulla memoria.") }}</div>
         <div class="stat-value" id="kpi-ram-value"
             style="color: {% if sys.ram_percent > 80 %}var(--danger){% else %}var(--accent-primary){% endif %}">
             {{ sys.ram_percent }}%

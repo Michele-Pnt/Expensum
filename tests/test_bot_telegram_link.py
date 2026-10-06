@@ -8,7 +8,7 @@ pytestmark = pytest.mark.integration
 @pytest.fixture(autouse=True)
 def _simulate_reassignment_worker(monkeypatch):
     """cmd_start arruola la riassegnazione chat_id in coda e attende (polling) che
-    scripts/process_reassignment_jobs.py la esegua — vedi UserStore.enqueue_chat_id_reassignment
+    the reassignment worker la esegua — vedi UserStore.enqueue_chat_id_reassignment
     / wait_for_reassignment_job. Nei test nessun worker separato gira: si simula il suo
     turno rimpiazzando lo sleep del polling con l'esecuzione sincrona della coda, cosi'
     il test resta veloce e deterministico invece di aspettare il timeout reale (8s)."""

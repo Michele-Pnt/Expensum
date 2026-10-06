@@ -896,7 +896,7 @@ def test_reassign_user_chat_id_cleans_up_placeholder_target_children(mock_db_ses
 
 
 # ---------------------------------------------------------------------------
-# Coda riassegnazione chat_id (Opzione B — security design notes § Vuln. residua #2)
+# Queued chat ID reassignment
 # ---------------------------------------------------------------------------
 
 def test_enqueue_chat_id_reassignment_creates_pending_job(mock_db_session):

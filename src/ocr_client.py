@@ -248,7 +248,7 @@ class OcrClient:
 
     def _log_field_missing(self, field: str, chat_id: str) -> None:
         """Log differenziato per campo mancante — un unico event name con
-        meta.field per restare aggregabile da log analysis tooling (che
+        meta.field per restare aggregabile dagli strumenti di analisi dei log (che
         raggruppa per domain/event), ma comunque distinguibile per causa."""
         logger.warning(
             "ocr_field_extraction_failed",

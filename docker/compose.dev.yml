@@ -1,13 +1,10 @@
-# Ambiente di sviluppo locale 1:1 con la produzione (Netcup VPS).
-#
-# Riproduce fedelmente l'assetto runtime di produzione:
-#   - PostgreSQL 17 (stessa major version del VPS)
+# PostgreSQL locale per sviluppo e test:
+#   - PostgreSQL 17
 #   - ruolo `expensum`      → OWNER dello schema, gira le migration Alembic (bypassa RLS)
 #   - ruolo `expensum_app`  → runtime dell'app, DML-only, NON owner → soggetto a Row-Level Security
 #
-# In produzione `expensum` è owner (non superuser); qui l'immagine lo crea superuser.
-# La differenza è irrilevante per i test di sicurezza: la RLS si valida sul ruolo
-# `expensum_app`, che è identico a quello di produzione. Vedi development documentation.
+# Il ruolo amministrativo locale gestisce le migration; l'app usa `expensum_app`.
+# Vedi docs/development.md.
 #
 # Uso rapido:  ./scripts/dev_db.sh up
 name: expensum-dev

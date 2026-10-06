@@ -7,7 +7,7 @@ stessa deliverability):
   via Tally); l'eventuale email di follow-up automatica è configurata nel
   pannello Brevo (Automation), non da questo modulo.
 - send_transactional_email: invio diretto 1-a-1 con contenuto dinamico per
-  destinatario (es. credenziali beta generate da administrative provisioning),
+  destinatario (per esempio credenziali di accesso generate dal flusso beta),
   triggerato dal nostro codice invece che da un'automazione a evento.
 """
 
@@ -144,7 +144,7 @@ def send_transactional_email(
     autenticato dell'automazione marketing, nessuna perdita di deliverability).
 
     Usata per l'invio delle credenziali di accesso ai beta tester
-    (administrative provisioning) e per il drip lifecycle trial (src/trial_lifecycle.py):
+    (flusso beta) e per il lifecycle trial (src/trial_lifecycle.py):
     contenuto dinamico per destinatario, quindi non esprimibile con la sola automazione a
     trigger del pannello Brevo.
 

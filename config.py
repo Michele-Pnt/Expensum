@@ -20,12 +20,12 @@ if not _AUDIT_MODE:
     # Carica il file .env dalla root del progetto.
     load_dotenv(dotenv_path=Path(__file__).parent / ".env")
 
-    # Ambiente Postgres locale dockerizzato (development documentation): se .env.local esiste,
+    # Ambiente Postgres locale dockerizzato (docs/development.md): se .env.local esiste,
     # le sue variabili (DATABASE_URL su localhost:5433, ecc.) vincono su .env. Senza questo,
     # qualsiasi script/processo lanciato in un terminale dove non è stato fatto
     # `source .env.local` a mano ricade silenziosamente sul fallback sqlite di
     # Config.DATABASE_URL, con schema disallineato dalle migration Alembic più recenti.
-    # In produzione .env.local non esiste: load_dotenv su un path assente è un no-op innocuo.
+    # Senza .env.local, load_dotenv su un path assente è un no-op innocuo.
     # Esclusa la modalità test (conftest.py imposta TESTING=True prima di ogni import,
     # vedi tests/conftest.py riga 18): i test devono restare sqlite-in-memory, mai Postgres.
     if os.getenv("TESTING") != "True":
@@ -137,7 +137,7 @@ class Config:
     TALLY_WEBHOOK_SIGNING_SECRET: str = os.getenv("TALLY_WEBHOOK_SIGNING_SECRET", "")
     # Mittente delle email transazionali (deve essere un dominio verificato su Brevo:
     # Settings → Senders & IP → Domains, con SPF/DKIM configurati)
-    BREVO_SENDER_EMAIL: str = os.getenv("BREVO_SENDER_EMAIL", "hello@expensum.it")
+    BREVO_SENDER_EMAIL: str = os.getenv("BREVO_SENDER_EMAIL", "sender@example.com")
     BREVO_SENDER_NAME: str = os.getenv("BREVO_SENDER_NAME", "Expensum")
 
     # --- TRIAL LIFECYCLE ---
@@ -170,18 +170,18 @@ class Config:
 
     # --- SICUREZZA e CLOUD ---
     # Email di supporto mostrata agli utenti bannati per comportamento malevolo
-    SUPPORT_EMAIL: str = os.getenv("SUPPORT_EMAIL", "support@expensum.app")
+    SUPPORT_EMAIL: str = os.getenv("SUPPORT_EMAIL", "support@example.com")
     # Password master per la web dashboard
     DASHBOARD_PASSWORD: str = os.getenv("DASHBOARD_PASSWORD", "admin")
     # Fase beta: registrazione self-service disattivata, gli account vengono
-    # creati manualmente (administrative provisioning) e le credenziali inviate
+    # creati tramite il flusso amministrativo e le credenziali inviate
     # via email. Riattivare (true) solo al lancio pubblico.
     PUBLIC_REGISTRATION_ENABLED: bool = os.getenv("PUBLIC_REGISTRATION_ENABLED", "false").lower() == "true"
     # Canale storico Tally dismesso: la registrazione beta passa dal sito con
     # password scelta dall'utente e verifica email.
     AUTO_BETA_ACCESS_ENABLED: bool = os.getenv("AUTO_BETA_ACCESS_ENABLED", "false").lower() == "true"
     # Tetto sul numero di account beta creati automaticamente (oltre, servono
-    # creazioni manuali via administrative provisioning). Protegge da un afflusso
+    # creazioni amministrative). Protegge da un afflusso
     # di submit non previsto in questa fase.
     AUTO_BETA_ACCESS_MAX_ACCOUNTS: int = int(os.getenv("AUTO_BETA_ACCESS_MAX_ACCOUNTS", "50"))
     # Rate Limiting: max messaggi per utente per finestra di 60 secondi
