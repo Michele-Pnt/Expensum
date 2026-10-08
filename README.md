@@ -1,10 +1,14 @@
 # Expensum
 
-Expensum is an open-source personal finance assistant. It combines a Telegram
-bot, a Flask backend, and a Next.js web app to record and review expenses,
-income, budgets, and reports. Financial data can be stored through the
-PostgreSQL or Notion adapters. AI and messaging integrations are optional and
-require accounts and credentials from their providers.
+Expensum is an open-source personal finance assistant that turns expenses
+shared by text, voice messages, or receipt photos into organized financial
+records. It uses AI to categorize transactions, syncs data with Notion or
+PostgreSQL, and provides reports, spending insights, and forecasts through a
+web dashboard.
+
+The project combines a Telegram bot, a Flask backend, and a Next.js web app.
+AI and messaging integrations are optional and require accounts and credentials
+from their providers.
 
 > This project is under active development. Review generated classifications,
 > summaries, and forecasts before relying on them. Expensum is not financial,
